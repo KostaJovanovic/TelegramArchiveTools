@@ -27,19 +27,22 @@ pub struct Seen {
 
 /// One chat as a `result.json` records it. Every other key is skipped by serde
 /// without being kept, which is what lets a 500 MB file pass through.
+///
+/// Generic over what a message is read as: [`Seen`] for a comparison,
+/// [`Kept`] for an import, which wants a few whole messages out of thousands.
 #[derive(Debug, Deserialize)]
-struct ChatJson {
+struct ChatJson<M> {
     id: Option<i64>,
     #[serde(default)]
     name: Option<String>,
-    #[serde(default)]
-    messages: Vec<Seen>,
+    #[serde(default = "Vec::new")]
+    messages: Vec<M>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ListJson {
-    #[serde(default)]
-    list: Vec<ChatJson>,
+struct ListJson<M> {
+    #[serde(default = "Vec::new")]
+    list: Vec<ChatJson<M>>,
 }
 
 /// A `result.json` is one of two shapes: a single chat (Desktop's "export chat
@@ -50,16 +53,104 @@ struct ListJson {
 /// from [`ChatJson`]: flatten buffers the whole object before handing it on,
 /// and the whole object is the 500 MB of messages.
 #[derive(Debug, Deserialize)]
-struct FileJson {
+struct FileJson<M> {
     id: Option<i64>,
     #[serde(default)]
     name: Option<String>,
+    /// Written by this app into a forum topic's folder; Desktop never splits.
     #[serde(default)]
-    messages: Vec<Seen>,
-    #[serde(default)]
-    chats: Option<ListJson>,
-    #[serde(default)]
-    left_chats: Option<ListJson>,
+    topic_id: Option<i64>,
+    #[serde(default = "Vec::new")]
+    messages: Vec<M>,
+    #[serde(default = "Option::default")]
+    chats: Option<ListJson<M>>,
+    #[serde(default = "Option::default")]
+    left_chats: Option<ListJson<M>>,
+}
+
+/// One chat out of one file: its id, name, topic and messages.
+type Parsed<M> = (i64, Option<String>, Option<i64>, Vec<M>);
+
+/// Read one `result.json` of either shape into its chats.
+fn parse<M: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<Parsed<M>>, String> {
+    let f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let file: FileJson<M> = serde_json::from_reader(std::io::BufReader::with_capacity(1 << 20, f))
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    if let Some(id) = file.id {
+        out.push((id, file.name, file.topic_id, file.messages));
+    }
+    let lists = file.chats.into_iter().chain(file.left_chats);
+    for chat in lists.flat_map(|l| l.list) {
+        if let Some(id) = chat.id {
+            out.push((id, chat.name, None, chat.messages));
+        }
+    }
+    Ok(out)
+}
+
+thread_local! {
+    /// The ids [`Kept`] keeps, for the length of one [`payloads`] call. A
+    /// `Deserialize` impl takes no arguments, and the alternative to passing
+    /// the set this way is holding every message of a 500 MB file at once.
+    static WANTED: std::cell::RefCell<std::collections::HashSet<i64>> = Default::default();
+}
+
+/// A whole message if its id is wanted, nothing otherwise. Each message is
+/// parsed whole and then kept or dropped, so memory is one message plus the
+/// ones asked for.
+struct Kept(Option<serde_json::Map<String, serde_json::Value>>);
+
+impl<'de> Deserialize<'de> for Kept {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let m = serde_json::Map::deserialize(d)?;
+        let id = m.get("id").and_then(serde_json::Value::as_i64);
+        let wanted = id.is_some_and(|id| WANTED.with(|w| w.borrow().contains(&id)));
+        Ok(Kept(wanted.then_some(m)))
+    }
+}
+
+/// A message as an old export wrote it, and the topic its folder was for.
+pub struct Payload {
+    pub topic_id: Option<i64>,
+    pub message: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The whole messages for `wanted` (chat id → ids), read back out of the
+/// files that hold them. The first file to have a message wins, as in
+/// [`read_exports`].
+pub fn payloads(
+    files: &[PathBuf],
+    wanted: &HashMap<i64, std::collections::HashSet<i64>>,
+) -> (HashMap<(i64, i64), Payload>, Vec<Skipped>) {
+    let mut out = HashMap::new();
+    let mut skipped = Vec::new();
+    WANTED.with(|w| *w.borrow_mut() = wanted.values().flatten().copied().collect());
+    for path in files {
+        match parse::<Kept>(path) {
+            Ok(chats) => {
+                for (chat_id, _, topic_id, messages) in chats {
+                    let Some(ids) = wanted.get(&chat_id) else {
+                        continue;
+                    };
+                    for m in messages.into_iter().filter_map(|k| k.0) {
+                        let Some(id) = m.get("id").and_then(serde_json::Value::as_i64) else {
+                            continue;
+                        };
+                        if ids.contains(&id) {
+                            out.entry((chat_id, id)).or_insert(Payload {
+                                topic_id,
+                                message: m,
+                            });
+                        }
+                    }
+                }
+            }
+            Err(e) => skipped.push((path.clone(), e)),
+        }
+    }
+    WANTED.with(|w| w.borrow_mut().clear());
+    (out, skipped)
 }
 
 /// Everything the exports say about one chat, merged across every file that
@@ -112,38 +203,21 @@ pub fn read_exports(files: &[PathBuf]) -> (BTreeMap<i64, Exported>, Vec<Skipped>
     let mut chats: BTreeMap<i64, Exported> = BTreeMap::new();
     let mut skipped = Vec::new();
     for path in files {
-        let parsed = std::fs::File::open(path)
-            .map_err(|e| e.to_string())
-            .and_then(|f| {
-                serde_json::from_reader::<_, FileJson>(std::io::BufReader::with_capacity(
-                    1 << 20,
-                    f,
-                ))
-                .map_err(|e| e.to_string())
-            });
-        let file = match parsed {
-            Ok(f) => f,
+        let parsed = match parse::<Seen>(path) {
+            Ok(p) => p,
             Err(e) => {
                 skipped.push((path.clone(), e));
                 continue;
             }
         };
-        let mut found = 0;
-        let single = ChatJson {
-            id: file.id,
-            name: file.name,
-            messages: file.messages,
-        };
-        let lists = file.chats.into_iter().chain(file.left_chats);
-        for chat in std::iter::once(single).chain(lists.flat_map(|l| l.list)) {
-            let Some(id) = chat.id else { continue };
-            found += 1;
+        let found = parsed.len();
+        for (id, name, _, messages) in parsed {
             let entry = chats.entry(id).or_default();
             if entry.title.is_empty() {
-                entry.title = chat.name.unwrap_or_default();
+                entry.title = name.unwrap_or_default();
             }
             entry.files.insert(path.clone());
-            for m in chat.messages {
+            for m in messages {
                 entry.messages.entry(m.id).or_insert(m);
             }
         }
@@ -165,6 +239,9 @@ pub struct Verdict {
     pub export_files: Vec<PathBuf>,
     pub exported: usize,
     pub database: Option<PathBuf>,
+    /// When the database last finished a sync. An import trusts "missing" to
+    /// mean "deleted on Telegram" only once one has.
+    pub synced: Option<i64>,
     pub stored: usize,
     pub stored_deleted: usize,
     /// In an export, not in the database: the messages only an old export
@@ -212,6 +289,7 @@ pub async fn compare(
             export_files: exported.files.iter().cloned().collect(),
             exported: exported.messages.len(),
             database: archived.files.get(&chat_id).cloned(),
+            synced: archived.synced.get(&chat_id).copied(),
             stored: 0,
             stored_deleted: 0,
             missing: Vec::new(),

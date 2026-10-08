@@ -132,11 +132,85 @@ async fn main() -> Result<()> {
             }
             compare(&roots, &db, csv.as_deref()).await
         }
+        "import" => {
+            let mut db = std::path::PathBuf::from(&settings.output_dir);
+            let mut dry_run = false;
+            let mut roots = Vec::new();
+            let mut rest = args.iter().skip(1);
+            while let Some(a) = rest.next() {
+                match a.as_str() {
+                    "--db" => {
+                        db = rest
+                            .next()
+                            .ok_or_else(|| anyhow!("--db needs a folder"))?
+                            .into()
+                    }
+                    "--dry-run" => dry_run = true,
+                    f if f.starts_with("--") => {
+                        return Err(anyhow!("unknown flag {f:?}\n\n{USAGE}"))
+                    }
+                    folder => roots.push(std::path::PathBuf::from(folder)),
+                }
+            }
+            if roots.is_empty() {
+                return Err(anyhow!(
+                    "usage: tgx import <export folder>... [--db <folder>] [--dry-run]"
+                ));
+            }
+            import(&roots, &db, dry_run).await
+        }
         _ => {
             println!("{USAGE}");
             Ok(())
         }
     }
+}
+
+/// `tgx import`: copy what only old exports hold into the databases.
+///
+/// Prints ids and counts only, like `compare`.
+async fn import(roots: &[std::path::PathBuf], db: &std::path::Path, dry_run: bool) -> Result<()> {
+    use tgx_tg::compare;
+    use tgx_tg::import::Outcome;
+    let files = compare::find_results(roots, 4);
+    println!("reading {} result.json file(s)…", files.len());
+    let (exports, mut skipped) = compare::read_exports(&files);
+    let (verdicts, unreadable) = compare::compare(exports, db).await?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (done, more) = tgx_tg::import::import(&verdicts, &files, dry_run, now).await;
+    skipped.extend(more);
+
+    let verb = if dry_run { "would import" } else { "imported" };
+    let mut total = 0;
+    for c in &done {
+        println!();
+        println!("{} (id {})", c.title, c.chat_id);
+        println!("  database: {}", c.database.display());
+        match &c.outcome {
+            Outcome::Imported { messages } => {
+                total += messages;
+                println!("  {verb} {messages} message(s), marked deleted and recovered");
+            }
+            Outcome::NotSynced => println!(
+                "  skipped — this database never finished a sync, so a message it lacks may \
+                 just not be read yet; sync it first"
+            ),
+            Outcome::Failed(e) => println!("  FAILED: {e}"),
+        }
+    }
+    if done.is_empty() {
+        println!("nothing to import — no database lacks a message these exports hold");
+    } else {
+        println!();
+        println!("{verb} {total} message(s) in total. Media bytes are not imported: the export folder still holds those files.");
+    }
+    for (path, why) in skipped.iter().chain(&unreadable) {
+        println!("skipped {}: {why}", path.display());
+    }
+    Ok(())
 }
 
 /// `tgx compare`: what old exports hold that the databases do not.
@@ -275,6 +349,10 @@ tgx — Telegram Desktop-format exporter
   tgx compare <export folder>... [--db <folder>] [--csv <file>]
                        offline: list messages old Desktop-format exports hold
                        that the databases do not (ids and dates only)
+  tgx import <export folder>... [--db <folder>] [--dry-run]
+                       offline: copy those messages into the databases, marked
+                       deleted and recovered (only into a database that has
+                       finished a sync)
 
   export flags:
     --db      Database mode instead of folders: sync into the chat's own

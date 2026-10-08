@@ -8,6 +8,7 @@ pub mod download;
 pub mod engine;
 pub mod enrich;
 pub mod error;
+pub mod import;
 pub mod logging;
 pub mod output;
 pub mod plan;

@@ -674,6 +674,45 @@ impl Store {
         Ok(gone.len())
     }
 
+    /// Mark one message gone from Telegram as of `now`, unless it already is.
+    ///
+    /// For a message recovered from an old export by `tgx import`: a finished
+    /// walk already went past it and did not see it, which is the same
+    /// conclusion [`Self::mark_unseen_deleted`] draws, reached a run later.
+    pub async fn mark_deleted(&self, chat_id: i64, id: i64, now: i64) -> Result<(), Error> {
+        self.conn
+            .execute(
+                "UPDATE messages SET deleted_seen = ?3
+                  WHERE chat_id = ?1 AND id = ?2 AND deleted_seen IS NULL",
+                params![chat_id, id, now],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// The ids recovered from old exports rather than read from Telegram.
+    ///
+    /// **No column says so, by design** — a schema change would lock every
+    /// older build out of the file. An import writes a `runs` row with mode
+    /// `import` and merges at that row's `started`, so a recovered message is
+    /// one whose `first_seen` is an import's start.
+    pub async fn recovered(&self, chat_id: i64) -> Result<HashSet<i64>, Error> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id FROM messages
+                  WHERE chat_id = ?1 AND first_seen IN
+                        (SELECT started FROM runs WHERE chat_id = ?1 AND mode = 'import')",
+                params![chat_id],
+            )
+            .await?;
+        let mut out = HashSet::new();
+        while let Some(row) = rows.next().await? {
+            out.insert(row.get::<i64>(0)?);
+        }
+        Ok(out)
+    }
+
     /// How many superseded payloads this chat has accumulated.
     ///
     /// One per time a re-read found a message different from the stored one.
