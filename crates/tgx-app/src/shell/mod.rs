@@ -571,6 +571,16 @@ mod shot {
             .map(|s| s.to_lowercase())
     }
 
+    /// `TGX_SHOT_FIND=<label>`: once the database loads, bring the first
+    /// message whose media label contains it (`photo`, `sticker`, `poll`…)
+    /// into view — so the picture is of the thing being checked.
+    pub(super) fn find() -> Option<String> {
+        std::env::var("TGX_SHOT_FIND")
+            .ok()
+            .filter(|s| !s.is_empty() && path().is_some())
+            .map(|s| s.to_lowercase())
+    }
+
     pub(super) fn view() -> Option<View> {
         match std::env::var("TGX_SHOT_VIEW").ok()?.as_str() {
             "chats" => Some(View::Chats),
@@ -701,7 +711,12 @@ impl eframe::App for Shell {
         if let Some(to) = shot::path() {
             // The viewer reads its database on a worker; a frame taken while
             // it still says "Reading…" is a photograph of nothing.
-            if self.viewer.listing || self.viewer.loading {
+            let pictures_pending = self
+                .viewer
+                .pictures
+                .values()
+                .any(|p| matches!(p, bubbles::Pic::Loading | bubbles::Pic::Decoded(_)));
+            if self.viewer.listing || self.viewer.loading || pictures_pending {
                 self.shot_busy_until = self.frame_no;
             }
             shot::tick(ctx, self.frame_no.saturating_sub(self.shot_busy_until), &to);

@@ -154,7 +154,22 @@ pub(super) struct ViewerState {
     /// push what is being read down the screen.
     pub(super) last_offset: f32,
     pub(super) scroll_adjust: f32,
+
+    /// The pictures asked for, by message id, and the frame each was last
+    /// painted on — what decides which go when there are too many.
+    pub(super) pictures: HashMap<i64, bubbles::Pic>,
+    pub(super) pic_used: HashMap<i64, u64>,
+    pub(super) frame: u64,
 }
+
+/// Pictures kept as textures at once. At most 720px a side, so this bounds
+/// the viewer's video memory at a little under 300 MB in the worst case and
+/// far less in practice.
+const PICTURES_KEPT: usize = 160;
+/// Pictures being read and decoded at once. Past it, the rest wait for the
+/// next frame — so a fast scroll asks for what it stops on, not for every
+/// photo it flew past.
+const PICTURES_IN_FLIGHT: usize = 6;
 
 impl ViewerState {
     fn rebuild_shown(&mut self) {
@@ -571,6 +586,19 @@ impl Shell {
         }
         let width = ui.available_width();
         let v = &mut self.viewer;
+        v.frame += 1;
+        // Decoded pictures become textures here, the one place with a
+        // context to upload them to.
+        for (id, pic) in v.pictures.iter_mut() {
+            if let bubbles::Pic::Decoded(img) = pic {
+                let tex = ui.ctx().load_texture(
+                    format!("viewer-pic-{id}"),
+                    (**img).clone(),
+                    egui::TextureOptions::LINEAR,
+                );
+                *pic = bubbles::Pic::Ready(tex);
+            }
+        }
         if v.heights.len() != v.items.len() || (v.laid_width - width).abs() > 0.5 {
             v.laid_width = width;
             v.heights = v
@@ -582,6 +610,7 @@ impl Shell {
         }
 
         let names = v.mixing_topics().then_some(&v.topic_names);
+        let painted = std::cell::RefCell::new(Vec::new());
         let scene = bubbles::Scene {
             rows: &v.rows,
             index: &v.index,
@@ -589,6 +618,8 @@ impl Shell {
             hits: &v.hit_set,
             topic_names: names,
             ink,
+            pictures: &v.pictures,
+            painted: &painted,
         };
 
         let mut area = egui::ScrollArea::vertical()
@@ -669,11 +700,102 @@ impl Shell {
             // rather than leave this frame's overlaps on screen.
             ui.ctx().request_repaint();
         }
+        let painted = painted.into_inner();
+        self.viewer_want_pictures(&painted);
         match click {
             Some(bubbles::Click::Select(id)) => self.viewer_select(id, false),
             Some(bubbles::Click::Jump(id)) => self.viewer_select(id, true),
+            Some(bubbles::Click::Open(id)) => {
+                self.viewer_select(id, false);
+                self.viewer_open_message_media(id);
+            }
+            Some(bubbles::Click::Url(url)) => {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+            }
             None => {}
         }
+    }
+
+    /// The pictures painted this frame: keep the ones held, ask for the ones
+    /// not, and let the least recently seen go once too many are held.
+    fn viewer_want_pictures(&mut self, painted: &[i64]) {
+        let Some(db) = self.viewer.open.clone() else {
+            return;
+        };
+        let v = &mut self.viewer;
+        let frame = v.frame;
+        let in_flight = v
+            .pictures
+            .values()
+            .filter(|p| matches!(p, bubbles::Pic::Loading))
+            .count();
+        let mut ask = Vec::new();
+        for &id in painted {
+            v.pic_used.insert(id, frame);
+            if !v.pictures.contains_key(&id) && in_flight + ask.len() < PICTURES_IN_FLIGHT {
+                v.pictures.insert(id, bubbles::Pic::Loading);
+                ask.push(id);
+            }
+        }
+        let held = v
+            .pictures
+            .values()
+            .filter(|p| matches!(p, bubbles::Pic::Ready(_)))
+            .count();
+        if held > PICTURES_KEPT {
+            let mut ready: Vec<(u64, i64)> = v
+                .pictures
+                .iter()
+                .filter(|(_, p)| matches!(p, bubbles::Pic::Ready(_)))
+                .map(|(id, _)| (v.pic_used.get(id).copied().unwrap_or(0), *id))
+                .collect();
+            ready.sort_unstable();
+            for (used, id) in ready.into_iter().take(held - PICTURES_KEPT) {
+                if used == frame {
+                    break;
+                }
+                v.pictures.remove(&id);
+                v.pic_used.remove(&id);
+            }
+        }
+        if ask.is_empty() {
+            return;
+        }
+        let tx = self.bridge.sender();
+        self.bridge.spawn(async move {
+            crate::actions::viewer::pictures(db.path, db.chat_id, ask, tx).await
+        });
+    }
+
+    /// A picture came back. Kept only if its chat is still the one open.
+    pub(super) fn viewer_picture(
+        &mut self,
+        path: &std::path::Path,
+        chat_id: i64,
+        id: i64,
+        image: Option<std::sync::Arc<egui::ColorImage>>,
+        has_file: bool,
+    ) {
+        if !self.viewer.is_open(path, chat_id) {
+            return;
+        }
+        let pic = match image {
+            Some(img) => bubbles::Pic::Decoded(img),
+            None if has_file => bubbles::Pic::NoPreview,
+            None => bubbles::Pic::Missing,
+        };
+        self.viewer.pictures.insert(id, pic);
+    }
+
+    fn viewer_open_message_media(&mut self, id: i64) {
+        let Some(db) = self.viewer.open.clone() else {
+            return;
+        };
+        self.status = "Opening…".into();
+        let tx = self.bridge.sender();
+        self.bridge.spawn(async move {
+            crate::actions::viewer::open_message_media(db.path, db.chat_id, id, tx).await
+        });
     }
 
     /// The hits of a search across every database. A click opens that chat at
@@ -857,11 +979,14 @@ impl Shell {
         let chat_id = db.chat_id;
         let v = &mut self.viewer;
         if !v.is_open(&path, chat_id) {
-            // Another chat's hits and topics mean nothing in this one.
+            // Another chat's hits, topics and pictures mean nothing in this
+            // one — a picture is keyed by message id, and ids repeat.
             v.set_hits(Vec::new());
             v.topic = None;
             v.topics.clear();
             v.topic_names.clear();
+            v.pictures.clear();
+            v.pic_used.clear();
         }
         v.open = Some(db);
         v.loading = true;
@@ -1095,6 +1220,15 @@ impl Shell {
         }
         v.topics = topics;
         v.rebuild_shown();
+        if v.select_after_load.is_none() {
+            if let Some(want) = super::shot::find() {
+                v.select_after_load = v
+                    .rows
+                    .iter()
+                    .find(|r| r.media.as_deref().is_some_and(|m| m.contains(&want)))
+                    .map(|r| r.id);
+            }
+        }
         if let Some(id) = v.select_after_load.take() {
             self.viewer_select(id, true);
         }

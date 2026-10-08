@@ -166,6 +166,18 @@ pub enum Event {
         id: i64,
         detail: Result<Option<Box<tgx_tg::viewer::Detail>>, String>,
     },
+    /// One message's picture, decoded and scaled for the screen — or `None`
+    /// when the database holds nothing that decodes, so the bubble falls back
+    /// to a card. Carries the database, so a picture for a chat since closed is
+    /// dropped.
+    ViewerPicture {
+        path: std::path::PathBuf,
+        chat_id: i64,
+        id: i64,
+        image: Option<std::sync::Arc<eframe::egui::ColorImage>>,
+        /// The file itself is in the database, picture or not.
+        has_file: bool,
+    },
     /// What a search found. `scope` is the chat searched, or `None` for every
     /// database in the destination; with `needle`, it is how an answer to a
     /// question nobody is asking any more is recognised and dropped.

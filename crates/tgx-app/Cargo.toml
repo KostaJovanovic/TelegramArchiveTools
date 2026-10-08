@@ -34,6 +34,12 @@ egui_extras = { version = "0.33", default-features = false }
 # know.
 rfd = "0.16"
 
+# The Viewer's pictures: photos, stickers, and the frames of videos and GIFs,
+# decoded out of the database. eframe already links this crate for its window
+# icon, with PNG only; the formats Telegram actually stores are added here —
+# and here rather than in `tgx-tg`, so the `tgx` CLI carries no decoders.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 anyhow = { workspace = true }
 chrono = { workspace = true }

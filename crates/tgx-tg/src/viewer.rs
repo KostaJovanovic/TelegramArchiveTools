@@ -85,6 +85,14 @@ pub struct Row {
     /// What else is known of it: `1280×720`, `0:42`, a file's name.
     pub media_detail: Option<String>,
     pub reply_to: Option<i64>,
+    /// What the message carries besides its text, in a shape the bubble can
+    /// draw: a picture, a player, a card. `None` for plain text.
+    pub attachment: Option<Attachment>,
+    /// The export left the file out — Desktop's `(File not included…)` in
+    /// place of a path — so there are no bytes anywhere to show.
+    pub file_skipped: bool,
+    /// Each reaction as its emoji and how many gave it.
+    pub reactions: Vec<(String, i64)>,
     /// "Forwarded from" whom.
     pub forwarded: Option<String>,
     /// The payload's own `edited` stamp — Telegram's, so a real edit, unlike
@@ -103,10 +111,102 @@ pub struct Row {
 }
 
 impl Row {
-    /// The payload has changed since it was first stored.
+    /// Edited: Telegram stamped it as edited, or the database has seen it
+    /// change since it was first stored. The bubble's "edited" marker, the
+    /// Edited filter and the count beneath the list all ask this, so the
+    /// three cannot disagree.
     pub fn edited(&self) -> bool {
-        self.version > 1
+        self.version > 1 || self.edited_at.is_some()
     }
+}
+
+/// What a message carries, one variant per way Telegram draws it.
+///
+/// **Every media key the export writes lands in one of these**, so nothing a
+/// message held reaches the screen as a bare label. Read off Desktop's keys —
+/// the payload — and not off the `media` table, so a message whose file was
+/// never stored still says what it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Attachment {
+    /// Something to look at. The bytes come from [`picture_bytes`].
+    Visual {
+        kind: Visual,
+        /// `[width, height]` as the payload gives them; `[0, 0]` when it does
+        /// not, until the picture's own size is known.
+        size: [u32; 2],
+        duration: Option<i64>,
+    },
+    Voice {
+        duration: Option<i64>,
+    },
+    Audio {
+        title: String,
+        performer: String,
+        duration: Option<i64>,
+    },
+    /// Any other file: its name, its size in bytes, its extension.
+    Document {
+        name: String,
+        size: Option<i64>,
+        ext: String,
+    },
+    Poll(Poll),
+    Location {
+        title: String,
+        address: String,
+        /// As the export wrote them, so the text matches the HTML.
+        lat: String,
+        lon: String,
+        live: bool,
+    },
+    Contact {
+        name: String,
+        /// For the userpic, by Desktop's rule.
+        initials: String,
+        phone: String,
+    },
+    Game {
+        title: String,
+        description: String,
+    },
+    Invoice {
+        title: String,
+        description: String,
+        amount: String,
+    },
+    Dice {
+        emoji: String,
+        value: i64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visual {
+    Photo,
+    /// An image sent as a file.
+    Image,
+    Sticker,
+    Video,
+    Gif,
+    /// A round video message.
+    Round,
+}
+
+/// A poll as the export recorded it: Desktop's own fields, nothing derived.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Poll {
+    pub question: String,
+    pub answers: Vec<PollAnswer>,
+    pub total: i64,
+    pub closed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PollAnswer {
+    pub text: String,
+    pub voters: i64,
+    /// The exporting account's own vote.
+    pub chosen: bool,
 }
 
 /// One forum topic that holds messages.
@@ -188,6 +288,13 @@ fn row_of(m: tgx_archive::StoredMessage, recovered: &std::collections::HashSet<i
         media: media_label(p),
         media_detail: media_detail(p),
         reply_to: p.get("reply_to_message_id").and_then(Value::as_i64),
+        attachment: attachment_of(p),
+        file_skipped: ["photo", "file"].iter().any(|k| {
+            p.get(*k)
+                .and_then(Value::as_str)
+                .is_some_and(|v| v.starts_with("(File"))
+        }),
+        reactions: reactions_of(p),
         forwarded: p
             .get("forwarded_from")
             .and_then(Value::as_str)
@@ -522,12 +629,286 @@ fn media_label(p: &Map<String, Value>) -> Option<String> {
         ("poll", "[poll]"),
         ("location_information", "[location]"),
         ("contact_information", "[contact]"),
+        ("game_title", "[game]"),
+        ("invoice_information", "[invoice]"),
+        ("dice_emoji", "[dice]"),
     ] {
         if p.contains_key(key) {
             return Some(label.into());
         }
     }
     None
+}
+
+fn str_of(m: &Map<String, Value>, k: &str) -> String {
+    match m.get(k) {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        // A poll's question and answers can carry entities, like a message.
+        Some(v @ Value::Array(_)) => tgx_archive::plain_text(v),
+        _ => String::new(),
+    }
+}
+
+fn int_of(m: &Map<String, Value>, k: &str) -> Option<i64> {
+    match m.get(k)? {
+        Value::Number(n) => n.as_i64(),
+        Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+/// What the message carries, as the bubble draws it. See [`Attachment`].
+fn attachment_of(p: &Map<String, Value>) -> Option<Attachment> {
+    let dim = |k: &str| {
+        int_of(p, k)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0)
+    };
+    let size = [dim("width"), dim("height")];
+    let duration = int_of(p, "duration_seconds");
+    if p.contains_key("photo") {
+        return Some(Attachment::Visual {
+            kind: Visual::Photo,
+            size,
+            duration: None,
+        });
+    }
+    if p.contains_key("file") {
+        let mime = str_of(p, "mime_type");
+        let visual = match p.get("media_type").and_then(Value::as_str) {
+            Some("sticker") => Some(Visual::Sticker),
+            Some("video_file") => Some(Visual::Video),
+            Some("animation") => Some(Visual::Gif),
+            Some("video_message") => Some(Visual::Round),
+            Some("voice_message") => return Some(Attachment::Voice { duration }),
+            Some("audio_file") => {
+                return Some(Attachment::Audio {
+                    title: str_of(p, "title"),
+                    performer: str_of(p, "performer"),
+                    duration,
+                })
+            }
+            _ if mime.starts_with("image/") => Some(Visual::Image),
+            _ if mime.starts_with("video/") => Some(Visual::Video),
+            _ => None,
+        };
+        if let Some(kind) = visual {
+            return Some(Attachment::Visual {
+                kind,
+                size,
+                duration,
+            });
+        }
+        let name = str_of(p, "file_name");
+        let ext = name
+            .rsplit_once('.')
+            .map(|(_, e)| e.to_uppercase())
+            .filter(|e| !e.is_empty() && e.len() <= 5)
+            .unwrap_or_else(|| "FILE".into());
+        return Some(Attachment::Document {
+            name: if name.is_empty() { "File".into() } else { name },
+            size: int_of(p, "file_size"),
+            ext,
+        });
+    }
+    if let Some(Value::Object(poll)) = p.get("poll") {
+        return Some(Attachment::Poll(Poll {
+            question: str_of(poll, "question"),
+            closed: poll.get("closed").and_then(Value::as_bool).unwrap_or(false),
+            total: int_of(poll, "total_voters").unwrap_or(0),
+            answers: poll
+                .get("answers")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_object)
+                        .map(|a| PollAnswer {
+                            text: str_of(a, "text"),
+                            voters: int_of(a, "voters").unwrap_or(0),
+                            chosen: a.get("chosen").and_then(Value::as_bool).unwrap_or(false),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }));
+    }
+    if let Some(Value::Object(loc)) = p.get("location_information") {
+        let live = p.contains_key("live_location_period_seconds");
+        let place = str_of(p, "place_name");
+        return Some(Attachment::Location {
+            title: if !place.is_empty() {
+                place
+            } else if live {
+                "Live location".into()
+            } else {
+                "Location".into()
+            },
+            address: str_of(p, "address"),
+            lat: str_of(loc, "latitude"),
+            lon: str_of(loc, "longitude"),
+            live,
+        });
+    }
+    if let Some(Value::Object(c)) = p.get("contact_information") {
+        let name = [str_of(c, "first_name"), str_of(c, "last_name")]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Some(Attachment::Contact {
+            initials: tgx_format::peer::initials_from_name(&name),
+            name: if name.is_empty() {
+                "Contact".into()
+            } else {
+                name
+            },
+            phone: str_of(c, "phone_number"),
+        });
+    }
+    if p.contains_key("game_title") {
+        return Some(Attachment::Game {
+            title: str_of(p, "game_title"),
+            description: str_of(p, "game_description"),
+        });
+    }
+    if let Some(Value::Object(inv)) = p.get("invoice_information") {
+        let amount = match (int_of(inv, "amount"), str_of(inv, "currency")) {
+            // Telegram's amounts are in the currency's smallest unit.
+            (Some(a), c) if !c.is_empty() => format!("{}.{:02} {c}", a / 100, (a % 100).abs()),
+            (Some(a), _) => a.to_string(),
+            (None, _) => String::new(),
+        };
+        return Some(Attachment::Invoice {
+            title: str_of(inv, "title"),
+            description: str_of(inv, "description"),
+            amount,
+        });
+    }
+    if p.contains_key("dice_emoji") {
+        return Some(Attachment::Dice {
+            emoji: str_of(p, "dice_emoji"),
+            value: int_of(p, "dice_value").unwrap_or(0),
+        });
+    }
+    None
+}
+
+/// Each reaction as its emoji and its count. A custom emoji has no glyph in
+/// the export, so it is drawn as Desktop's HTML draws it.
+fn reactions_of(p: &Map<String, Value>) -> Vec<(String, i64)> {
+    p.get("reactions")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_object)
+                .map(|r| {
+                    let glyph = match r.get("emoji").and_then(Value::as_str) {
+                        Some(e) if !e.is_empty() => e.to_string(),
+                        _ => tgx_html::reactions::CUSTOM_REACTION_GLYPH.to_string(),
+                    };
+                    (glyph, int_of(r, "count").unwrap_or(0))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What [`picture_bytes`] found for one message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pictured {
+    pub id: i64,
+    /// Encoded images that could stand for it, best first.
+    pub candidates: Vec<Vec<u8>>,
+    /// The database holds the file itself — so a video with no thumbnail is
+    /// still there to play, and is not "not saved".
+    pub has_file: bool,
+}
+
+/// The largest stored file the viewer will decode into a picture. A photo is
+/// a few megabytes; a 200 MB TIFF sent as a document is not worth a stall.
+const PICTURE_MAX_BYTES: i64 = 32 * 1024 * 1024;
+
+/// Is this stored file itself a picture, rather than something with one?
+fn is_picture_file(m: &tgx_archive::MediaEntry) -> bool {
+    match m.kind.as_str() {
+        "photos" | "stickers" => true,
+        "files" => {
+            let name = m.file_name.as_deref().unwrap_or(&m.path).to_lowercase();
+            [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"]
+                .iter()
+                .any(|e| name.ends_with(e))
+        }
+        _ => false,
+    }
+}
+
+/// For each message, the encoded images that could stand for it, best
+/// first: the file itself when it is a picture, then Telegram's thumbnail of
+/// it, then the export's own `_thumb`. The window decodes them and keeps the
+/// first that decodes — an animated sticker (`.tgs`) is not an image and
+/// falls through to its thumbnail.
+///
+/// **Never a video's bytes**: only its thumbnail is read.
+pub async fn picture_bytes(
+    path: &Path,
+    chat_id: i64,
+    ids: Vec<i64>,
+) -> Result<Vec<Pictured>, tgx_archive::Error> {
+    let path = path.to_path_buf();
+    off_the_runtime(async move {
+        let store = tgx_archive::Store::open_read(&path).await?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            let entries = store.media_of(chat_id, id).await?;
+            let mut found = Vec::new();
+            let (thumbs, files): (Vec<_>, Vec<_>) =
+                entries.iter().partition(|m| m.role == "thumbnail");
+            for m in &files {
+                if is_picture_file(m) && m.size.is_some_and(|s| s <= PICTURE_MAX_BYTES) {
+                    if let Some(b) = store.blob(m.file_id, &m.kind).await? {
+                        found.push(b);
+                    }
+                }
+            }
+            for m in &files {
+                if let Some(b) = store.thumb(m.file_id, &m.kind).await? {
+                    found.push(b);
+                }
+            }
+            for m in &thumbs {
+                if m.size.is_some_and(|s| s <= PICTURE_MAX_BYTES) {
+                    if let Some(b) = store.blob(m.file_id, &m.kind).await? {
+                        found.push(b);
+                    }
+                }
+            }
+            out.push(Pictured {
+                id,
+                candidates: found,
+                has_file: files.iter().any(|m| m.size.is_some()),
+            });
+        }
+        Ok(out)
+    })
+    .await
+}
+
+/// The file a click on a message's media opens: the file itself, not its
+/// thumbnail, and only one whose bytes the database holds.
+pub async fn main_file(
+    path: &Path,
+    chat_id: i64,
+    id: i64,
+) -> Result<Option<Media>, tgx_archive::Error> {
+    let files = media(path, chat_id, id).await?;
+    let stored = |m: &&Media| m.size.is_some();
+    Ok(files
+        .iter()
+        .filter(stored)
+        .find(|m| m.role != "thumbnail")
+        .or_else(|| files.iter().find(stored))
+        .cloned())
 }
 
 /// Desktop's `2025-12-18T16:00:00` as `2025-12-18 16:00`.
@@ -698,6 +1079,163 @@ mod tests {
         assert_eq!(out, temp_dir().join("991").join("evil.txt"));
         assert_eq!(std::fs::read(&out).unwrap(), b"hi");
         let _ = std::fs::remove_dir_all(temp_dir().join("991"));
+    }
+
+    fn attach(v: Value) -> Option<Attachment> {
+        attachment_of(v.as_object().unwrap())
+    }
+
+    #[test]
+    fn every_kind_of_media_the_export_writes_becomes_something_to_draw() {
+        let visual = |v: Value| match attach(v) {
+            Some(Attachment::Visual { kind, size, .. }) => (kind, size),
+            other => panic!("not a picture: {other:?}"),
+        };
+        assert_eq!(
+            visual(json!({"photo": "photos/a.jpg", "width": 800, "height": 600})),
+            (Visual::Photo, [800, 600])
+        );
+        // Skipped by the export still says what it was.
+        assert_eq!(
+            visual(
+                json!({"photo": "(File not included. Change data exporting settings to download.)"})
+            )
+            .0,
+            Visual::Photo
+        );
+        for (media_type, kind) in [
+            ("sticker", Visual::Sticker),
+            ("video_file", Visual::Video),
+            ("animation", Visual::Gif),
+            ("video_message", Visual::Round),
+        ] {
+            assert_eq!(
+                visual(json!({"file": "x", "media_type": media_type})).0,
+                kind
+            );
+        }
+        assert_eq!(
+            visual(json!({"file": "a.png", "mime_type": "image/png"})).0,
+            Visual::Image
+        );
+        assert_eq!(
+            attach(json!({"file": "v.ogg", "media_type": "voice_message", "duration_seconds": 42})),
+            Some(Attachment::Voice { duration: Some(42) })
+        );
+        assert!(matches!(
+            attach(json!({"file": "a.mp3", "media_type": "audio_file", "title": "Pesma", "performer": "Bend"})),
+            Some(Attachment::Audio { title, performer, .. }) if title == "Pesma" && performer == "Bend"
+        ));
+        assert_eq!(
+            attach(json!({"file": "f", "file_name": "plan.pdf", "file_size": 2048})),
+            Some(Attachment::Document {
+                name: "plan.pdf".into(),
+                size: Some(2048),
+                ext: "PDF".into()
+            })
+        );
+        match attach(
+            json!({"poll": {"question": "Kad?", "closed": true, "total_voters": 3,
+            "answers": [{"text": "sutra", "voters": 2, "chosen": true}, {"text": "nikad", "voters": 1, "chosen": false}]}}),
+        ) {
+            Some(Attachment::Poll(p)) => {
+                assert_eq!(p.question, "Kad?");
+                assert!(p.closed);
+                assert_eq!(p.total, 3);
+                assert_eq!(p.answers.len(), 2);
+                assert!(p.answers[0].chosen && p.answers[0].voters == 2);
+            }
+            other => panic!("not a poll: {other:?}"),
+        }
+        assert!(matches!(
+            attach(json!({"location_information": {"latitude": 44.8, "longitude": 20.4},
+                "place_name": "Trg", "address": "Beograd"})),
+            Some(Attachment::Location { title, address, lat, live: false, .. })
+                if title == "Trg" && address == "Beograd" && lat == "44.8"
+        ));
+        assert!(matches!(
+            attach(json!({"contact_information": {"first_name": "Ana", "last_name": "B", "phone_number": "+381"}})),
+            Some(Attachment::Contact { name, phone, .. }) if name == "Ana B" && phone == "+381"
+        ));
+        assert!(matches!(
+            attach(json!({"game_title": "Igra", "game_description": "opis"})),
+            Some(Attachment::Game { title, .. }) if title == "Igra"
+        ));
+        assert!(matches!(
+            attach(json!({"invoice_information": {"title": "Račun", "amount": 1250, "currency": "EUR"}})),
+            Some(Attachment::Invoice { amount, .. }) if amount == "12.50 EUR"
+        ));
+        assert_eq!(
+            attach(json!({"dice_emoji": "🎲", "dice_value": 5})),
+            Some(Attachment::Dice {
+                emoji: "🎲".into(),
+                value: 5
+            })
+        );
+        assert_eq!(attach(json!({"text": "plain"})), None);
+    }
+
+    #[test]
+    fn reactions_keep_their_emoji_and_count_and_a_custom_one_gets_a_glyph() {
+        let p = json!({"reactions": [
+            {"type": "emoji", "count": 3, "emoji": "❤"},
+            {"type": "custom_emoji", "count": 1, "document_id": "5"}
+        ]});
+        let r = reactions_of(p.as_object().unwrap());
+        assert_eq!(r[0], ("❤".to_string(), 3));
+        assert_eq!(r[1].1, 1);
+        assert!(!r[1].0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_picture_is_the_file_itself_then_its_thumbnail_and_never_a_video() {
+        let path = tmp("pictures");
+        {
+            let s = tgx_archive::Store::open(&path).await.unwrap();
+            s.merge(7, 1, None, &msg(1, json!("")), 100).await.unwrap();
+            s.merge(7, 2, None, &msg(2, json!("")), 100).await.unwrap();
+            s.merge(7, 3, None, &msg(3, json!("")), 100).await.unwrap();
+            // A photo: its own bytes.
+            s.put_blob(10, "photos", "image/jpeg", None, b"photo", 1)
+                .await
+                .unwrap();
+            s.link_media(7, 1, "photo", 10, "photos", "photos/p.jpg")
+                .await
+                .unwrap();
+            // An animated sticker: its bytes first, Telegram's thumbnail next.
+            s.put_blob(11, "stickers", "application/x-tgsticker", None, b"tgs", 1)
+                .await
+                .unwrap();
+            s.put_thumb(11, "stickers", b"thumb").await.unwrap();
+            s.link_media(7, 2, "file", 11, "stickers", "stickers/s.tgs")
+                .await
+                .unwrap();
+            // A video: only its thumbnail, never the film.
+            s.put_blob(12, "video_files", "video/mp4", None, b"film", 1)
+                .await
+                .unwrap();
+            s.put_thumb(12, "video_files", b"frame").await.unwrap();
+            s.link_media(7, 3, "file", 12, "video_files", "video_files/v.mp4")
+                .await
+                .unwrap();
+        }
+        let got = picture_bytes(&path, 7, vec![1, 2, 3, 4]).await.unwrap();
+        let got: Vec<(i64, Vec<Vec<u8>>, bool)> = got
+            .into_iter()
+            .map(|p| (p.id, p.candidates, p.has_file))
+            .collect();
+        assert_eq!(got[0], (1, vec![b"photo".to_vec()], true));
+        assert_eq!(got[1], (2, vec![b"tgs".to_vec(), b"thumb".to_vec()], true));
+        assert_eq!(got[2], (3, vec![b"frame".to_vec()], true));
+        assert_eq!(
+            got[3],
+            (4, vec![], false),
+            "a message with no media has none"
+        );
+        // A click opens the file, not the thumbnail.
+        let file = main_file(&path, 7, 3).await.unwrap().unwrap();
+        assert_eq!(file.file_id, 12);
+        assert!(main_file(&path, 7, 4).await.unwrap().is_none());
     }
 
     #[test]

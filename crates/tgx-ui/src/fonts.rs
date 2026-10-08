@@ -84,6 +84,60 @@ pub fn definitions() -> FontDefinitions {
     fonts
 }
 
+/// [`definitions`], with Windows' own faces behind every family as
+/// fallbacks — **the one exception to "no face outside this design"**, and
+/// only for glyphs Geist does not have.
+///
+/// The Viewer shows other people's messages, and those are full of emoji and
+/// of scripts Geist was never meant to cover: in the text, in reactions, in
+/// chat titles like `｡◕‿◕｡`. Without a fallback every one drew as an empty
+/// box. The faces are read from the system at run time, not embedded, so the
+/// binary does not grow; on a machine without them the window is exactly
+/// [`definitions`]. egui draws emoji in outline, one colour, which is still
+/// recognisably the emoji.
+pub fn with_system_fallbacks() -> FontDefinitions {
+    let mut fonts = definitions();
+    for (key, bytes, index) in system_fallbacks() {
+        let mut data = FontData::from_static(bytes);
+        data.index = *index;
+        fonts.font_data.insert((*key).to_owned(), data.into());
+        for family in fonts.families.values_mut() {
+            family.push((*key).to_owned());
+        }
+    }
+    fonts
+}
+
+/// The fallbacks, in the order a missing glyph is looked for, read once per
+/// process: emoji first, so a heart is the emoji's heart and not a symbol
+/// font's; then Segoe UI for Greek, Arabic, Hebrew and the rest of the
+/// alphabets; then the symbols; then Microsoft YaHei for CJK and the
+/// half-width forms.
+fn system_fallbacks() -> &'static [(&'static str, &'static [u8], u32)] {
+    static FACES: std::sync::OnceLock<Vec<(&'static str, &'static [u8], u32)>> =
+        std::sync::OnceLock::new();
+    FACES.get_or_init(|| {
+        let dir = std::env::var_os("WINDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| "C:\\Windows".into())
+            .join("Fonts");
+        [
+            ("system-emoji", "seguiemj.ttf", 0),
+            ("system-ui", "segoeui.ttf", 0),
+            ("system-symbol", "seguisym.ttf", 0),
+            ("system-cjk", "msyh.ttc", 0),
+        ]
+        .into_iter()
+        .filter_map(|(key, file, index)| {
+            let bytes = std::fs::read(dir.join(file)).ok()?;
+            // Leaked on purpose: read once, used for the life of the
+            // process, and egui wants `'static` bytes.
+            Some((key, &*Box::leak(bytes.into_boxed_slice()), index))
+        })
+        .collect()
+    })
+}
+
 /// The sans, at a size.
 pub fn sans(size: f32) -> FontId {
     FontId::new(size, FontFamily::Proportional)

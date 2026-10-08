@@ -107,6 +107,13 @@ impl Shell {
                 id,
                 detail,
             } => self.viewer_detail(chat_id, id, detail),
+            Event::ViewerPicture {
+                path,
+                chat_id,
+                id,
+                image,
+                has_file,
+            } => self.viewer_picture(&path, chat_id, id, image, has_file),
             Event::SearchHits {
                 needle,
                 scope,

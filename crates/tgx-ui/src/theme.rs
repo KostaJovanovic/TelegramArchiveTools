@@ -29,7 +29,7 @@ use eframe::egui::{self, Context, CornerRadius, Stroke, TextStyle};
 ///
 /// Call once at startup, and again whenever the appearance changes.
 pub fn install(ctx: &Context, palette: &Palette) {
-    ctx.set_fonts(fonts::definitions());
+    ctx.set_fonts(fonts::with_system_fallbacks());
 
     let mut style = (*ctx.style()).clone();
 
