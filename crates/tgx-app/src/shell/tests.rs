@@ -627,6 +627,39 @@ fn the_sort_and_grouping_are_taken_from_the_saved_settings() {
 }
 
 #[test]
+fn the_scheduled_sync_fires_when_due_and_yields_to_a_run() {
+    use std::time::{Duration, Instant};
+    let mut s = shell_with(vec![chat(1, "a", None)]);
+    let t0 = Instant::now();
+    // Off: 0 never arms.
+    s.arm_schedule(t0);
+    assert_eq!(s.tick_schedule(t0 + Duration::from_secs(1_000_000)), None);
+
+    s.settings.export_db = true;
+    s.settings.sync_every_hours = 2;
+    // As the panel would: Update databases commits the form first.
+    s.form.sync(&s.settings);
+    s.arm_schedule(t0);
+    let hour = Duration::from_secs(3600);
+    assert_eq!(s.tick_schedule(t0 + hour), Some(hour), "not yet");
+    assert!(!s.scanning);
+
+    // Due while a run is going: looks again in a minute, starts nothing.
+    s.exporting = true;
+    assert_eq!(
+        s.tick_schedule(t0 + 2 * hour),
+        Some(Duration::from_secs(60))
+    );
+    assert!(!s.scanning);
+
+    s.exporting = false;
+    let now = t0 + 2 * hour + Duration::from_secs(61);
+    assert_eq!(s.tick_schedule(now), Some(2 * hour), "re-armed");
+    assert!(s.scanning, "Update databases was pressed");
+    assert!(s.journal.to_text().contains("Scheduled sync"));
+}
+
+#[test]
 fn a_database_for_a_chat_not_in_the_list_is_named_not_run() {
     // "Updated 11 databases" in a folder of 12 is a question with no answer on
     // screen unless the twelfth is named.

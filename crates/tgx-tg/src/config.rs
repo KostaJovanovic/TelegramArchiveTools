@@ -126,6 +126,11 @@ pub struct Settings {
     /// backfills messages it actually re-reads.
     pub reread_all: bool,
 
+    /// While the window is open, run Update databases every this many hours.
+    /// 0 is off. Database mode only: a Classic run re-reads every chat from the
+    /// beginning, which is not something to start unasked.
+    pub sync_every_hours: u32,
+
     // Media
     pub media_kinds: Vec<String>,
     /// 0 == unlimited.
@@ -231,6 +236,7 @@ impl Default for Settings {
             export_db: false,
             reread_window: 500,
             reread_all: false,
+            sync_every_hours: 0,
             media_kinds: MEDIA_KINDS.iter().map(|s| s.to_string()).collect(),
             size_limit_mb: 20,
             download_media: true,
@@ -358,6 +364,9 @@ impl Settings {
         // (`REREAD_RANGE`); a hand-edited file asking for ten million would only
         // make a sync slower than the full pass it was meant to replace.
         out.reread_window = out.reread_window.min(10_000);
+        // A week, the panel's `SYNC_RANGE`. Past that a window left open is not
+        // what anyone is relying on.
+        out.sync_every_hours = out.sync_every_hours.min(168);
         out
     }
 

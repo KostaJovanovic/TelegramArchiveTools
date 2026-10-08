@@ -240,6 +240,17 @@ impl Shell {
             ) {
                 self.toggle_setting(|s| s.reread_all = !s.reread_all);
             }
+            if self.number_row(
+                ui,
+                "sync_every_hours",
+                "Sync every (hours)",
+                SYNC_HELP,
+                true,
+                |f| &mut f.sync_every,
+            ) {
+                self.commit_settings();
+                self.arm_schedule(std::time::Instant::now());
+            }
         } else {
             for (key, label, why, on) in [
                 (
@@ -647,6 +658,10 @@ const REREAD_ALL_HELP: &str =
      the only way to catch an edit or a deletion older than the window above — \
      or to pick up media after raising the size limit.";
 
+const SYNC_HELP: &str = "While this window stays open, press Update databases by itself every \
+     this many hours: every chat with a database in the destination is synced. 0 turns it off. \
+     A run already going is never interrupted; the next one waits for it.";
+
 const SPLIT_HELP: &str =
     "A forum supergroup becomes one folder per topic instead of one folder for \
      all of them. This is the thing Telegram Desktop cannot do. In Database mode \
@@ -748,6 +763,7 @@ mod tests {
             PAGE_HELP,
             REREAD_HELP,
             REREAD_ALL_HELP,
+            SYNC_HELP,
             SPLIT_HELP,
             MEDIA_HELP,
             KINDS_HELP,

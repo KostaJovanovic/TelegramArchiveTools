@@ -30,8 +30,14 @@ impl Shell {
             .filter(|c| self.view.folded.contains(c))
             .map(|c| c.key().to_string())
             .collect();
-        if let Err(e) = self.settings.save() {
-            self.journal.warn(format!("could not save settings: {e}"));
+        // **Never from a test.** A test binary under `target\` resolves its data
+        // folder to the workspace root, so a test that pressed a button would
+        // overwrite the developer's own settings.json — credentials included —
+        // with `Settings::default()`.
+        if !cfg!(test) {
+            if let Err(e) = self.settings.save() {
+                self.journal.warn(format!("could not save settings: {e}"));
+            }
         }
         // **Written back at once**, not queued for the next frame. Under GPUI
         // this had to wait for the first moment a `&mut Window` was in hand, so
@@ -237,6 +243,43 @@ impl Shell {
         let settings = self.settings.clone();
         self.bridge
             .spawn(async move { crate::actions::find_archives(settings, tx).await });
+    }
+
+    /// Restart the scheduled sync's clock from `now` — on launch, when the
+    /// interval is changed, and when a run ends.
+    pub(super) fn arm_schedule(&mut self, now: std::time::Instant) {
+        self.next_sync = super::schedule_from(&self.settings, now);
+    }
+
+    /// Fire the scheduled sync if it is due, and say how long until it next
+    /// needs a frame. Run once a frame; `now` is passed in so a test can stand
+    /// in for the clock.
+    ///
+    /// **It yields to everything.** Due while a run, a scan or the sign-in is
+    /// still going, it looks again in a minute rather than queuing behind —
+    /// Update databases while a Classic run is going would be refused anyway,
+    /// and stacking a sync behind a sync is what the clock restarting at the
+    /// end of each run exists to prevent.
+    pub(super) fn tick_schedule(&mut self, now: std::time::Instant) -> Option<std::time::Duration> {
+        let due = self.next_sync?;
+        if now < due {
+            return Some(due - now);
+        }
+        const RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+        if self.exporting || self.scanning || self.counting || !self.loaded {
+            self.next_sync = Some(now + RETRY);
+            return Some(RETRY);
+        }
+        if !self.settings.export_db {
+            // Switched to Classic since it was armed: a Classic run is not
+            // something to start unasked.
+            self.next_sync = None;
+            return None;
+        }
+        self.journal.push("Scheduled sync");
+        self.start_update();
+        self.arm_schedule(now);
+        self.next_sync.map(|at| at - now)
     }
 
     /// The scan came back. Queue what it found, in Database mode.

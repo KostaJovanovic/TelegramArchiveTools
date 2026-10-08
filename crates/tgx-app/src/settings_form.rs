@@ -31,6 +31,8 @@ pub const MEMBER_RANGE: (i64, i64) = (0, 1_000_000);
 /// is a real answer — "only what is new" — so the floor is zero. The ceiling is
 /// where a sync stops being faster than the whole-history pass it replaces.
 pub const REREAD_RANGE: (i64, i64) = (0, 10_000);
+/// Hours between scheduled syncs. `0` is off; the ceiling is a week.
+pub const SYNC_RANGE: (i64, i64) = (0, 168);
 
 /// Read a number out of a text field.
 ///
@@ -59,6 +61,7 @@ pub struct SettingsForm {
     pub downloads: String,
     pub member_limit: String,
     pub reread_window: String,
+    pub sync_every: String,
 }
 
 impl SettingsForm {
@@ -93,6 +96,11 @@ impl SettingsForm {
             REREAD_RANGE,
             settings.reread_window as i64,
         ) as usize;
+        settings.sync_every_hours = number(
+            &self.sync_every,
+            SYNC_RANGE,
+            i64::from(settings.sync_every_hours),
+        ) as u32;
     }
 
     /// Write the stored values back into the fields.
@@ -117,6 +125,7 @@ impl SettingsForm {
         );
         set(&mut self.member_limit, &settings.member_limit.to_string());
         set(&mut self.reread_window, &settings.reread_window.to_string());
+        set(&mut self.sync_every, &settings.sync_every_hours.to_string());
     }
 }
 

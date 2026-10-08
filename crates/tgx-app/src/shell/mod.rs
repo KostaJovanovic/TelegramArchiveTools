@@ -209,6 +209,10 @@ pub struct Shell {
     /// Which of the log's two Copy controls `log_copied` is about — the whole
     /// transcript or just the warnings — so only that one reads "Copied".
     copied_warnings: bool,
+    /// When the scheduled sync next runs; `None` while it is off. Counted from
+    /// launch and from the end of each run, so a long run never has a second
+    /// one queued up behind it. See [`Shell::tick_schedule`].
+    next_sync: Option<std::time::Instant>,
     /// Whether the startup work has been submitted. The bridge cannot wake a
     /// window that does not exist yet, so the two jobs `Shell::new` used to
     /// spawn are submitted on the first frame instead — see [`Shell::update`].
@@ -279,7 +283,9 @@ impl Shell {
                 .collect(),
             ..Default::default()
         };
+        let next_sync = schedule_from(&settings, std::time::Instant::now());
         Self {
+            next_sync,
             bridge,
             palette,
             form: SettingsForm::new(&settings),
@@ -496,6 +502,13 @@ impl Shell {
     }
 }
 
+/// When the scheduled sync is next due, counted from `now`; `None` when the
+/// interval is 0.
+fn schedule_from(settings: &Settings, now: std::time::Instant) -> Option<std::time::Instant> {
+    let hours = settings.sync_every_hours;
+    (hours > 0).then(|| now + std::time::Duration::from_secs(u64::from(hours) * 3600))
+}
+
 /// Save a frame to disk and quit, for looking at the window without a person.
 ///
 /// **Reading the screen from outside does not work on this window.** eframe
@@ -591,6 +604,11 @@ impl eframe::App for Shell {
             self.apply(event);
         }
         self.rebuild_rows_if_stale();
+        // egui draws nothing on an idle window, so the timer has to ask for the
+        // frame it will fire on — otherwise the sync waits for a mouse move.
+        if let Some(wait) = self.tick_schedule(std::time::Instant::now()) {
+            ctx.request_repaint_after(wait);
+        }
         if std::mem::take(&mut self.wants_attention) {
             // Flashes the taskbar button until the window is focused, and does
             // nothing to a window that already is — so a run watched to the

@@ -236,6 +236,7 @@ impl Shell {
                 // is where they look when they come back. Asked for here, sent
                 // from `update`, which is the one place holding the context.
                 self.wants_attention = true;
+                self.arm_schedule(std::time::Instant::now());
                 self.status = match self.failure.take() {
                     Some(why) => format!("{}: {why}", self.queue.summary()),
                     None => self.queue.summary(),
