@@ -197,6 +197,10 @@ impl Shell {
                 self.check_folder();
             }
             help(ui, "check_folder", CHECK_HELP, &p);
+            if button(ui, "Find duplicate media", !self.deduping, false, &p).clicked() {
+                self.find_dupes();
+            }
+            help(ui, "find_dupes", DUPES_HELP, &p);
         });
     }
 
@@ -672,6 +676,10 @@ const CHECK_HELP: &str = "Look through the folder for trouble: a database a sync
      under its name, two databases for one chat, a file holding several chats, leftovers of a run \
      that did not finish. Nothing is changed; what is found is listed in the log.";
 
+const DUPES_HELP: &str = "List the photos, videos and files stored more than once in the folder — \
+     the same bytes in two databases, or in a database and a Classic export. Nothing is deleted: \
+     which copy to keep is yours to decide. The largest waste is listed first, in the log.";
+
 const SYNC_HELP: &str = "While this window stays open, press Update databases by itself every \
      this many hours: every chat with a database in the destination is synced. 0 turns it off. \
      A run already going is never interrupted; the next one waits for it.";
@@ -779,6 +787,7 @@ mod tests {
             REREAD_ALL_HELP,
             SYNC_HELP,
             CHECK_HELP,
+            DUPES_HELP,
             SPLIT_HELP,
             MEDIA_HELP,
             KINDS_HELP,

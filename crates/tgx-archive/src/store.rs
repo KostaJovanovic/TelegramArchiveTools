@@ -427,25 +427,25 @@ impl Store {
             .await?;
         let conn = db.connect()?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        let mut rows = conn
-            .query("SELECT value FROM meta WHERE key = 'schema_version'", ())
-            .await?;
-        let found: i64 = match rows.next().await? {
+        let store = Self {
+            conn,
+            _db: db,
+            path: path.to_path_buf(),
+        };
+        let found: i64 = match store
+            .row("SELECT value FROM meta WHERE key = 'schema_version'", ())
+            .await?
+        {
             Some(r) => r.get::<String>(0)?.trim().parse().unwrap_or(-1),
             None => -1,
         };
-        drop(rows);
         if found != SCHEMA_VERSION {
             return Err(Error::Schema {
                 found,
                 wanted: SCHEMA_VERSION,
             });
         }
-        Ok(Self {
-            conn,
-            _db: db,
-            path: path.to_path_buf(),
-        })
+        Ok(store)
     }
 
     /// The chats a database at `path` records, **without writing to it**.
@@ -1332,6 +1332,34 @@ impl Store {
                 kind: row.get::<String>(3)?,
                 path: row.get::<String>(4)?,
             });
+        }
+        Ok(out)
+    }
+
+    /// Every blob's key, size and name — `(file_id, kind, size, file_name)` —
+    /// **without its bytes.**
+    ///
+    /// What the duplicate report groups on before it reads anything: a file
+    /// can only equal one of the same length, so the bytes are fetched, one
+    /// blob at a time through [`Store::blob`], only for a size more than one
+    /// file shares. Selecting `bytes` here would load every file the database
+    /// holds at once.
+    pub async fn blob_sizes(&self) -> Result<Vec<(i64, String, u64, Option<String>)>, Error> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT file_id, kind, size, file_name FROM blobs ORDER BY file_id, kind",
+                (),
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next().await? {
+            out.push((
+                r.get::<i64>(0)?,
+                r.get::<String>(1)?,
+                u64::try_from(r.get::<i64>(2)?).unwrap_or(0),
+                r.get::<Option<String>>(3)?,
+            ));
         }
         Ok(out)
     }

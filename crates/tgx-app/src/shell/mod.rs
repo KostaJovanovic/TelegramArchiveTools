@@ -141,6 +141,9 @@ pub struct Shell {
     scanning: bool,
     /// Check folder is looking; its button is off until it answers.
     checking: bool,
+    /// Find duplicate media is reading every file in the destination — the
+    /// slowest of the folder buttons, so the one a second press most hurts.
+    deduping: bool,
     /// **The stop signal, shared with the worker.** Setting `exporting = false`
     /// and writing "Stopped" is not stopping: the export went on writing files
     /// and then overwrote the message with its own success. This is the flag
@@ -312,6 +315,7 @@ impl Shell {
             counting: false,
             scanning: false,
             checking: false,
+            deduping: false,
             cancel: Cancel::new(),
             chats: Vec::new(),
             selected: Default::default(),
