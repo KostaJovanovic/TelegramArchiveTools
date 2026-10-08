@@ -674,6 +674,77 @@ impl Store {
         Ok(gone.len())
     }
 
+    /// Copy everything `src` records about `chat_id` into this file.
+    ///
+    /// For the one-file-for-everything `telegram.sqlite` of earlier builds,
+    /// which no run writes into: each of its chats becomes a file of its own.
+    /// **What this file already has wins** (`INSERT OR IGNORE`), so splitting
+    /// into a database a sync has since started adds the older history and the
+    /// deletions it alone saw, and changes nothing the newer file holds. Only
+    /// the blobs the chat's own media rows point at come across.
+    ///
+    /// Returns how many of the chat's messages in `src` this file still lacks
+    /// afterwards — 0, or the copy did not do what it says.
+    pub async fn split_from(&self, src: &Path, chat_id: i64) -> Result<i64, Error> {
+        let src = src.to_string_lossy().into_owned();
+        self.conn
+            .execute("ATTACH DATABASE ?1 AS src", params![src])
+            .await?;
+        let copied = self.copy_chat(chat_id).await;
+        if copied.is_err() && !self.conn.is_autocommit() {
+            let _ = self.conn.execute_batch("ROLLBACK;").await;
+        }
+        let lacking = async {
+            copied?;
+            let row = self
+                .row(
+                    "SELECT COUNT(*) FROM src.messages s WHERE s.chat_id = ?1 AND NOT EXISTS
+                       (SELECT 1 FROM main.messages m WHERE m.chat_id = s.chat_id AND m.id = s.id)",
+                    params![chat_id],
+                )
+                .await?;
+            Ok::<i64, Error>(match row {
+                Some(r) => r.get::<i64>(0)?,
+                None => 0,
+            })
+        }
+        .await;
+        // Detached whatever happened above: a file left attached would be
+        // held open by this connection for as long as the store lives.
+        self.conn.execute_batch("DETACH DATABASE src;").await?;
+        lacking
+    }
+
+    async fn copy_chat(&self, chat_id: i64) -> Result<(), Error> {
+        self.conn.execute_batch("BEGIN;").await?;
+        for sql in [
+            "INSERT OR IGNORE INTO main.chats SELECT * FROM src.chats WHERE id = ?1",
+            "INSERT OR IGNORE INTO main.topics SELECT * FROM src.topics WHERE chat_id = ?1",
+            "INSERT OR IGNORE INTO main.messages SELECT * FROM src.messages WHERE chat_id = ?1",
+            "INSERT OR IGNORE INTO main.versions SELECT * FROM src.versions WHERE chat_id = ?1",
+            "INSERT OR IGNORE INTO main.media SELECT * FROM src.media WHERE chat_id = ?1",
+            "INSERT OR IGNORE INTO main.participants
+                    SELECT * FROM src.participants WHERE chat_id = ?1",
+            // Not the id: this file numbers its own runs. A run already here
+            // — the same chat, start and mode — is not copied twice.
+            "INSERT INTO main.runs (chat_id, started, finished, mode, root, new, changed,
+                                    deleted, blobs_added, reached_end, settings)
+                  SELECT chat_id, started, finished, mode, root, new, changed,
+                         deleted, blobs_added, reached_end, settings
+                    FROM src.runs s WHERE s.chat_id = ?1 AND NOT EXISTS
+                         (SELECT 1 FROM main.runs r WHERE r.chat_id = s.chat_id
+                             AND r.started = s.started AND r.mode = s.mode)",
+            "INSERT OR IGNORE INTO main.blobs SELECT * FROM src.blobs
+                  WHERE (file_id, kind) IN (SELECT file_id, kind FROM src.media WHERE chat_id = ?1)",
+            "INSERT OR IGNORE INTO main.thumbs SELECT * FROM src.thumbs
+                  WHERE (file_id, kind) IN (SELECT file_id, kind FROM src.media WHERE chat_id = ?1)",
+        ] {
+            self.conn.execute(sql, params![chat_id]).await?;
+        }
+        self.conn.execute_batch("COMMIT;").await?;
+        Ok(())
+    }
+
     /// Mark one message gone from Telegram as of `now`, unless it already is.
     ///
     /// For a message recovered from an old export by `tgx import`: a finished

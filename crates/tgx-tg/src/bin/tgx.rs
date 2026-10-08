@@ -146,6 +146,40 @@ async fn main() -> Result<()> {
             }
             doctor(&dir, fix).await
         }
+        "split" => {
+            let mut file = None;
+            let mut into = None;
+            let mut dry_run = false;
+            let mut rest = args.iter().skip(1);
+            while let Some(a) = rest.next() {
+                match a.as_str() {
+                    "--into" => {
+                        into = Some(std::path::PathBuf::from(
+                            rest.next()
+                                .ok_or_else(|| anyhow!("--into needs a folder"))?,
+                        ))
+                    }
+                    "--dry-run" => dry_run = true,
+                    f if f.starts_with("--") => {
+                        return Err(anyhow!("unknown flag {f:?}\n\n{USAGE}"))
+                    }
+                    path => file = Some(std::path::PathBuf::from(path)),
+                }
+            }
+            let file = file.ok_or_else(|| {
+                anyhow!("usage: tgx split <file.sqlite> [--into <folder>] [--dry-run]")
+            })?;
+            // Beside the file by default: that is where its chats' databases
+            // already are, when there are any.
+            let into = match into {
+                Some(d) => d,
+                None => file
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_default(),
+            };
+            split(&file, &into, dry_run).await
+        }
         "import" => {
             let mut db = std::path::PathBuf::from(&settings.output_dir);
             let mut dry_run = false;
@@ -195,6 +229,51 @@ async fn doctor(dir: &std::path::Path, fix: bool) -> Result<()> {
         }
     } else if fixable > 0 {
         println!("{fixable} can be fixed: run again with --fix (with no export running)");
+    }
+    Ok(())
+}
+
+/// `tgx split`: one database per chat out of a file holding several.
+async fn split(file: &std::path::Path, into: &std::path::Path, dry_run: bool) -> Result<()> {
+    if dry_run {
+        for p in tgx_tg::split::plan(file, into).await? {
+            let how = if p.merge { "merge into" } else { "new file" };
+            println!(
+                "{} (id {}) → {how} {}",
+                p.title,
+                p.chat_id,
+                p.dest.display()
+            );
+        }
+        println!("nothing written (--dry-run)");
+        return Ok(());
+    }
+    let done = tgx_tg::split::split(file, into).await?;
+    let mut whole = true;
+    for d in &done {
+        let p = &d.planned;
+        match &d.lacking {
+            Ok(0) => println!("{} (id {}) → {}", p.title, p.chat_id, p.dest.display()),
+            Ok(n) => {
+                whole = false;
+                println!(
+                    "{} (id {}): {n} message(s) did NOT come across",
+                    p.title, p.chat_id
+                )
+            }
+            Err(e) => {
+                whole = false;
+                println!("{} (id {}): FAILED: {e}", p.title, p.chat_id)
+            }
+        }
+    }
+    if whole {
+        println!(
+            "every chat came across whole; the original is now {}.split",
+            file.display()
+        );
+    } else {
+        println!("the original is left as it was");
     }
     Ok(())
 }
@@ -433,6 +512,10 @@ tgx — Telegram Desktop-format exporter
                        offline: what is wrong with an export folder — misplaced
                        or misnamed databases, leftovers of runs that did not
                        finish; --fix moves and deletes only those leftovers
+  tgx split <file.sqlite> [--into <folder>] [--dry-run]
+                       offline: one database per chat out of an older file
+                       holding several; merges into an existing one (whose
+                       contents win) and renames the original to .split
   tgx import <export folder>... [--db <folder>] [--dry-run]
                        offline: copy those messages into the databases, marked
                        deleted and recovered (only into a database that has
