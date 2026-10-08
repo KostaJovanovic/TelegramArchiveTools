@@ -625,3 +625,88 @@ fn the_sort_and_grouping_are_taken_from_the_saved_settings() {
     assert_eq!(s.view.sort, SortMode::Largest);
     assert_eq!(SortMode::from_key("nonsense"), SortMode::Recent);
 }
+
+#[test]
+fn a_database_for_a_chat_not_in_the_list_is_named_not_run() {
+    // "Updated 11 databases" in a folder of 12 is a question with no answer on
+    // screen unless the twelfth is named.
+    let mut s = shell_with(vec![chat(1, "a", None)]);
+    s.scanning = true;
+    s.apply(Event::Archived(Ok(Box::new(tgx_tg::engine::Archived {
+        chats: vec![(9, "Gone".into())],
+        unreadable: vec![],
+        ..Default::default()
+    }))));
+    assert!(!s.scanning, "the button comes back");
+    assert!(!s.exporting, "nothing to run");
+    assert!(s.queue.is_empty());
+    assert!(s.status.starts_with("No databases to update"));
+    let log = s.journal.to_text();
+    assert!(log.contains("Gone has a database here"), "got {log}");
+}
+
+#[test]
+fn an_answer_about_another_destination_marks_nothing() {
+    // The user changed the folder while the old one was being read; marking
+    // chats from the old answer would claim they are in the new one.
+    let mut s = shell_with(vec![chat(1, "a", None)]);
+    s.settings.output_dir = "new".into();
+    let there = crate::list::OnDisk {
+        database: true,
+        ..Default::default()
+    };
+    s.apply(Event::OnDisk {
+        output_dir: "old".into(),
+        disk: [(1, there)].into(),
+    });
+    assert!(s.view.disk.is_empty());
+    s.apply(Event::OnDisk {
+        output_dir: "new".into(),
+        disk: [(1, there)].into(),
+    });
+    assert!(s.view.disk[&1].database);
+    // And the filter reads it on the next rebuild.
+    s.view.presence = crate::list::Presence::NotExported;
+    s.rebuild_rows();
+    assert_eq!(s.visible_count, 0);
+    assert_eq!(
+        chats::on_disk_mark(true, false),
+        Some("Database"),
+        "a database alone"
+    );
+    assert_eq!(chats::on_disk_mark(false, false), None);
+}
+
+#[test]
+fn recalling_a_selection_replaces_the_ticks_and_names_what_is_gone() {
+    let mut s = shell_with(vec![
+        chat(1, "a", None),
+        chat(2, "b", None),
+        chat(3, "c", None),
+    ]);
+    s.settings.saved_selections = vec![tgx_tg::config::SavedSelection {
+        name: "orgs".into(),
+        chats: vec![1, 2, 99],
+    }];
+    s.selected.insert(3);
+    s.recall_selection("orgs");
+    assert_eq!(s.selected, [1, 2].into(), "replaced, not added to");
+    assert_eq!(s.selection_name, "orgs");
+    assert!(s.status.contains("1 no longer in the list"), "{}", s.status);
+}
+
+#[test]
+fn update_databases_does_not_join_a_classic_run() {
+    // That run has its own copy of the settings; adding to it would export the
+    // chats as folders beside the databases the user asked to update.
+    let mut s = shell_with(vec![chat(1, "a", None)]);
+    s.exporting = true;
+    s.settings.export_db = false;
+    s.apply(Event::Archived(Ok(Box::new(tgx_tg::engine::Archived {
+        chats: vec![(1, "a".into())],
+        unreadable: vec![],
+        ..Default::default()
+    }))));
+    assert!(s.queue.is_empty());
+    assert!(!s.settings.export_db, "the mode is left alone");
+}

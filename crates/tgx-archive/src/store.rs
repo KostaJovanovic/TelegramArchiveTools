@@ -186,6 +186,16 @@ pub enum Merge {
     Changed { previous_version: i64 },
 }
 
+/// One chat a database records, as [`Store::chats_in`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatEntry {
+    pub id: i64,
+    pub title: String,
+    /// When the last run that read to the end finished, unix seconds. `None`
+    /// for a chat no run has finished.
+    pub synced: Option<i64>,
+}
+
 /// One message as the database holds it.
 #[derive(Debug, Clone)]
 pub struct StoredMessage {
@@ -298,6 +308,56 @@ impl Store {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The chats a database at `path` records, **without writing to it**.
+    ///
+    /// Not [`Store::open`], which creates the schema in whatever it is given and
+    /// switches it to WAL: this is asked of every `.sqlite` found in a folder
+    /// the user pointed at, and one that is somebody else's file must come out
+    /// of the question untouched. A file this build would not open — another
+    /// schema version, or not one of ours at all — answers an error.
+    pub async fn chats_in(path: &Path) -> Result<Vec<ChatEntry>, Error> {
+        let db = libsql::Builder::new_local(path)
+            .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .build()
+            .await?;
+        let conn = db.connect()?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        let mut rows = conn
+            .query("SELECT value FROM meta WHERE key = 'schema_version'", ())
+            .await?;
+        let found: i64 = match rows.next().await? {
+            Some(r) => r.get::<String>(0)?.trim().parse().unwrap_or(-1),
+            None => -1,
+        };
+        if found != SCHEMA_VERSION {
+            return Err(Error::Schema {
+                found,
+                wanted: SCHEMA_VERSION,
+            });
+        }
+        // `synced` is the last run that *walked to the end*. A cancelled or
+        // failed run also writes a `runs` row, and calling that a sync would
+        // tell the list a chat is current when its last attempt stopped short.
+        let mut rows = conn
+            .query(
+                "SELECT c.id, c.title,
+                        (SELECT MAX(finished) FROM runs r
+                          WHERE r.chat_id = c.id AND r.reached_end = 1)
+                   FROM chats c",
+                (),
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next().await? {
+            out.push(ChatEntry {
+                id: r.get::<i64>(0)?,
+                title: r.get::<String>(1)?,
+                synced: r.get::<Option<i64>>(2)?,
+            });
+        }
+        Ok(out)
     }
 
     async fn ensure_schema(&self) -> Result<(), Error> {
@@ -632,6 +692,67 @@ impl Store {
         })
     }
 
+    /// Every message id stored for a chat, and whether a run has seen it
+    /// deleted on Telegram — what a comparison against an older export needs,
+    /// without parsing a single payload.
+    pub async fn message_ids(&self, chat_id: i64) -> Result<Vec<(i64, bool)>, Error> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id, deleted_seen IS NOT NULL FROM messages
+                  WHERE chat_id = ?1 ORDER BY id",
+                params![chat_id],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push((row.get::<i64>(0)?, row.get::<i64>(1)? != 0));
+        }
+        Ok(out)
+    }
+
+    /// What one run found gone and found changed, as `(id, date)` pairs,
+    /// oldest first — for the report a sync writes after its counts.
+    ///
+    /// `at` is the run's one timestamp: [`Self::mark_unseen_deleted`] writes
+    /// it as `deleted_seen`, and a merge that kept an earlier version writes it
+    /// as that version's `seen`. So both questions are "what carries `at`",
+    /// and nothing has to be remembered during the run to answer them.
+    ///
+    /// Ids and dates, **never text**: the report goes to the log, which sits
+    /// beside the executable, and a message is other people's conversation.
+    pub async fn changes_at(
+        &self,
+        chat_id: i64,
+        at: i64,
+    ) -> Result<(Vec<(i64, String)>, Vec<(i64, String)>), Error> {
+        let mut out = (Vec::new(), Vec::new());
+        for (sql, into) in [
+            (
+                "SELECT id, COALESCE(json_extract(payload, '$.date'), '') FROM messages
+                  WHERE chat_id = ?1 AND deleted_seen = ?2 ORDER BY id",
+                0,
+            ),
+            (
+                "SELECT DISTINCT m.id, COALESCE(json_extract(m.payload, '$.date'), '')
+                   FROM versions v JOIN messages m ON m.chat_id = v.chat_id AND m.id = v.id
+                  WHERE v.chat_id = ?1 AND v.seen = ?2 ORDER BY m.id",
+                1,
+            ),
+        ] {
+            let mut rows = self.conn.query(sql, params![chat_id, at]).await?;
+            while let Some(row) = rows.next().await? {
+                let pair = (row.get::<i64>(0)?, row.get::<String>(1)?);
+                if into == 0 {
+                    out.0.push(pair);
+                } else {
+                    out.1.push(pair);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Every message of one topic, oldest first.
     pub async fn messages_of(
         &self,
@@ -902,6 +1023,37 @@ mod tests {
         // And a second chat finds the first, which is what sends it to a file
         // of its own rather than into this one.
         assert!(s.holds_another_chat(8).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn the_chats_in_a_file_are_read_without_writing_to_it() {
+        let s = store("probe").await;
+        s.upsert_chat(7, "Dev Team", "public_supergroup", 100)
+            .await
+            .unwrap();
+        let path = s.path().to_path_buf();
+        drop(s);
+        assert_eq!(
+            Store::chats_in(&path).await.unwrap(),
+            vec![ChatEntry {
+                id: 7,
+                title: "Dev Team".into(),
+                synced: None,
+            }]
+        );
+
+        // A database that is not ours is refused, and left as it was found.
+        let foreign = tmp("probe-foreign");
+        let db = libsql::Builder::new_local(&foreign).build().await.unwrap();
+        db.connect()
+            .unwrap()
+            .execute_batch("CREATE TABLE notes (body TEXT);")
+            .await
+            .unwrap();
+        drop(db);
+        let before = std::fs::read(&foreign).unwrap();
+        assert!(Store::chats_in(&foreign).await.is_err());
+        assert_eq!(std::fs::read(&foreign).unwrap(), before);
     }
 
     #[tokio::test]

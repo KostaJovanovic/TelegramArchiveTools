@@ -96,6 +96,61 @@ impl Journal {
         out
     }
 
+    /// **Only the warnings, each with what explains it**, for the clipboard.
+    ///
+    /// A warning alone is often unreadable — "no messages could be read" says
+    /// nothing about which chat — so each one brings along:
+    ///
+    /// - the nearest heading above it, which is the line naming the chat: the
+    ///   engine indents its stage commentary under an unindented one;
+    /// - the `before` lines leading up to it;
+    /// - the line after it, when that is indented and so belongs to it.
+    ///
+    /// Runs of kept lines are separated by `…`, so a reader can see where the
+    /// log was cut. Marked and headed exactly as [`Self::to_text`] is.
+    pub fn warnings_text(&self, before: usize) -> String {
+        let lines: Vec<&Line> = self.lines.iter().collect();
+        let mut keep = vec![false; lines.len()];
+        for (i, line) in lines.iter().enumerate() {
+            if !line.warning {
+                continue;
+            }
+            for k in keep.iter_mut().take(i + 1).skip(i.saturating_sub(before)) {
+                *k = true;
+            }
+            if let Some(h) = (0..i)
+                .rev()
+                .find(|&j| !lines[j].warning && !lines[j].text.starts_with(char::is_whitespace))
+            {
+                keep[h] = true;
+            }
+            if lines
+                .get(i + 1)
+                .is_some_and(|next| next.text.starts_with(char::is_whitespace))
+            {
+                keep[i + 1] = true;
+            }
+        }
+
+        let mut out = String::new();
+        if self.dropped > 0 {
+            out.push_str(&format!("[{} earlier lines dropped]\r\n", self.dropped));
+        }
+        let mut last: Option<usize> = None;
+        for (i, line) in lines.iter().enumerate().filter(|(i, _)| keep[*i]) {
+            if last.is_some_and(|l| l + 1 != i) {
+                out.push_str("…\r\n");
+            }
+            last = Some(i);
+            if line.warning {
+                out.push_str("! ");
+            }
+            out.push_str(&line.text);
+            out.push_str("\r\n");
+        }
+        out
+    }
+
     /// How many warnings are still held.
     ///
     /// Painted in the log's own header, because the reason a warning is marked
@@ -164,6 +219,35 @@ mod tests {
         assert!(
             long.to_text().starts_with("[2 earlier lines dropped]\r\n"),
             "a truncated run must not paste as a whole one"
+        );
+    }
+
+    #[test]
+    fn copying_the_warnings_keeps_the_chat_they_belong_to_and_cuts_the_rest() {
+        let mut j = Journal::default();
+        j.push("Admini: into the database only — no folder");
+        j.push("  settings: media on");
+        j.push("  count: 15656 messages");
+        j.push("  roster: 11 members");
+        j.push("  reading history oldest first");
+        j.warn("  General: 2 files missing");
+        j.push("    photo_3.jpg: timed out");
+        j.push("  General: 1202");
+        j.push("Redakcija: into the database only — no folder");
+        j.push("  count: 400 messages");
+        let text = j.warnings_text(2);
+        assert_eq!(
+            text,
+            "Admini: into the database only — no folder\r\n\
+             …\r\n  \
+             roster: 11 members\r\n  \
+             reading history oldest first\r\n\
+             !   General: 2 files missing\r\n    \
+             photo_3.jpg: timed out\r\n"
+        );
+        assert!(
+            !text.contains("Redakcija"),
+            "a chat with no warning is left out"
         );
     }
 

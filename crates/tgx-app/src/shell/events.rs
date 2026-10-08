@@ -91,6 +91,19 @@ impl Shell {
                 self.selected.retain(|id| live.contains(id));
                 self.rebuild_rows();
                 self.status = format!("{n} chats");
+                self.scan_destination();
+            }
+
+            Event::Archived(found) => self.update_found(found),
+            Event::OnDisk { output_dir, disk } => {
+                // An answer about a destination the user has since moved away
+                // from would mark chats that are not there.
+                if output_dir == self.settings.output_dir {
+                    self.view.disk = disk;
+                    // The filter and the size sort read it, so the rows are
+                    // stale; the rebuild waits for the end of the batch.
+                    self.rows_stale = true;
+                }
             }
 
             Event::Counted { chat_id, total } => self.set_count(chat_id, total),
@@ -217,6 +230,12 @@ impl Shell {
                 // one sentence that says *why*, leaving the reason only in the
                 // log, which is not where the user is looking.
                 self.journal.push(self.queue.summary());
+                // The run has just written what the marks describe.
+                self.scan_destination();
+                // A long run is something people walk away from; the taskbar
+                // is where they look when they come back. Asked for here, sent
+                // from `update`, which is the one place holding the context.
+                self.wants_attention = true;
                 self.status = match self.failure.take() {
                     Some(why) => format!("{}: {why}", self.queue.summary()),
                     None => self.queue.summary(),

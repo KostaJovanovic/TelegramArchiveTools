@@ -596,11 +596,14 @@ impl<'a> ChatExporter<'a> {
     /// fail the queue, and that was right when there was one file: every later
     /// chat would have hit the same locked file. With a file each, the next
     /// chat has every chance of working.
+    ///
+    /// **Each database has a folder of its own**, `<chat>/<chat>.sqlite`, so
+    /// the `-wal` and `-shm` files SQLite keeps beside it stay with it rather
+    /// than scattering across `Exports/`.
     async fn open_archive(&self, chat: &ChatInfo) -> Result<tgx_archive::Store, ExportError> {
         let dir = Path::new(&self.settings.output_dir);
         let base = tgx_media::topics::sanitize_component(&chat.title, "chat");
-        let ext = tgx_archive::FILE_EXT;
-        let store = tgx_archive::Store::open(&dir.join(format!("{base}.{ext}"))).await?;
+        let store = tgx_archive::Store::open(&archive_path(dir, &base)?).await?;
         if !store.holds_another_chat(chat.id).await? {
             return Ok(store);
         }
@@ -609,7 +612,7 @@ impl<'a> ChatExporter<'a> {
         // decided not to use is a handle nothing will close until the next
         // chat replaces it.
         drop(store);
-        let distinct = dir.join(format!("{base} ({}).{ext}", chat.id));
+        let distinct = archive_path(dir, &format!("{base} ({})", chat.id))?;
         Ok(tgx_archive::Store::open(&distinct).await?)
     }
 
@@ -1418,6 +1421,15 @@ impl<'a> ChatExporter<'a> {
                 "database: +{} new, {} changed, {} deleted on Telegram (kept) — {} archived",
                 result.db_new, result.db_changed, result.db_deleted, result.db_archived
             )));
+            // **Which ones**, not only how many. "3 deleted" is the start of a
+            // question, and the database is the one place the answer is kept.
+            // Ids and dates only — see `Store::changes_at`.
+            if result.db_deleted > 0 || result.db_changed > 0 {
+                let (deleted, changed) = store.changes_at(chat.id, seen_at).await?;
+                for line in change_report(&deleted, &changed) {
+                    progress(Progress::Log(line));
+                }
+            }
         }
 
         // Messages queued to send later are in no history, so they get their
@@ -1482,7 +1494,10 @@ impl<'a> ChatExporter<'a> {
         progress(Progress::Log(format!(
             "read {done} messages in {:.1}s{}",
             started.elapsed().as_secs_f64(),
-            if total > 0 && (done as i64) < total {
+            // Not for a windowed run: reading the newest few hundred is what
+            // it set out to do, and "14355 SHORT" over a sync that worked
+            // reads as the failure this line exists to name.
+            if !result.windowed && total > 0 && (done as i64) < total {
                 format!(" — {} SHORT of the {total} expected", total - done as i64)
             } else {
                 String::new()
@@ -1870,6 +1885,241 @@ pub async fn sleep_in_slices(total: std::time::Duration) {
     sleep_in_slices_until(total, &Cancel::new()).await;
 }
 
+/// Where the database named `name` lives: `<parent>/<name>/<name>.sqlite`.
+///
+/// **A file from before the folders is moved in, not left behind.** Builds
+/// before this one wrote `<parent>/<name>.sqlite`, and a database that is not
+/// found is a database started afresh — the next sync would begin a new
+/// archive and lose every deletion and earlier version the old one kept. So
+/// the flat file, and its `-wal` and `-shm` with it, moves into the folder
+/// when the folder holds no database yet. The WAL is named after the file it
+/// belongs to; moving one without the other loses committed pages.
+fn archive_path(parent: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let ext = tgx_archive::FILE_EXT;
+    let path = parent.join(name).join(format!("{name}.{ext}"));
+    let flat = parent.join(format!("{name}.{ext}"));
+    if flat.is_file() && !path.exists() {
+        std::fs::create_dir_all(parent.join(name))?;
+        for suffix in ["", "-wal", "-shm"] {
+            let from = PathBuf::from(format!("{}{suffix}", flat.display()));
+            if from.exists() {
+                std::fs::rename(&from, format!("{}{suffix}", path.display()))?;
+            }
+        }
+    }
+    Ok(path)
+}
+
+/// How many of each kind a report names before it says "and N more". A sync
+/// that finds a thousand reactions moved must not flush the transcript the
+/// INCOMPLETE warning has to survive in.
+const REPORT_CAP: usize = 20;
+
+/// The lines a sync writes about what it found deleted and changed.
+///
+/// "Changed" is any difference the merge kept a version of: an edit, and also
+/// a reaction or a view count moving — the line says so rather than calling
+/// every one an edit.
+fn change_report(deleted: &[(i64, String)], changed: &[(i64, String)]) -> Vec<String> {
+    fn list(items: &[(i64, String)]) -> String {
+        let mut shown: Vec<String> = items
+            .iter()
+            .take(REPORT_CAP)
+            .map(|(id, date)| {
+                if date.is_empty() {
+                    format!("#{id}")
+                } else {
+                    format!("#{id} ({})", date.replace('T', " "))
+                }
+            })
+            .collect();
+        if items.len() > REPORT_CAP {
+            shown.push(format!("and {} more", items.len() - REPORT_CAP));
+        }
+        shown.join(", ")
+    }
+    let mut out = Vec::new();
+    if !deleted.is_empty() {
+        out.push(format!(
+            "  deleted on Telegram since the last sync, kept here: {}",
+            list(deleted)
+        ));
+    }
+    if !changed.is_empty() {
+        out.push(format!(
+            "  changed since the last sync (an edit, or reactions or counts moving), \
+             earlier version kept: {}",
+            list(changed)
+        ));
+    }
+    out
+}
+
+/// What [`archived_chats`] found in a folder.
+#[derive(Debug, Clone, Default)]
+pub struct Archived {
+    /// Every chat a database there records, as `(id, title)`, once each.
+    pub chats: Vec<(i64, String)>,
+    /// Which file each of those came from.
+    pub files: std::collections::HashMap<i64, PathBuf>,
+    /// When each last finished a sync that read to the end — see
+    /// [`tgx_archive::ChatEntry::synced`]. Absent for one never finished.
+    pub synced: std::collections::HashMap<i64, i64>,
+    /// The databases that could not be read, and why — another schema
+    /// version, a file that is not ours, a lock that outlasted the wait.
+    pub unreadable: Vec<(PathBuf, String)>,
+}
+
+/// **The chats that already have a database in `dir`**, so a run can sync
+/// exactly those.
+///
+/// Looks where [`archive_path`] puts a file — `<dir>/<name>/<name>.sqlite` —
+/// and at the flat `<dir>/<name>.sqlite` an earlier build wrote, which the run
+/// itself then moves into its folder. Nothing deeper: a Classic export folder
+/// holds no `.sqlite` of ours, and walking every topic folder of every export
+/// to prove it would be the slowest part of the button.
+///
+/// The chat comes from **inside** the file, never its name. Two chats can
+/// sanitise to one name, and a title changed on Telegram since the last run
+/// would otherwise match nothing.
+pub async fn archived_chats(dir: &Path) -> std::io::Result<Archived> {
+    let ext = tgx_archive::FILE_EXT;
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                let inner = path.join(format!("{name}.{ext}"));
+                if inner.is_file() {
+                    found.push(inner);
+                }
+            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
+            found.push(path);
+        }
+    }
+    // Sorted so the queue comes out in the same order on every press.
+    found.sort();
+
+    let mut out = Archived::default();
+    let mut seen = std::collections::HashSet::new();
+    for path in found {
+        match tgx_archive::Store::chats_in(&path).await {
+            // **The one-file-for-everything build's `telegram.sqlite`.** A run
+            // never writes into such a file again — the chat's own name is
+            // looked for instead — so offering its chats would sync them into
+            // fresh files while appearing to update this one.
+            Ok(chats) if chats.len() > 1 => out.unreadable.push((
+                path,
+                format!(
+                    "holds {} chats — a file from before one database per chat, \
+                     which no run writes into",
+                    chats.len()
+                ),
+            )),
+            Ok(chats) => {
+                for chat in chats {
+                    if seen.insert(chat.id) {
+                        out.files.insert(chat.id, path.clone());
+                        if let Some(at) = chat.synced {
+                            out.synced.insert(chat.id, at);
+                        }
+                        out.chats.push((chat.id, chat.title));
+                    }
+                }
+            }
+            Err(e) => out.unreadable.push((path, e.to_string())),
+        }
+    }
+    Ok(out)
+}
+
+/// **The chats that already have a Classic export folder in `dir`.**
+///
+/// Read from the `"id"` in each folder's `result.json` — or, for a forum split
+/// into topics, the first topic folder's — because the folder is named after a
+/// title that may since have changed and gets `(2)` on a clash. Only the head
+/// of the file is read: the id is in the header, ahead of `"messages"`, and the
+/// file behind it can be hundreds of megabytes.
+///
+/// A folder without one — HTML only, or something that is not an export — is
+/// not counted, which is the honest answer: nothing in it says whose it is.
+///
+/// Every folder a chat has, not the first: a re-run beside an older one is a
+/// `(2)`, and both take up the space the list reports.
+pub fn exported_folders(
+    dir: &Path,
+) -> std::io::Result<std::collections::HashMap<i64, Vec<PathBuf>>> {
+    let mut out: std::collections::HashMap<i64, Vec<PathBuf>> = Default::default();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let direct = path.join("result.json");
+        let found = if direct.is_file() {
+            Some(direct)
+        } else {
+            std::fs::read_dir(&path).ok().and_then(|inner| {
+                inner
+                    .filter_map(Result::ok)
+                    .map(|e| e.path().join("result.json"))
+                    .find(|p| p.is_file())
+            })
+        };
+        if let Some(id) = found.as_deref().and_then(chat_id_of) {
+            out.entry(id).or_default().push(path);
+        }
+    }
+    Ok(out)
+}
+
+/// The bytes under `path`, every level down. A file counts as itself.
+///
+/// Unreadable entries count as nothing rather than failing the total: this is
+/// a figure for a list column, and one locked file must not blank it.
+pub fn disk_size(path: &Path) -> u64 {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if !meta.is_dir() {
+        return meta.len();
+    }
+    std::fs::read_dir(path)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|e| disk_size(&e.path()))
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// The chat id in a `result.json`'s header.
+///
+/// Desktop's one-space indent is what makes this a line scan: a top-level key
+/// is a line opening with exactly one space and a quote, so the `"id"` of a
+/// nested object — an invite link's creator, say — is never mistaken for it.
+fn chat_id_of(path: &Path) -> Option<i64> {
+    use std::io::Read;
+    let mut head = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(64 * 1024)
+        .read_to_end(&mut head)
+        .ok()?;
+    let head = String::from_utf8_lossy(&head);
+    for line in head.lines() {
+        if line.starts_with(" \"messages\"") {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix(" \"id\": ") {
+            return rest.trim_end_matches(',').trim().parse().ok();
+        }
+    }
+    None
+}
+
 /// Reserve a folder by creating it, suffixing `(2)`, `(3)`… on a clash.
 ///
 /// **The exclusive create *is* the reservation.** Two chats whose sanitised
@@ -2207,6 +2457,166 @@ mod tests {
         let _ = std::fs::remove_dir_all(&parent);
         let d = unique_dir(&parent, "a/b:c").unwrap();
         assert!(d.ends_with("a_b_c"), "got {d:?}");
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn the_change_report_names_ids_and_dates_and_caps_the_list() {
+        let deleted = vec![(5, "2026-04-18T19:01:59".to_string())];
+        let changed: Vec<(i64, String)> = (1..=25).map(|i| (i, String::new())).collect();
+        let lines = change_report(&deleted, &changed);
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0].ends_with("#5 (2026-04-18 19:01:59)"),
+            "{}",
+            lines[0]
+        );
+        assert!(lines[1].ends_with("#20, and 5 more"), "{}", lines[1]);
+        assert!(change_report(&[], &[]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_run_reports_exactly_what_it_marked_and_versioned() {
+        let path = std::env::temp_dir().join(format!("tgx-changes-{}.sqlite", std::process::id()));
+        for s in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{s}", path.display()));
+        }
+        let store = tgx_archive::Store::open(&path).await.unwrap();
+        let msg = |id: i64, text: &str| {
+            serde_json::json!({"id": id, "type": "message", "date": "2026-01-01T10:00:00", "text": text})
+                .as_object()
+                .unwrap()
+                .clone()
+        };
+        for id in [1, 2, 3] {
+            store.merge(7, id, None, &msg(id, "a"), 100).await.unwrap();
+        }
+        // The next run: 2 is edited, 3 is gone.
+        store.merge(7, 1, None, &msg(1, "a"), 200).await.unwrap();
+        store.merge(7, 2, None, &msg(2, "b"), 200).await.unwrap();
+        store
+            .mark_unseen_deleted(7, 0, &[1, 2].into(), 200)
+            .await
+            .unwrap();
+        let (deleted, changed) = store.changes_at(7, 200).await.unwrap();
+        assert_eq!(deleted, vec![(3, "2026-01-01T10:00:00".to_string())]);
+        assert_eq!(changed.iter().map(|c| c.0).collect::<Vec<_>>(), vec![2]);
+        // And the first run's own timestamp reports nothing of this one's.
+        let (d, c) = store.changes_at(7, 100).await.unwrap();
+        assert!(d.is_empty() && c.is_empty());
+    }
+
+    #[test]
+    fn a_database_lives_in_a_folder_of_its_own() {
+        let parent = std::env::temp_dir().join(format!("tgx-arch1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        let p = archive_path(&parent, "Dev Team").unwrap();
+        assert_eq!(p, parent.join("Dev Team").join("Dev Team.sqlite"));
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[tokio::test]
+    async fn the_chats_with_a_database_are_read_from_inside_the_files() {
+        let parent = std::env::temp_dir().join(format!("tgx-arch3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        // A foldered database, named after a title Telegram has since changed.
+        let s = tgx_archive::Store::open(&archive_path(&parent, "Old Name").unwrap())
+            .await
+            .unwrap();
+        s.upsert_chat(7, "New Name", "private_group", 1)
+            .await
+            .unwrap();
+        drop(s);
+        // A flat one from an earlier build.
+        let s = tgx_archive::Store::open(&parent.join("Mum.sqlite"))
+            .await
+            .unwrap();
+        s.upsert_chat(8, "Mum", "personal_chat", 1).await.unwrap();
+        drop(s);
+        // And a .sqlite that is not ours.
+        std::fs::write(parent.join("notes.sqlite"), b"not a database").unwrap();
+        // And the old one-file-for-the-account database, holding two chats.
+        let s = tgx_archive::Store::open(&parent.join("telegram.sqlite"))
+            .await
+            .unwrap();
+        s.upsert_chat(7, "New Name", "private_group", 1)
+            .await
+            .unwrap();
+        s.upsert_chat(9, "Telegram", "personal_chat", 1)
+            .await
+            .unwrap();
+        drop(s);
+
+        let found = archived_chats(&parent).await.unwrap();
+        let mut ids: Vec<i64> = found.chats.iter().map(|(id, _)| *id).collect();
+        ids.sort();
+        assert_eq!(ids, vec![7, 8]);
+        let mut skipped: Vec<_> = found.unreadable.iter().map(|(p, _)| p.clone()).collect();
+        skipped.sort();
+        assert_eq!(
+            skipped,
+            vec![parent.join("notes.sqlite"), parent.join("telegram.sqlite")]
+        );
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn a_classic_folder_is_known_by_the_id_in_its_result_json() {
+        let parent = std::env::temp_dir().join(format!("tgx-arch4-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        // A whole-chat export, with a nested "id" ahead of the chat's own.
+        let one = parent.join("Dev Team");
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::write(
+            one.join("result.json"),
+            "{\n \"name\": \"Dev Team\",\n \"invite\": {\n  \"id\": 5\n },\n \"id\": 7,\n \"messages\": []\n}",
+        )
+        .unwrap();
+        // A forum split into topics: the id is one level down.
+        let forum = parent.join("Forum").join("General");
+        std::fs::create_dir_all(&forum).unwrap();
+        std::fs::write(
+            forum.join("result.json"),
+            "{\n \"name\": \"Forum\",\n \"type\": \"public_supergroup\",\n \"id\": 8,\n \"messages\": []\n}",
+        )
+        .unwrap();
+        // HTML only: nothing says whose it is.
+        std::fs::create_dir_all(parent.join("Pages")).unwrap();
+        std::fs::write(parent.join("Pages").join("messages.html"), "<html>").unwrap();
+
+        let found = exported_folders(&parent).unwrap();
+        assert_eq!(
+            found[&8],
+            vec![parent.join("Forum")],
+            "the chat's folder, not the topic's"
+        );
+        let mut ids: Vec<i64> = found.into_keys().collect();
+        ids.sort();
+        assert_eq!(ids, vec![7, 8]);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn a_flat_database_from_an_earlier_build_moves_into_its_folder() {
+        let parent = std::env::temp_dir().join(format!("tgx-arch2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::write(parent.join("Dev Team.sqlite"), b"db").unwrap();
+        std::fs::write(parent.join("Dev Team.sqlite-wal"), b"wal").unwrap();
+        let p = archive_path(&parent, "Dev Team").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"db");
+        assert_eq!(
+            std::fs::read(format!("{}-wal", p.display())).unwrap(),
+            b"wal",
+            "the WAL goes with the file it belongs to"
+        );
+        assert!(!parent.join("Dev Team.sqlite").exists());
+        assert!(!parent.join("Dev Team.sqlite-wal").exists());
+
+        // A folder that already holds a database is never overwritten.
+        std::fs::write(parent.join("Dev Team.sqlite"), b"stray").unwrap();
+        archive_path(&parent, "Dev Team").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"db");
         let _ = std::fs::remove_dir_all(&parent);
     }
 

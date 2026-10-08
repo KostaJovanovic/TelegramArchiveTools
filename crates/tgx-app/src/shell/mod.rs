@@ -117,6 +117,8 @@ pub struct Shell {
     /// string is how the empty state ends up quoting something other than what
     /// is in the box.
     search: String,
+    /// The saved-selection name field's buffer. See `Shell::saved_selections`.
+    selection_name: String,
 
     signed_in: bool,
     /// Tracked separately from `chats.is_empty()`: the list is empty both
@@ -125,6 +127,9 @@ pub struct Shell {
     loaded: bool,
     exporting: bool,
     counting: bool,
+    /// Update databases is reading the destination. Short, but long enough on
+    /// a network drive for a second press to start a second scan.
+    scanning: bool,
     /// **The stop signal, shared with the worker.** Setting `exporting = false`
     /// and writing "Stopped" is not stopping: the export went on writing files
     /// and then overwrote the message with its own success. This is the flag
@@ -135,6 +140,11 @@ pub struct Shell {
     /// Ticks are held **by chat id**, so they survive re-sorting, regrouping
     /// and filtering.
     selected: std::collections::HashSet<i64>,
+    /// How the list is filtered and sorted — and, in `view.disk`, what the
+    /// destination already holds of each chat, which the marks, the presence
+    /// filter and the size sort all read. That is refreshed when the list
+    /// loads, when the destination changes and when a run ends; see
+    /// [`Shell::scan_destination`].
     view: list::View,
     rows: Vec<PaintedRow>,
     /// Something changed what the rows would be. Rebuilt once at the end of an
@@ -193,6 +203,12 @@ pub struct Shell {
     /// longer the thing on screen, and a control still reading "Copied" over a
     /// log that has moved on is a claim that has quietly become false.
     log_copied: bool,
+    /// A run has ended and the taskbar button should flash. A flag rather than
+    /// a call because `apply` holds no context; `update` sends it and clears it.
+    wants_attention: bool,
+    /// Which of the log's two Copy controls `log_copied` is about — the whole
+    /// transcript or just the warnings — so only that one reads "Copied".
+    copied_warnings: bool,
     /// Whether the startup work has been submitted. The bridge cannot wake a
     /// window that does not exist yet, so the two jobs `Shell::new` used to
     /// spawn are submitted on the first frame instead — see [`Shell::update`].
@@ -269,10 +285,12 @@ impl Shell {
             form: SettingsForm::new(&settings),
             settings,
             search: String::new(),
+            selection_name: String::new(),
             signed_in: false,
             loaded: false,
             exporting: false,
             counting: false,
+            scanning: false,
             cancel: Cancel::new(),
             chats: Vec::new(),
             selected: Default::default(),
@@ -290,6 +308,8 @@ impl Shell {
             count_progress: None,
             login: None,
             log_copied: false,
+            wants_attention: false,
+            copied_warnings: false,
             started: false,
             theme_stale: true,
             frame_no: 0,
@@ -571,6 +591,14 @@ impl eframe::App for Shell {
             self.apply(event);
         }
         self.rebuild_rows_if_stale();
+        if std::mem::take(&mut self.wants_attention) {
+            // Flashes the taskbar button until the window is focused, and does
+            // nothing to a window that already is — so a run watched to the
+            // end is not interrupted by it.
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
+        }
 
         let p = self.palette;
         // Every panel in this window is unfilled but for the page colour, and

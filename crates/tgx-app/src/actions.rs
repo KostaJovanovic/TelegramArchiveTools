@@ -257,6 +257,83 @@ pub async fn refresh_chats(settings: Settings, tx: Events) {
     }
 }
 
+/// Find the chats that already have a database in the destination.
+///
+/// **No connection.** It reads the folder and the files, nothing else, so it
+/// cannot hang on a network and does not need one. The run it leads to does.
+pub async fn find_archives(settings: Settings, tx: Events) {
+    let dir = std::path::Path::new(&settings.output_dir);
+    let _ = tx.send(Event::Status(format!(
+        "Looking for databases in {}…",
+        dir.display()
+    )));
+    let found = tgx_tg::engine::archived_chats(dir)
+        .await
+        .map(Box::new)
+        .map_err(|e| format!("could not read {}: {e}", dir.display()));
+    let _ = tx.send(Event::Archived(found));
+}
+
+/// Which chats the destination already holds, for the marks in the list.
+///
+/// **Quiet on failure.** A destination that does not exist yet is the normal
+/// state before a first export, and a warning on every launch for it would
+/// teach the user to ignore warnings. It answers "nothing there" instead.
+pub async fn scan_destination(settings: Settings, tx: Events) {
+    use crate::list::OnDisk;
+    use std::collections::HashMap;
+    let dir = std::path::PathBuf::from(&settings.output_dir);
+    let archived = tgx_tg::engine::archived_chats(&dir)
+        .await
+        .unwrap_or_default();
+    // Off the async worker's own thread: it reads the head of a file per
+    // folder and walks every folder for its size, and a destination of a few
+    // hundred thousand media files on a network drive makes that slow.
+    let disk = tokio::task::spawn_blocking(move || {
+        let mut disk: HashMap<i64, OnDisk> = HashMap::new();
+        for (id, path) in &archived.files {
+            let entry = disk.entry(*id).or_default();
+            entry.database = true;
+            entry.synced = archived.synced.get(id).copied();
+            // The database's own folder, not the file: the WAL and the shm
+            // sit beside it, and in a fresh WAL that is where the writes are.
+            // **Except a flat one from before the folders**, whose parent is
+            // the destination itself — that would be every export at once.
+            entry.bytes += match path.parent() {
+                Some(parent) if parent != dir => tgx_tg::engine::disk_size(parent),
+                _ => ["", "-wal", "-shm"]
+                    .iter()
+                    .map(|s| {
+                        tgx_tg::engine::disk_size(std::path::Path::new(&format!(
+                            "{}{s}",
+                            path.display()
+                        )))
+                    })
+                    .sum(),
+            };
+        }
+        for (id, folders) in tgx_tg::engine::exported_folders(&dir).unwrap_or_default() {
+            let entry = disk.entry(id).or_default();
+            entry.folder = true;
+            for folder in folders {
+                // A database living inside the chat's Classic folder was
+                // counted with that folder above; counting it again here
+                // would report it twice.
+                if archived.files.get(&id).and_then(|p| p.parent()) != Some(folder.as_path()) {
+                    entry.bytes += tgx_tg::engine::disk_size(&folder);
+                }
+            }
+        }
+        disk
+    })
+    .await
+    .unwrap_or_default();
+    let _ = tx.send(Event::OnDisk {
+        output_dir: settings.output_dir,
+        disk,
+    });
+}
+
 /// Ask Telegram how many messages each chat holds.
 ///
 /// **One request per chat**, which is why this is a button rather than

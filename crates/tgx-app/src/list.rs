@@ -9,7 +9,7 @@
 
 use chrono::{DateTime, Datelike, Local, TimeZone};
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tgx_tg::client::{ChatInfo, ChatKind};
 
 /// A chat's last activity, as Telegram itself words it.
@@ -54,7 +54,70 @@ pub fn caption(chat: &ChatInfo, now: DateTime<Local>) -> String {
     }
 }
 
-/// The seven sort modes, in the order the menu lists them.
+/// What the destination already holds of one chat.
+///
+/// Read from the folder by `actions::scan_destination`, never from Telegram,
+/// and carried into the list so the filter, the size sort and the row's mark
+/// all read one answer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OnDisk {
+    pub database: bool,
+    pub folder: bool,
+    /// The database and every Classic folder of the chat, together.
+    pub bytes: u64,
+    /// When the database last finished a sync that read to the end.
+    pub synced: Option<i64>,
+}
+
+/// Which chats the list shows, by what the destination holds of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Presence {
+    #[default]
+    All,
+    /// A database or a Classic folder of it is in the destination.
+    Exported,
+    /// Neither is.
+    NotExported,
+}
+
+impl Presence {
+    pub const ALL: [Presence; 3] = [Presence::All, Presence::Exported, Presence::NotExported];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Presence::All => "All chats",
+            Presence::Exported => "Already exported",
+            Presence::NotExported => "Not exported yet",
+        }
+    }
+
+    fn admits(self, disk: Option<&OnDisk>) -> bool {
+        let there = disk.is_some_and(|d| d.database || d.folder);
+        match self {
+            Presence::All => true,
+            Presence::Exported => there,
+            Presence::NotExported => !there,
+        }
+    }
+}
+
+/// A byte count the way the row prints it.
+pub fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if value < 10.0 {
+        format!("{value:.1} {}", UNITS[unit])
+    } else {
+        format!("{value:.0} {}", UNITS[unit])
+    }
+}
+
+/// The eight sort modes, in the order the menu lists them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SortMode {
     #[default]
@@ -64,6 +127,9 @@ pub enum SortMode {
     NameDesc,
     Largest,
     Smallest,
+    /// The most bytes in the destination first — what to look at when a drive
+    /// is filling up.
+    OnDisk,
     Kind,
 }
 
@@ -81,6 +147,7 @@ impl SortMode {
             SortMode::NameDesc => "name_desc",
             SortMode::Largest => "largest",
             SortMode::Smallest => "smallest",
+            SortMode::OnDisk => "on_disk",
             SortMode::Kind => "type",
         }
     }
@@ -93,6 +160,7 @@ impl SortMode {
             SortMode::NameDesc => "Name (Z-A)",
             SortMode::Largest => "Most messages",
             SortMode::Smallest => "Fewest messages",
+            SortMode::OnDisk => "Largest on disk",
             SortMode::Kind => "Type",
         }
     }
@@ -114,17 +182,18 @@ impl SortMode {
     fn descending(self) -> bool {
         matches!(
             self,
-            SortMode::Recent | SortMode::NameDesc | SortMode::Largest
+            SortMode::Recent | SortMode::NameDesc | SortMode::Largest | SortMode::OnDisk
         )
     }
 
-    pub const ALL: [SortMode; 7] = [
+    pub const ALL: [SortMode; 8] = [
         SortMode::Recent,
         SortMode::Oldest,
         SortMode::Name,
         SortMode::NameDesc,
         SortMode::Largest,
         SortMode::Smallest,
+        SortMode::OnDisk,
         SortMode::Kind,
     ];
 }
@@ -217,6 +286,11 @@ pub struct View {
     pub grouped: bool,
     pub filter: String,
     pub folded: HashSet<Category>,
+    /// Which chats to show by what the destination holds of them.
+    pub presence: Presence,
+    /// What the destination holds, by chat id. A chat absent here has
+    /// nothing there — or the folder has not been read yet.
+    pub disk: HashMap<i64, OnDisk>,
 }
 
 impl Default for View {
@@ -228,6 +302,8 @@ impl Default for View {
             grouped: true,
             filter: String::new(),
             folded: HashSet::new(),
+            presence: Presence::All,
+            disk: HashMap::new(),
         }
     }
 }
@@ -263,7 +339,8 @@ fn folded_title(title: &str) -> String {
 ///
 /// Without this the count column orders `100` before `99` and the date column
 /// sorts alphabetically, putting "Yesterday" after "Wednesday".
-fn compare(a: &ChatInfo, b: &ChatInfo, sort: SortMode) -> Ordering {
+fn compare(a: &ChatInfo, b: &ChatInfo, view: &View) -> Ordering {
+    let sort = view.sort;
     let descending = sort.descending();
 
     let primary = match sort {
@@ -287,6 +364,17 @@ fn compare(a: &ChatInfo, b: &ChatInfo, sort: SortMode) -> Ordering {
             (Some(_), None) => Ordering::Less,
             (None, None) => Ordering::Equal,
         },
+        // Nothing on disk sorts last, like an uncounted chat and for the same
+        // reason: it is not a chat of zero bytes, it is one never exported.
+        SortMode::OnDisk => {
+            let size = |c: &ChatInfo| view.disk.get(&c.id).map(|d| d.bytes).filter(|b| *b > 0);
+            match (size(a), size(b)) {
+                (Some(x), Some(y)) => directed(x.cmp(&y), descending),
+                (None, Some(_)) => Ordering::Greater,
+                (Some(_), None) => Ordering::Less,
+                (None, None) => Ordering::Equal,
+            }
+        }
         // The kind column sorts on its label, which is the value: there is
         // nothing behind "Supergroup" but the word.
         SortMode::Kind => directed(
@@ -319,7 +407,11 @@ fn matches(chat: &ChatInfo, needle: &str) -> bool {
 /// not returned at all**, so no caller can paint an empty heading.
 fn buckets<'a>(chats: &'a [ChatInfo], view: &View) -> Vec<(Option<Category>, Vec<&'a ChatInfo>)> {
     let needle = view.filter.trim().to_lowercase();
-    let kept = || chats.iter().filter(|c| matches(c, &needle));
+    let kept = || {
+        chats
+            .iter()
+            .filter(|c| matches(c, &needle) && view.presence.admits(view.disk.get(&c.id)))
+    };
 
     let mut out: Vec<(Option<Category>, Vec<&ChatInfo>)> = if view.grouped {
         // Walked in the fixed order rather than sorted into one, which is how
@@ -343,7 +435,7 @@ fn buckets<'a>(chats: &'a [ChatInfo], view: &View) -> Vec<(Option<Category>, Vec
     };
 
     for (_, members) in out.iter_mut() {
-        members.sort_by(|a, b| compare(a, b, view.sort));
+        members.sort_by(|a, b| compare(a, b, view));
     }
     out
 }
@@ -847,6 +939,59 @@ mod tests {
         assert_eq!(labels.len(), SortMode::ALL.len());
         let cat_keys: HashSet<&str> = Category::ALL.iter().map(|c| c.key()).collect();
         assert_eq!(cat_keys.len(), Category::ALL.len());
+    }
+
+    fn on_disk(entries: &[(i64, bool, bool, u64)]) -> HashMap<i64, OnDisk> {
+        entries
+            .iter()
+            .map(|&(id, database, folder, bytes)| {
+                (
+                    id,
+                    OnDisk {
+                        database,
+                        folder,
+                        bytes,
+                        synced: None,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_presence_filter_splits_the_list_by_what_the_folder_holds() {
+        let chats = vec![
+            chat(1, "database", None),
+            chat(2, "folder", None),
+            chat(3, "neither", None),
+        ];
+        let mut view = flat(SortMode::Name);
+        view.disk = on_disk(&[(1, true, false, 10), (2, false, true, 10)]);
+        view.presence = Presence::Exported;
+        assert_eq!(titles(&rows(&chats, &view)), ["database", "folder"]);
+        view.presence = Presence::NotExported;
+        assert_eq!(titles(&rows(&chats, &view)), ["neither"]);
+        // And what All / None / Invert act on follows it.
+        assert_eq!(visible(&chats, &view).len(), 1);
+    }
+
+    #[test]
+    fn the_largest_on_disk_lead_and_nothing_on_disk_trails() {
+        let chats = vec![
+            chat(1, "none", None),
+            chat(2, "small", None),
+            chat(3, "big", None),
+        ];
+        let mut view = flat(SortMode::OnDisk);
+        view.disk = on_disk(&[(2, true, false, 5), (3, false, true, 5_000)]);
+        assert_eq!(titles(&rows(&chats, &view)), ["big", "small", "none"]);
+    }
+
+    #[test]
+    fn a_size_reads_in_the_unit_that_fits() {
+        assert_eq!(human_bytes(512), "0.5 KB");
+        assert_eq!(human_bytes(3 * 1024 * 1024), "3.0 MB");
+        assert_eq!(human_bytes(13_300 * 1024 * 1024), "13 GB");
     }
 
     #[test]

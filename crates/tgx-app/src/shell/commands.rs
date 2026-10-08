@@ -13,7 +13,13 @@ impl Shell {
 
     /// Read the fields back, persist, and write the stored values back in.
     pub(super) fn commit_settings(&mut self) {
+        let dir_before = self.settings.output_dir.clone();
         self.form.collect(&mut self.settings);
+        // The marks in the list describe the destination, so a new one needs
+        // reading. Only on a change: this runs on every checkbox.
+        if self.settings.output_dir != dir_before {
+            self.scan_destination();
+        }
         self.settings.sort_mode = self.view.sort.key().into();
         self.settings.group_by_type = self.view.grouped;
         // Stored in the fixed category order rather than in iteration order, so
@@ -161,6 +167,16 @@ impl Shell {
             .filter(|c| self.selected.contains(&c.id))
             .cloned()
             .collect();
+        self.run_chats(picked);
+    }
+
+    /// Start a run of exactly these chats, or add them to the one going.
+    ///
+    /// Split out of [`Self::start_export`] so Update databases can queue the
+    /// chats it found **without rewriting the ticks**: a selection the user
+    /// built up over six hundred rows is theirs, and a button that quietly
+    /// replaced it would be undoing work it was never asked about.
+    fn run_chats(&mut self, picked: Vec<ChatInfo>) {
         if picked.is_empty() {
             return;
         }
@@ -191,6 +207,98 @@ impl Shell {
             self.settings.output_dir
         ));
         self.spawn_export();
+    }
+
+    /// Find out which chats the destination already holds, for the list's
+    /// marks. No connection, and nothing written — see
+    /// [`crate::actions::scan_destination`].
+    pub(super) fn scan_destination(&mut self) {
+        let tx = self.bridge.sender();
+        let settings = self.settings.clone();
+        self.bridge
+            .spawn(async move { crate::actions::scan_destination(settings, tx).await });
+    }
+
+    /// **Update databases: sync every chat that already has one here.**
+    ///
+    /// The chats come from inside the files in the destination, not from the
+    /// ticks, so pointing Destination at a folder of databases and pressing
+    /// this is the whole of keeping them current. See [`Self::update_found`]
+    /// for what happens with the answer.
+    pub(super) fn start_update(&mut self) {
+        if self.scanning {
+            return;
+        }
+        // The destination as typed, not as last committed — the same rule as
+        // Start export.
+        self.commit_settings();
+        self.scanning = true;
+        let tx = self.bridge.sender();
+        let settings = self.settings.clone();
+        self.bridge
+            .spawn(async move { crate::actions::find_archives(settings, tx).await });
+    }
+
+    /// The scan came back. Queue what it found, in Database mode.
+    ///
+    /// **The mode is switched, and said so.** A database can only be synced by
+    /// a Database run, and a Classic run of the same chats would write a fresh
+    /// folder of each beside the databases the user asked to update — so the
+    /// button sets the mode rather than refusing, and the log records it.
+    ///
+    /// A chat with a database but missing from the list — left, deleted, or
+    /// on another account — is named rather than skipped in silence, because
+    /// "updated 11 databases" in a folder of 12 is otherwise a question with no
+    /// answer on screen.
+    pub(super) fn update_found(&mut self, found: Result<Box<tgx_tg::engine::Archived>, String>) {
+        self.scanning = false;
+        let found = match found {
+            Ok(found) => found,
+            Err(e) => {
+                self.status = format!("Failed: {e}");
+                self.journal.warn(e);
+                self.log_copied = false;
+                return;
+            }
+        };
+        for (path, why) in &found.unreadable {
+            self.journal
+                .warn(format!("skipped {}: {why}", path.display()));
+        }
+        let mut picked = Vec::new();
+        for (id, title) in &found.chats {
+            match self.chats.iter().find(|c| c.id == *id) {
+                Some(chat) => picked.push(chat.clone()),
+                None => self.journal.warn(format!(
+                    "{title} has a database here but is not in this account's chat list"
+                )),
+            }
+        }
+        self.log_copied = false;
+        if picked.is_empty() {
+            self.status = format!("No databases to update in {}", self.settings.output_dir);
+            self.journal.push(self.status.clone());
+            return;
+        }
+        // A run started while the folder was being read is already a Classic
+        // or a Database run with its own copy of the settings, and adding to
+        // a Classic one would export these chats as folders.
+        if self.exporting && !self.settings.export_db {
+            self.status = "A Classic run is going — update the databases after it ends".into();
+            self.journal.warn(self.status.clone());
+            return;
+        }
+        if !self.settings.export_db {
+            self.toggle_setting(|s| s.export_db = true);
+            self.journal
+                .push("Switched to Database mode to update the databases");
+        }
+        self.journal.push(format!(
+            "Updating {} of {} databases found",
+            picked.len(),
+            found.chats.len()
+        ));
+        self.run_chats(picked);
     }
 
     /// Put more chats into a run that is already going.

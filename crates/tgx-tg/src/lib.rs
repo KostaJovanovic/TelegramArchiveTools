@@ -1,5 +1,6 @@
 pub mod cancel;
 pub mod client;
+pub mod compare;
 pub mod config;
 pub mod convert;
 pub mod dialogs;

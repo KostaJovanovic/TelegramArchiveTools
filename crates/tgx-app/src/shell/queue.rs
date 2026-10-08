@@ -53,6 +53,10 @@ const COLUMN_GAP: f32 = space::TIGHT;
 /// with nothing around it, and the row was also the click target that opens the
 /// folder an export wrote. `READING` at the design's body leading is 21, so 26
 /// gives it the same breathing room every other row in the window has.
+/// Lines kept before each warning by Copy warnings, beside the chat's own
+/// heading line. Three is the settings, the count and the step that went wrong
+/// on a typical chat, without turning the copy back into the whole log.
+const WARNING_CONTEXT: usize = 3;
 const QUEUE_ROW_H: f32 = 26.0;
 const HEADER_H: f32 = 20.0;
 
@@ -317,17 +321,33 @@ impl Shell {
                 // photographed, and handed on no other way. egui can select the
                 // lines themselves now, but a transcript is wanted all at once.
                 if !self.journal.is_empty() {
-                    let copied = self.log_copied;
+                    let copied = self.log_copied && !self.copied_warnings;
                     // Ink while it is an offer, muted once it has been taken —
                     // the same weight as the metadata beside it. Enabled either
                     // way: "Copied" is a report, not a control that has been
                     // used up, and the transcript can be taken again once it has
                     // grown.
-                    let label = if copied { "Copied" } else { "Copy" };
+                    let label = if copied { "Copied" } else { "Copy all" };
                     let ink = if copied { p.muted } else { p.fg };
                     if action(ui, caps(label, ink), true).clicked() {
                         ui.ctx().copy_text(self.journal.to_text());
                         self.log_copied = true;
+                        self.copied_warnings = false;
+                    }
+                }
+                // **Just the warnings, each with the lines that explain it.**
+                // A twenty-chat run is a thousand lines, and the five that
+                // matter were being handed on buried in the other 995 — or
+                // copied one at a time, which loses which chat each was about.
+                if self.journal.warnings() > 0 {
+                    let copied = self.log_copied && self.copied_warnings;
+                    let label = if copied { "Copied" } else { "Copy warnings" };
+                    let ink = if copied { p.muted } else { p.fg };
+                    if action(ui, caps(label, ink), true).clicked() {
+                        ui.ctx()
+                            .copy_text(self.journal.warnings_text(WARNING_CONTEXT));
+                        self.log_copied = true;
+                        self.copied_warnings = true;
                     }
                 }
                 if self.journal.dropped() > 0 {

@@ -7,7 +7,7 @@
 //! changed once.
 
 use super::*;
-use crate::list::SortMode;
+use crate::list::{Presence, SortMode};
 use chrono::{DateTime, Local};
 use eframe::egui::{Align, Layout, Sense, Ui};
 use tgx_ui::components::{
@@ -29,7 +29,10 @@ const ROW_HEIGHT: f32 = 46.0;
 /// **Fixed, not the panel's width.** Stretched across a window it advertises
 /// room for a sentence, and what goes in it is a word — the field was 1,170
 /// points long to hold `kolab`.
-const FILTER_W: f32 = 380.0;
+///
+/// 260 rather than the 380 it was: the row gained the Show menu, and at the
+/// window's 900pt floor four controls at the old width ran off the edge.
+const FILTER_W: f32 = 260.0;
 
 impl Shell {
     /// **Head, foot, then the list — as panels, not as measured heights.**
@@ -75,7 +78,10 @@ impl Shell {
                     ui.label(eyebrow(
                         &selection_label(self.selected.len(), total, any_uncounted),
                         &p,
-                    ))
+                    ));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        self.saved_selections(ui);
+                    });
                 });
                 ui.add_space(space::STEP);
             });
@@ -137,6 +143,23 @@ impl Shell {
                         ui.selectable_value(&mut chosen, mode, text(mode.label(), &p));
                     }
                 });
+
+            // **Which chats, by what the destination already holds.** A menu
+            // rather than a third tick box: three answers to one question.
+            let presence_before = self.view.presence;
+            let mut presence = presence_before;
+            egui::ComboBox::from_id_salt("presence")
+                .selected_text(text(presence.label(), &p))
+                .width(160.0)
+                .show_ui(ui, |ui| {
+                    for option in Presence::ALL {
+                        ui.selectable_value(&mut presence, option, text(option.label(), &p));
+                    }
+                });
+            if presence != presence_before {
+                self.view.presence = presence;
+                self.rebuild_rows();
+            }
 
             // Box and label are one control, as in the settings panel. This was
             // the chat row's bug the other way up: the box worked and the words
@@ -281,6 +304,16 @@ impl Shell {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(figure(count_text(chat.message_count), &p));
                 ui.add_space(space::STEP);
+                // **Already in the destination**, so a list of six hundred
+                // says which of them a run would be updating rather than
+                // starting. Muted, beside the count: it is a fact about the
+                // folder, not a state of the row, and the fill already means
+                // ticked.
+                let disk = self.view.disk.get(&chat.id).copied().unwrap_or_default();
+                if let Some(mark) = on_disk_mark(disk.database, disk.folder) {
+                    ui.label(caps(mark, p.muted));
+                    ui.add_space(space::STEP);
+                }
                 // Title over caption, and the two are one block: no space
                 // between them beyond the leading, because a gap there would
                 // read as two rows rather than one chat with a subtitle.
@@ -291,7 +324,20 @@ impl Shell {
                     // is half its point**: the default sort is Recent activity,
                     // and without it the list is ordered on a unix second that
                     // appears nowhere on screen.
-                    ui.add(egui::Label::new(caps(&list::caption(chat, now), p.muted)).truncate());
+                    //
+                    // **What the destination holds goes on the same line**:
+                    // how big it is and when the database last caught up.
+                    // Under the title rather than beside the count, because
+                    // beside it the row would push the title off a 900pt
+                    // window to say something that is not about the chat.
+                    let mut line = list::caption(chat, now);
+                    if disk.bytes > 0 {
+                        line.push_str(&format!("    {}", list::human_bytes(disk.bytes)));
+                    }
+                    if let Some(at) = disk.synced {
+                        line.push_str(&format!("  synced {}", list::human_when(at, now)));
+                    }
+                    ui.add(egui::Label::new(caps(&line, p.muted)).truncate());
                 });
             });
         });
@@ -301,6 +347,110 @@ impl Shell {
         if response.clicked() && !self.selected.remove(&chat.id) {
             self.selected.insert(chat.id);
         }
+    }
+
+    /// **Saved selections: a name, Save, Recall, Forget.** Laid out right to
+    /// left by the caller, so the first control added is the furthest right.
+    ///
+    /// One name field serves all three: Save stores the ticks under it
+    /// (replacing a set of the same name), Recall fills it with the set it
+    /// recalled, and Forget removes the set it names. A separate field per
+    /// action would be three places to type the same word.
+    fn saved_selections(&mut self, ui: &mut Ui) {
+        let p = self.palette;
+        ui.spacing_mut().item_spacing.x = space::TIGHT;
+        let name = self.selection_name.trim().to_string();
+        let known = self
+            .settings
+            .saved_selections
+            .iter()
+            .any(|s| s.name == name);
+
+        if action(ui, caps("Forget", p.fg), known).clicked() {
+            self.forget_selection(&name);
+        }
+        let mut recalled = None;
+        let names: Vec<String> = self
+            .settings
+            .saved_selections
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        ui.add_enabled_ui(!names.is_empty(), |ui| {
+            egui::ComboBox::from_id_salt("saved-selections")
+                .selected_text(text("Recall", &p))
+                .width(140.0)
+                .show_ui(ui, |ui| {
+                    for n in &names {
+                        if ui.selectable_label(false, text(n, &p)).clicked() {
+                            recalled = Some(n.clone());
+                        }
+                    }
+                });
+        });
+        if let Some(n) = recalled {
+            self.recall_selection(&n);
+        }
+        let can_save = !name.is_empty() && !self.selected.is_empty();
+        if action(ui, caps("Save", p.fg), can_save).clicked() {
+            self.save_selection(&name);
+        }
+        ui.add(
+            field(&mut self.selection_name, &p)
+                .hint_text("Selection name")
+                .desired_width(150.0),
+        );
+    }
+
+    /// Store the ticks under `name`, replacing a set already called that.
+    pub(super) fn save_selection(&mut self, name: &str) {
+        let mut chats: Vec<i64> = self.selected.iter().copied().collect();
+        chats.sort_unstable();
+        let n = chats.len();
+        let saved = &mut self.settings.saved_selections;
+        match saved.iter_mut().find(|s| s.name == name) {
+            Some(existing) => existing.chats = chats,
+            None => saved.push(tgx_tg::config::SavedSelection {
+                name: name.to_string(),
+                chats,
+            }),
+        }
+        self.commit_settings();
+        self.status = format!("Saved {n} chats as \"{name}\"");
+    }
+
+    /// Replace the ticks with a saved set. **Replaces, like Only forums**:
+    /// a recalled set added to whatever was ticked is a set nobody saved.
+    pub(super) fn recall_selection(&mut self, name: &str) {
+        let Some(set) = self
+            .settings
+            .saved_selections
+            .iter()
+            .find(|s| s.name == name)
+        else {
+            return;
+        };
+        let live: std::collections::HashSet<i64> = self.chats.iter().map(|c| c.id).collect();
+        let ids: Vec<i64> = set.chats.clone();
+        self.selected = ids.iter().copied().filter(|id| live.contains(id)).collect();
+        let gone = ids.len() - self.selected.len();
+        self.selection_name = name.to_string();
+        // An id the account no longer has is skipped and *said*: a set of 12
+        // recalled as 11 ticks is otherwise a question with no answer.
+        self.status = if gone == 0 {
+            format!("Recalled \"{name}\": {} chats", self.selected.len())
+        } else {
+            format!(
+                "Recalled \"{name}\": {} chats, {gone} no longer in the list",
+                self.selected.len()
+            )
+        };
+    }
+
+    pub(super) fn forget_selection(&mut self, name: &str) {
+        self.settings.saved_selections.retain(|s| s.name != name);
+        self.commit_settings();
+        self.status = format!("Forgot \"{name}\"");
     }
 
     /// All / None / Invert / Only forums, and the Count button.
@@ -376,12 +526,39 @@ impl Shell {
             // A button, not small print: it costs a request per chat and can
             // take minutes, so it is a decision rather than a refinement.
             // Secondary, because the one red belongs to Start export.
+            //
+            // **Update databases sits beside it, not on the top bar.** It was a
+            // third tool up there, and at the window's 900pt floor the bar
+            // then ran under its own tabs and hid Queue. It belongs here
+            // anyway: it is a way of choosing chats — the ones the destination
+            // already holds — and it needs this list, because a database
+            // records a chat's id and the list is where the rest of what a run
+            // needs comes from. Off during a run: that run has its mode
+            // already, and this one may have to change it.
+            let updatable = self.signed_in
+                && self.loaded
+                && !self.exporting
+                && !self.counting
+                && !self.scanning;
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if button(ui, label, countable, false, &p).clicked() {
                     self.start_count();
                 }
+                if button(ui, "Update databases", updatable, false, &p).clicked() {
+                    self.start_update();
+                }
             });
         });
+    }
+}
+
+/// What a row says about the destination: a database, a folder, or both.
+pub(super) fn on_disk_mark(database: bool, folder: bool) -> Option<&'static str> {
+    match (database, folder) {
+        (true, true) => Some("Database + Folder"),
+        (true, false) => Some("Database"),
+        (false, true) => Some("Folder"),
+        (false, false) => None,
     }
 }
 

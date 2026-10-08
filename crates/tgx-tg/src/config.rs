@@ -203,6 +203,20 @@ pub struct Settings {
     /// "dark" or "light". Anything else falls back to the default, so an edited
     /// settings file cannot leave the app unreadable.
     pub theme: String,
+
+    /// Named sets of chats, so a selection built up over six hundred rows is
+    /// made once and recalled with a click. By chat id, like the ticks, so a
+    /// renamed chat stays in its set; an id the account no longer has is
+    /// skipped when recalled.
+    pub saved_selections: Vec<SavedSelection>,
+}
+
+/// One entry in [`Settings::saved_selections`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct SavedSelection {
+    pub name: String,
+    pub chats: Vec<i64>,
 }
 
 impl Default for Settings {
@@ -236,6 +250,7 @@ impl Default for Settings {
             group_by_type: true,
             folded_categories: Vec::new(),
             theme: "dark".into(),
+            saved_selections: Vec::new(),
         }
     }
 }
@@ -363,7 +378,10 @@ impl Settings {
     /// remembering to add it. `no_credential_reaches_the_run_record` is what
     /// keeps the rare change — a new secret — from being the one that slips.
     pub fn without_credentials(&self) -> Value {
-        const SECRET: [&str; 3] = ["api_id", "api_hash", "phone"];
+        // `saved_selections` is not a secret, but it names *other* chats, and
+        // the run record goes into one chat's own database — the file that
+        // must not carry anything about the conversations exported beside it.
+        const SECRET: [&str; 4] = ["api_id", "api_hash", "phone", "saved_selections"];
         let mut value = serde_json::to_value(self).unwrap_or(Value::Null);
         if let Some(map) = value.as_object_mut() {
             for key in SECRET {
@@ -449,7 +467,7 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    /// The run record goes into the chat's own `Exports/<chat>.sqlite`, which is
+    /// The run record goes into the chat's own `Exports/<chat>/<chat>.sqlite`, which is
     /// not the ACL-restricted directory and is the file people copy off the
     /// machine — one chat's database being the likeliest thing of all to be
     /// handed to somebody.
@@ -465,6 +483,11 @@ mod tests {
             api_hash: "0123456789abcdef0123456789abcdef".into(),
             phone: "+381641234567".into(),
             export_db: true,
+            // Other chats, which one chat's own database must not name.
+            saved_selections: vec![SavedSelection {
+                name: "Organisers".into(),
+                chats: vec![987654321],
+            }],
             ..Settings::default()
         };
         let record = serde_json::to_string(&settings.without_credentials()).unwrap();
@@ -473,6 +496,8 @@ mod tests {
             "0123456789abcdef0123456789abcdef",
             "+381641234567",
             "1234567",
+            "Organisers",
+            "987654321",
         ] {
             assert!(
                 !record.contains(secret),

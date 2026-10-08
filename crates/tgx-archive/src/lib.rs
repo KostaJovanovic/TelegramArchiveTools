@@ -30,4 +30,6 @@
 
 pub mod store;
 
-pub use store::{merge_volatile, Error, Merge, Store, StoredMessage, FILE_EXT, SCHEMA_VERSION};
+pub use store::{
+    merge_volatile, ChatEntry, Error, Merge, Store, StoredMessage, FILE_EXT, SCHEMA_VERSION,
+};

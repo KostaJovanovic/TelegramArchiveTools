@@ -121,13 +121,14 @@ Running both was the first design and it is the wrong one: Classic's full
 re-read happens anyway, so the pair costs exactly as much as Classic and is
 incremental in name only.
 
-**One database per chat, named after the chat.** `ChatExporter::open_archive`
-opens `<output_dir>/<sanitised title>.sqlite` at the top of every `run` and the
+**One database per chat, named after the chat, in a folder of its own.**
+`ChatExporter::open_archive` opens `<output_dir>/<title>/<title>.sqlite`
+(sanitised) at the top of every `run` and the
 assignment drops the previous chat's connection. The name has to be *stable* or
 a re-run would start a fresh archive instead of syncing, so it is deliberately
 not `unique_dir` — no `(2)` on a clash. The clash is caught inside the file
 instead: `Store::holds_another_chat` asks whether the `chats` table already
-names somebody else, and if it does the chat id joins the filename, on this run
+names somebody else, and if it does the chat id joins the folder and filename, on this run
 and on every later one. `chats` and not `messages`, because a chat is recorded
 before its first message and a chat that exported nothing still owns the file it
 made. A store that will not open now fails **that chat**, not the queue — with a

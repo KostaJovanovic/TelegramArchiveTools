@@ -124,6 +124,19 @@ pub enum Event {
     LoginFailed(String),
     /// The loaded chat list.
     Chats(Vec<tgx_tg::client::ChatInfo>),
+    /// What Update databases found in the destination, or why it could not
+    /// look. Always sent, so the button comes back either way.
+    ///
+    /// Boxed: it is the largest thing any event carries, and an unboxed one
+    /// makes every event — and every failed send — that size.
+    Archived(Result<Box<tgx_tg::engine::Archived>, String>),
+    /// The chats the destination already holds, by id. Carries the folder it
+    /// describes, so an answer about a destination the user has since changed
+    /// can be recognised and dropped.
+    OnDisk {
+        output_dir: String,
+        disk: std::collections::HashMap<i64, crate::list::OnDisk>,
+    },
 
     // -- counting ---------------------------------------------------------
     /// One chat's total. **`None` is not zero**: it means Telegram would not

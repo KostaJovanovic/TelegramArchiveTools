@@ -98,11 +98,172 @@ async fn main() -> Result<()> {
                 .ok_or_else(|| anyhow!("usage: tgx export [--db] [--full] <chat title>"))?;
             export(&settings, want).await
         }
+        "compare" => {
+            // `--db <dir>` and `--csv <file>` take a value; everything else is
+            // an export folder. The database folder defaults to the one the
+            // settings write to, which is where the window's databases are.
+            let mut db = std::path::PathBuf::from(&settings.output_dir);
+            let mut csv = None;
+            let mut roots = Vec::new();
+            let mut rest = args.iter().skip(1);
+            while let Some(a) = rest.next() {
+                match a.as_str() {
+                    "--db" => {
+                        db = rest
+                            .next()
+                            .ok_or_else(|| anyhow!("--db needs a folder"))?
+                            .into()
+                    }
+                    "--csv" => {
+                        csv = Some(std::path::PathBuf::from(
+                            rest.next().ok_or_else(|| anyhow!("--csv needs a file"))?,
+                        ))
+                    }
+                    f if f.starts_with("--") => {
+                        return Err(anyhow!("unknown flag {f:?}\n\n{USAGE}"))
+                    }
+                    folder => roots.push(std::path::PathBuf::from(folder)),
+                }
+            }
+            if roots.is_empty() {
+                return Err(anyhow!(
+                    "usage: tgx compare <export folder>... [--db <folder>] [--csv <file>]"
+                ));
+            }
+            compare(&roots, &db, csv.as_deref()).await
+        }
         _ => {
             println!("{USAGE}");
             Ok(())
         }
     }
+}
+
+/// `tgx compare`: what old exports hold that the databases do not.
+///
+/// Offline, and it prints ids and dates only — see `tgx_tg::compare`.
+async fn compare(
+    roots: &[std::path::PathBuf],
+    db: &std::path::Path,
+    csv: Option<&std::path::Path>,
+) -> Result<()> {
+    use tgx_tg::compare;
+    let files = compare::find_results(roots, 4);
+    println!(
+        "reading {} result.json file(s) under {} folder(s)…",
+        files.len(),
+        roots.len()
+    );
+    let (exports, skipped) = compare::read_exports(&files);
+    let (verdicts, unreadable) = compare::compare(exports, db).await?;
+
+    let mut total_missing = 0;
+    let mut no_db = Vec::new();
+    for v in &verdicts {
+        let Some(path) = &v.database else {
+            no_db.push(v);
+            continue;
+        };
+        total_missing += v.missing.len();
+        println!();
+        println!("{} (id {})", v.title, v.chat_id);
+        for f in &v.export_files {
+            println!("  export:   {}", f.display());
+        }
+        println!("  database: {}", path.display());
+        println!(
+            "  {} in the export(s), {} in the database ({} since deleted on Telegram)",
+            v.exported, v.stored, v.stored_deleted
+        );
+        if v.stored == 0 && v.exported > 0 {
+            // Not 49,780 deletions: a database that holds nothing for this
+            // chat never finished a sync, and every message would read as
+            // missing.
+            println!(
+                "  the database holds NO messages for this chat — it never finished a \
+                 sync; run it before trusting a comparison"
+            );
+        } else if v.missing.is_empty() {
+            println!("  nothing missing — every exported message is in the database");
+        } else {
+            let services = v.missing.iter().filter(|m| m.kind == "service").count();
+            let span = compare::date_span(&v.missing)
+                .map(|(a, b)| format!(", {a} … {b}"))
+                .unwrap_or_default();
+            println!(
+                "  MISSING from the database: {} ({} messages, {} service){span}",
+                v.missing.len(),
+                v.missing.len() - services,
+                services
+            );
+            let ids: Vec<String> = v
+                .missing
+                .iter()
+                .take(12)
+                .map(|m| m.id.to_string())
+                .collect();
+            let more = if v.missing.len() > 12 { ", …" } else { "" };
+            println!("    ids: {}{more}", ids.join(", "));
+        }
+        if v.only_in_database > 0 {
+            println!(
+                "  {} in the database inside the export's range but in no export",
+                v.only_in_database
+            );
+        }
+    }
+
+    if !no_db.is_empty() {
+        println!();
+        println!("no database in {} for:", db.display());
+        for v in no_db {
+            println!(
+                "  {} (id {}) — {} messages, {}",
+                v.title,
+                v.chat_id,
+                v.exported,
+                v.export_files
+                    .first()
+                    .map(|f| f.display().to_string())
+                    .unwrap_or_default()
+            );
+        }
+    }
+    if !skipped.is_empty() || !unreadable.is_empty() {
+        println!();
+        println!("skipped:");
+        for (path, why) in skipped.iter().chain(&unreadable) {
+            println!("  {}: {why}", path.display());
+        }
+    }
+
+    if let Some(csv) = csv {
+        let mut out = String::from("chat_id,chat,message_id,type,date\r\n");
+        for v in &verdicts {
+            for m in &v.missing {
+                out.push_str(&format!(
+                    "{},\"{}\",{},{},{}\r\n",
+                    v.chat_id,
+                    v.title.replace('"', "\"\""),
+                    m.id,
+                    m.kind,
+                    m.date
+                ));
+            }
+        }
+        std::fs::write(csv, out)?;
+        println!();
+        println!(
+            "wrote {total_missing} missing message(s) to {}",
+            csv.display()
+        );
+    }
+    println!();
+    println!(
+        "{} chat(s) compared, {total_missing} message(s) only in the exports",
+        verdicts.len()
+    );
+    Ok(())
 }
 
 const USAGE: &str = "\
@@ -111,10 +272,13 @@ tgx — Telegram Desktop-format exporter
   tgx login            sign in (once; the session is saved)
   tgx chats            list every chat this account can see
   tgx export <title>   export the chat whose title matches
+  tgx compare <export folder>... [--db <folder>] [--csv <file>]
+                       offline: list messages old Desktop-format exports hold
+                       that the databases do not (ids and dates only)
 
   export flags:
     --db      Database mode instead of folders: sync into the chat's own
-              Exports/<chat>.sqlite, media included
+              Exports/<chat>/<chat>.sqlite, media included
     --full    with --db, walk the whole history rather than the trailing
               window — needed for older deletions and for files an earlier
               run skipped
