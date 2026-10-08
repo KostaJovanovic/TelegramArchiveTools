@@ -119,15 +119,24 @@ fn main() {
             Some([a.trim().parse().ok()?, b.trim().parse().ok()?])
         })
         .unwrap_or([w + 320.0, h + 160.0]);
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_title(TITLE)
+        .with_inner_size(size)
+        // **The floor the layout was measured at.** Without it the window
+        // drags below 900x620, where the queue's Chat column — the only
+        // thing naming which row is which — is squeezed to 11px, i.e. gone,
+        // while the count columns beside it keep their full width.
+        .with_min_inner_size([w, h]);
+    // **eframe stamps its own logo on the window** when given no icon, and the
+    // taskbar draws the window's icon, not the exe's — so the one embedded by
+    // `build.rs` showed in Explorer and nowhere the app was actually running.
+    // The same file, so the two cannot disagree.
+    let viewport = match window_icon(include_bytes!("../icon/TelegramExporter.ico")) {
+        Some(icon) => viewport.with_icon(icon),
+        None => viewport,
+    };
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title(TITLE)
-            .with_inner_size(size)
-            // **The floor the layout was measured at.** Without it the window
-            // drags below 900x620, where the queue's Chat column — the only
-            // thing naming which row is which — is squeezed to 11px, i.e. gone,
-            // while the count columns beside it keep their full width.
-            .with_min_inner_size([w, h]),
+        viewport,
         ..Default::default()
     };
 
@@ -156,9 +165,46 @@ fn main() {
     }
 }
 
+/// The largest PNG-encoded image in an `.ico`, decoded for the window.
+///
+/// `tools/make_icon.py` writes the 256px size as PNG — the others are BMP —
+/// and eframe already links a PNG decoder for its own logo, so reading the
+/// directory is all this adds. `None` leaves eframe's default: a missing icon
+/// is cosmetic and never worth failing a launch over.
+fn window_icon(ico: &[u8]) -> Option<eframe::egui::IconData> {
+    let u16_at = |at: usize| Some(u16::from_le_bytes(ico.get(at..at + 2)?.try_into().ok()?));
+    let u32_at = |at: usize| Some(u32::from_le_bytes(ico.get(at..at + 4)?.try_into().ok()?));
+    let count = usize::from(u16_at(4)?);
+    let png = (0..count)
+        .filter_map(|i| {
+            let entry = 6 + 16 * i;
+            // A width byte of 0 means 256.
+            let width = match *ico.get(entry)? {
+                0 => 256,
+                w => u32::from(w),
+            };
+            let size = u32_at(entry + 8)? as usize;
+            let offset = u32_at(entry + 12)? as usize;
+            let bytes = ico.get(offset..offset.checked_add(size)?)?;
+            bytes.starts_with(b"\x89PNG").then_some((width, bytes))
+        })
+        .max_by_key(|(width, _)| *width)?
+        .1;
+    eframe::icon_data::from_png_bytes(png).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_wears_the_exes_own_icon() {
+        let icon = window_icon(include_bytes!("../icon/TelegramExporter.ico"))
+            .expect("the shipped .ico carries a PNG image");
+        assert_eq!((icon.width, icon.height), (256, 256));
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+        assert!(window_icon(b"not an icon").is_none());
+    }
 
     #[test]
     fn a_panic_before_the_window_opens_blames_the_graphics_stack() {
