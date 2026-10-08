@@ -98,6 +98,10 @@ fn main() {
         eprintln!("could not open the log: {e}");
     }
 
+    // What the Viewer's Open media copied out last time, if that run ended
+    // without reaching `on_exit` — a crash, or a kill from Task Manager.
+    tgx_tg::viewer::clear_temp();
+
     std::panic::set_hook(Box::new(|info| {
         use std::sync::atomic::Ordering;
         let message = panic_message(WINDOW_OPENED.load(Ordering::Relaxed), &info.to_string());

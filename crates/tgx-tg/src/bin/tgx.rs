@@ -180,6 +180,42 @@ async fn main() -> Result<()> {
             };
             split(&file, &into, dry_run).await
         }
+        "search" => {
+            // One positional is the text; two are a folder and the text. The
+            // folder defaults to the one the settings write to.
+            let mut limit = 50usize;
+            let mut words = Vec::new();
+            let mut rest = args.iter().skip(1);
+            while let Some(a) = rest.next() {
+                match a.as_str() {
+                    "--limit" => {
+                        let n = rest
+                            .next()
+                            .ok_or_else(|| anyhow!("--limit needs a number"))?;
+                        limit = n
+                            .parse()
+                            .map_err(|e| anyhow!("--limit {n:?} is not a number: {e}"))?;
+                    }
+                    f if f.starts_with("--") => {
+                        return Err(anyhow!("unknown flag {f:?}\n\n{USAGE}"))
+                    }
+                    w => words.push(w.to_string()),
+                }
+            }
+            let (dir, needle) = match words.as_slice() {
+                [text] => (std::path::PathBuf::from(&settings.output_dir), text.clone()),
+                [dir, text] => (std::path::PathBuf::from(dir), text.clone()),
+                _ => {
+                    return Err(anyhow!(
+                        "usage: tgx search [<folder>] <text> [--limit N] — quote text with spaces"
+                    ))
+                }
+            };
+            if needle.trim().is_empty() {
+                return Err(anyhow!("nothing to search for"));
+            }
+            search(&dir, &needle, limit).await
+        }
         "import" => {
             let mut db = std::path::PathBuf::from(&settings.output_dir);
             let mut dry_run = false;
@@ -231,6 +267,83 @@ async fn doctor(dir: &std::path::Path, fix: bool) -> Result<()> {
         println!("{fixable} can be fixed: run again with --fix (with no export running)");
     }
     Ok(())
+}
+
+/// `tgx search`: every message in the folder's databases that says `needle`.
+///
+/// **The one command here that prints message text**, because finding it is
+/// what was asked for — to this terminal only. Nothing of it goes to
+/// `log::`, which writes `tgx.log` beside the executable.
+async fn search(dir: &std::path::Path, needle: &str, limit: usize) -> Result<()> {
+    let found = tgx_tg::search::across(dir, needle, limit).await?;
+    for c in &found.chats {
+        println!();
+        println!("{} (id {}) — {} hit(s)", c.title, c.chat_id, c.hits.len());
+        println!("  database: {}", c.path.display());
+        for h in &c.hits {
+            let mut flags = Vec::new();
+            if h.deleted {
+                flags.push("deleted");
+            }
+            if h.in_earlier_version {
+                flags.push("earlier version");
+            }
+            let flags = if flags.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", flags.join(", "))
+            };
+            println!(
+                "  {:>8}  {}{flags}  {}",
+                h.id,
+                h.date.replacen('T', " ", 1),
+                excerpt(&h.excerpt, needle)
+            );
+        }
+        if c.hits.len() >= limit {
+            println!("  … stopped at {limit}; --limit raises it");
+        }
+    }
+    for (path, why) in &found.unreadable {
+        println!("skipped {}: {why}", path.display());
+    }
+    println!();
+    println!(
+        "{} hit(s) in {} chat(s) under {}",
+        found.total(),
+        found.chats.len(),
+        dir.display()
+    );
+    Ok(())
+}
+
+/// One line of `text` around the first place `needle` occurs, on one line.
+fn excerpt(text: &str, needle: &str) -> String {
+    const SIDE: usize = 40;
+    let flat: Vec<char> = text
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    let lower: Vec<char> = flat.iter().flat_map(|c| c.to_lowercase()).collect();
+    let want: Vec<char> = needle.trim().to_lowercase().chars().collect();
+    // Located in the folded text, which is the same length as the original
+    // for every script these chats are in; where folding changes the length
+    // the window is merely a few characters off.
+    let at = lower
+        .windows(want.len().max(1))
+        .position(|w| w == want.as_slice())
+        .unwrap_or(0)
+        .min(flat.len());
+    let from = at.saturating_sub(SIDE);
+    let to = (at + want.len() + SIDE).min(flat.len());
+    let mut out: String = flat[from..to].iter().collect();
+    if from > 0 {
+        out.insert(0, '…');
+    }
+    if to < flat.len() {
+        out.push('…');
+    }
+    out
 }
 
 /// `tgx split`: one database per chat out of a file holding several.
@@ -520,6 +633,12 @@ tgx — Telegram Desktop-format exporter
                        offline: copy those messages into the databases, marked
                        deleted and recovered (only into a database that has
                        finished a sync)
+  tgx search [<folder>] <text> [--limit N]
+                       offline: every message in the folder's databases whose
+                       text contains <text>, any case — earlier versions and
+                       deleted messages included, and flagged; N per chat
+                       (default 50). Prints the matching text here, never to
+                       the log
 
   export flags:
     --db      Database mode instead of folders: sync into the chat's own

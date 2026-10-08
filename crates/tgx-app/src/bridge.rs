@@ -140,6 +140,36 @@ pub enum Event {
     /// Check folder's findings, one line each, or why it could not look.
     Checked(Result<Vec<String>, String>),
 
+    // -- the viewer -------------------------------------------------------
+    /// The databases the Viewer can open. Carries the folder it describes, like
+    /// [`Event::OnDisk`], so a list of a destination since changed is dropped.
+    ViewerDatabases {
+        output_dir: String,
+        found: Result<Vec<tgx_tg::viewer::Database>, String>,
+    },
+    /// One chat's rows. Carries which chat, so a slow load of a database the
+    /// user has since moved away from cannot replace the one on screen.
+    ViewerLoaded {
+        path: std::path::PathBuf,
+        chat_id: i64,
+        rows: Result<Vec<tgx_tg::viewer::Row>, String>,
+    },
+    /// One message in full, for the detail pane. Dropped unless it is still
+    /// the selected one.
+    ViewerDetail {
+        chat_id: i64,
+        id: i64,
+        detail: Result<Option<Box<tgx_tg::viewer::Detail>>, String>,
+    },
+    /// What a search found. `scope` is the chat searched, or `None` for every
+    /// database in the destination; with `needle`, it is how an answer to a
+    /// question nobody is asking any more is recognised and dropped.
+    SearchHits {
+        needle: String,
+        scope: Option<i64>,
+        found: Result<Box<tgx_tg::search::Found>, String>,
+    },
+
     // -- counting ---------------------------------------------------------
     /// One chat's total. **`None` is not zero**: it means Telegram would not
     /// say, and the row must stay blank rather than claim an empty chat.

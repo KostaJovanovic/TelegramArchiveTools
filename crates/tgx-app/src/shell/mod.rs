@@ -22,6 +22,7 @@ mod events;
 mod queue;
 mod settings;
 mod signin;
+mod viewer;
 
 use crate::bridge::{Activity, Bridge, Event};
 use crate::journal::Journal;
@@ -67,16 +68,24 @@ pub enum View {
     /// (rows they can add to and take out of) was the one that was not on the
     /// tab.
     Queue,
+    /// Read what the databases hold: one chat at a time, deleted and edited
+    /// messages marked, every earlier version, a search.
+    ///
+    /// **Last, because it is the one view that is not part of making an
+    /// export** — the other three are the sequence, this is what the sequence
+    /// leaves behind. It needs no sign-in and no connection.
+    Viewer,
 }
 
 impl View {
-    pub const ALL: [View; 3] = [View::Chats, View::Settings, View::Queue];
+    pub const ALL: [View; 4] = [View::Chats, View::Settings, View::Queue, View::Viewer];
 
     pub fn label(self) -> &'static str {
         match self {
             View::Chats => "Chats",
             View::Settings => "Settings",
             View::Queue => "Queue",
+            View::Viewer => "Viewer",
         }
     }
 }
@@ -229,6 +238,9 @@ pub struct Shell {
     /// Frames drawn. Only [`shot`] reads it, to know when the layout has
     /// settled enough to be worth photographing.
     frame_no: u32,
+    /// The Viewer's state: which database is open, its rows, the selection,
+    /// the search. See [`viewer::ViewerState`].
+    viewer: viewer::ViewerState,
 }
 
 impl Shell {
@@ -322,6 +334,7 @@ impl Shell {
             started: false,
             theme_stale: true,
             frame_no: 0,
+            viewer: Default::default(),
         }
     }
 
@@ -527,7 +540,7 @@ fn schedule_from(settings: &Settings, now: std::time::Instant) -> Option<std::ti
 /// `u32`s. Raw because a PNG encoder is a dependency this app has no other use
 /// for; `tools/shot.ps1` turns it into an image.
 ///
-/// `TGX_SHOT_VIEW=chats|settings|queue` picks which view to draw first.
+/// `TGX_SHOT_VIEW=chats|settings|queue|viewer` picks which view to draw first.
 ///
 /// Nothing here runs unless the variable is set, and it is read once.
 mod shot {
@@ -546,6 +559,7 @@ mod shot {
             "chats" => Some(View::Chats),
             "settings" => Some(View::Settings),
             "queue" => Some(View::Queue),
+            "viewer" => Some(View::Viewer),
             _ => None,
         }
     }
@@ -659,6 +673,7 @@ impl eframe::App for Shell {
                 View::Chats => self.chat_panel(ui),
                 View::Settings => self.settings_panel(ui),
                 View::Queue => self.queue_view(ui),
+                View::Viewer => self.viewer_panel(ui),
             });
 
         // Last, so it takes its clicks before anything under it does.
@@ -678,6 +693,11 @@ impl eframe::App for Shell {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.cancel.cancel();
         self.bridge.shutdown(std::time::Duration::from_secs(10));
+        // After the drain, so an Open media still writing is not raced. See
+        // `tgx_tg::viewer::temp_dir` for why the copies do not outlive the
+        // window; `main` clears it on the way in as well, for the run that
+        // ended without reaching here.
+        tgx_tg::viewer::clear_temp();
     }
 }
 

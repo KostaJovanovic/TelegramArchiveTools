@@ -94,6 +94,25 @@ impl Shell {
                 self.scan_destination();
             }
 
+            Event::ViewerDatabases { output_dir, found } => {
+                self.viewer_databases(output_dir, found)
+            }
+            Event::ViewerLoaded {
+                path,
+                chat_id,
+                rows,
+            } => self.viewer_loaded(path, chat_id, rows),
+            Event::ViewerDetail {
+                chat_id,
+                id,
+                detail,
+            } => self.viewer_detail(chat_id, id, detail),
+            Event::SearchHits {
+                needle,
+                scope,
+                found,
+            } => self.viewer_hits(needle, scope, found),
+
             Event::Archived(found) => self.update_found(found),
             Event::Checked(found) => self.folder_checked(found),
             Event::OnDisk { output_dir, disk } => {

@@ -31,5 +31,6 @@
 pub mod store;
 
 pub use store::{
-    merge_volatile, ChatEntry, Error, Merge, Store, StoredMessage, FILE_EXT, SCHEMA_VERSION,
+    merge_volatile, plain_text, ChatEntry, Error, Hit, MediaEntry, Merge, Store, StoredMessage,
+    StoredVersion, FILE_EXT, SCHEMA_VERSION,
 };

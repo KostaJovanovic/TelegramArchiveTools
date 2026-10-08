@@ -207,6 +207,82 @@ pub struct StoredMessage {
     pub deleted_seen: Option<i64>,
 }
 
+/// One superseded payload of a message, as [`Store::versions_of`] reads it.
+#[derive(Debug, Clone)]
+pub struct StoredVersion {
+    /// 1 for the payload first stored, counting up. The message's current
+    /// payload is `StoredMessage::version`, one past the last of these.
+    pub version: i64,
+    pub payload: Map<String, Value>,
+    /// When a run found the message different and kept this one aside, unix
+    /// seconds — the date this version **stopped** being current.
+    pub seen: i64,
+}
+
+/// One file a message points at, as [`Store::media_of`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaEntry {
+    pub role: String,
+    pub file_id: i64,
+    pub kind: String,
+    /// The name the folder export used, or would have, relative to the topic
+    /// folder — `photos/photo_1@18-12-2025_16-00-00.jpg`.
+    pub path: String,
+    /// The name Telegram gave the file, when it had one. Photos have none.
+    pub file_name: Option<String>,
+    /// `None` when the bytes are not in the database: over [`MAX_BLOB`], or a
+    /// run that recorded the link and failed to read the file back.
+    pub size: Option<i64>,
+}
+
+/// One message [`Store::search`] matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hit {
+    pub id: i64,
+    pub topic_id: i64,
+    /// The payload's own `date`, Desktop's local `2025-12-18T16:00:00`.
+    pub date: String,
+    /// A run has seen it gone from Telegram.
+    pub deleted: bool,
+    /// **The text is only in a superseded version**: edited away, so the
+    /// message as it reads now does not say it.
+    pub in_earlier_version: bool,
+    /// The text that matched — the current one, or the earlier version's when
+    /// that is the only one that did. **For a screen, never for the log**: it
+    /// is other people's conversation, and the log sits beside the executable.
+    pub excerpt: String,
+}
+
+/// A message's `text` as one plain string.
+///
+/// Desktop writes `text` as a bare string when the message has no formatting
+/// and as an **array** otherwise — plain strings interleaved with entity
+/// objects that carry their own `text` (`{"type": "bold", "text": "…"}`). A
+/// search over the raw JSON would match key names and miss a word split across
+/// two entities, so both shapes are flattened to what a person reads.
+pub fn plain_text(text: &Value) -> String {
+    match text {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .map(|part| match part {
+                Value::String(s) => s.as_str(),
+                Value::Object(o) => o.get("text").and_then(Value::as_str).unwrap_or(""),
+                _ => "",
+            })
+            .collect(),
+        _ => String::new(),
+    }
+}
+
+/// [`plain_text`] of a stored payload's `text` key.
+fn payload_text(payload: &str) -> String {
+    serde_json::from_str::<Value>(payload)
+        .ok()
+        .and_then(|v| v.get("text").map(plain_text))
+        .unwrap_or_default()
+}
+
 /// Merge a freshly read message into one already stored.
 ///
 /// Starts from `stored` and copies [`VOLATILE`] across, removing a key the
@@ -310,14 +386,18 @@ impl Store {
         &self.path
     }
 
-    /// The chats a database at `path` records, **without writing to it**.
+    /// Open an existing database **for reading only**.
     ///
-    /// Not [`Store::open`], which creates the schema in whatever it is given and
-    /// switches it to WAL: this is asked of every `.sqlite` found in a folder
-    /// the user pointed at, and one that is somebody else's file must come out
-    /// of the question untouched. A file this build would not open — another
-    /// schema version, or not one of ours at all — answers an error.
-    pub async fn chats_in(path: &Path) -> Result<Vec<ChatEntry>, Error> {
+    /// For everything that looks rather than syncs — [`Self::chats_in`], the
+    /// viewer, a search. Not [`Store::open`], which creates the schema in
+    /// whatever it is handed and switches it to WAL: a viewer pointed at the
+    /// wrong file must leave it exactly as it found it, and one opened while an
+    /// export is writing must not be the second writer. SQLite enforces the
+    /// read-only flag, so a write slipped in here fails rather than lands.
+    ///
+    /// A file this build would not open — another schema version, or not one
+    /// of ours at all — answers an error, as `open` does.
+    pub async fn open_read(path: &Path) -> Result<Self, Error> {
         let db = libsql::Builder::new_local(path)
             .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .build()
@@ -331,16 +411,34 @@ impl Store {
             Some(r) => r.get::<String>(0)?.trim().parse().unwrap_or(-1),
             None => -1,
         };
+        drop(rows);
         if found != SCHEMA_VERSION {
             return Err(Error::Schema {
                 found,
                 wanted: SCHEMA_VERSION,
             });
         }
+        Ok(Self {
+            conn,
+            _db: db,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// The chats a database at `path` records, **without writing to it**.
+    ///
+    /// Not [`Store::open`], which creates the schema in whatever it is given and
+    /// switches it to WAL: this is asked of every `.sqlite` found in a folder
+    /// the user pointed at, and one that is somebody else's file must come out
+    /// of the question untouched. A file this build would not open — another
+    /// schema version, or not one of ours at all — answers an error.
+    pub async fn chats_in(path: &Path) -> Result<Vec<ChatEntry>, Error> {
+        let store = Self::open_read(path).await?;
         // `synced` is the last run that *walked to the end*. A cancelled or
         // failed run also writes a `runs` row, and calling that a sync would
         // tell the list a chat is current when its last attempt stopped short.
-        let mut rows = conn
+        let mut rows = store
+            .conn
             .query(
                 "SELECT c.id, c.title,
                         (SELECT MAX(finished) FROM runs r
@@ -890,6 +988,136 @@ impl Store {
         Ok(out)
     }
 
+    /// Every message of a chat, every topic, oldest first — what a viewer
+    /// lists. Deleted ones included: they are the reason to look.
+    pub async fn all_messages(&self, chat_id: i64) -> Result<Vec<StoredMessage>, Error> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id, topic_id, payload, version, deleted_seen FROM messages
+                  WHERE chat_id = ?1 ORDER BY date_unixtime, id",
+                params![chat_id],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(StoredMessage {
+                id: row.get::<i64>(0)?,
+                topic_id: row.get::<i64>(1)?,
+                payload: serde_json::from_str(&row.get::<String>(2)?)?,
+                version: row.get::<i64>(3)?,
+                deleted_seen: row.get::<Option<i64>>(4)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Every superseded payload of one message, oldest first. Empty for a
+    /// message nobody has edited — or whose reactions never moved, which also
+    /// makes a version; see [`Self::changes_at`].
+    pub async fn versions_of(&self, chat_id: i64, id: i64) -> Result<Vec<StoredVersion>, Error> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT version, payload, seen FROM versions
+                  WHERE chat_id = ?1 AND id = ?2 ORDER BY version",
+                params![chat_id, id],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(StoredVersion {
+                version: row.get::<i64>(0)?,
+                payload: serde_json::from_str(&row.get::<String>(1)?)?,
+                seen: row.get::<i64>(2)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The messages of a chat whose text contains `needle`, **ignoring case**,
+    /// oldest first and at most `limit` of them.
+    ///
+    /// **Earlier versions and deleted messages are searched too**, because
+    /// those are what an archive is for: text edited away is found through the
+    /// version that still has it, and a message gone from Telegram is found
+    /// like any other. See [`Hit`] for how each is flagged.
+    ///
+    /// **The case is folded here, in Rust, not by SQLite.** SQLite's `lower()`
+    /// and `LIKE` fold ASCII only, and these chats are Serbian: `LIKE '%ђорђе%'`
+    /// does not find `Ђорђе`. So the text comes out of the database and is
+    /// matched here — a scan of every message, which for a chat of a hundred
+    /// thousand is a fraction of a second, and costs no index and no schema
+    /// change (an FTS5 table would be both, and would lock older builds out of
+    /// the file).
+    pub async fn search(
+        &self,
+        chat_id: i64,
+        needle: &str,
+        limit: usize,
+    ) -> Result<Vec<Hit>, Error> {
+        let needle = needle.trim().to_lowercase();
+        if needle.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        // The versions first: a message matched only there is still listed in
+        // its place among the rest, so they are collected and then consulted
+        // during the one ordered pass below. The earliest matching version
+        // wins the excerpt.
+        let mut earlier: std::collections::HashMap<i64, String> = Default::default();
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id, payload FROM versions WHERE chat_id = ?1 ORDER BY id, version",
+                params![chat_id],
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            let id = row.get::<i64>(0)?;
+            if earlier.contains_key(&id) {
+                continue;
+            }
+            let text = payload_text(&row.get::<String>(1)?);
+            if text.to_lowercase().contains(&needle) {
+                earlier.insert(id, text);
+            }
+        }
+        drop(rows);
+
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id, topic_id, COALESCE(json_extract(payload, '$.date'), ''),
+                        deleted_seen IS NOT NULL, payload
+                   FROM messages WHERE chat_id = ?1 ORDER BY date_unixtime, id",
+                params![chat_id],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let id = row.get::<i64>(0)?;
+            let text = payload_text(&row.get::<String>(4)?);
+            let now = text.to_lowercase().contains(&needle);
+            let excerpt = match (now, earlier.remove(&id)) {
+                (true, _) => text,
+                (false, Some(old)) => old,
+                (false, None) => continue,
+            };
+            out.push(Hit {
+                id,
+                topic_id: row.get::<i64>(1)?,
+                date: row.get::<String>(2)?,
+                deleted: row.get::<i64>(3)? != 0,
+                in_earlier_version: !now,
+                excerpt,
+            });
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     // --- media --------------------------------------------------------------
     //
     // **Keyed on `(file_id, kind)`, not on `file_id` alone.** Telegram's photo
@@ -973,6 +1201,33 @@ impl Store {
             )
             .await?;
         Ok(())
+    }
+
+    /// The files one message points at, with what the database knows of each.
+    /// Ordered by role so a message's photo and its thumbnail come out the
+    /// same way round every time.
+    pub async fn media_of(&self, chat_id: i64, message_id: i64) -> Result<Vec<MediaEntry>, Error> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT m.role, m.file_id, m.kind, m.path, b.file_name, b.size
+                   FROM media m LEFT JOIN blobs b ON b.file_id = m.file_id AND b.kind = m.kind
+                  WHERE m.chat_id = ?1 AND m.message_id = ?2 ORDER BY m.role",
+                params![chat_id, message_id],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(MediaEntry {
+                role: row.get::<String>(0)?,
+                file_id: row.get::<i64>(1)?,
+                kind: row.get::<String>(2)?,
+                path: row.get::<String>(3)?,
+                file_name: row.get::<Option<String>>(4)?,
+                size: row.get::<Option<i64>>(5)?,
+            });
+        }
+        Ok(out)
     }
 
     pub async fn blob(&self, file_id: i64, kind: &str) -> Result<Option<Vec<u8>>, Error> {
@@ -1414,6 +1669,148 @@ mod tests {
         s.commit_batch().await.unwrap();
         s.commit_batch().await.unwrap();
         assert_eq!(s.message_count(1).await.unwrap(), (1, 1));
+    }
+
+    fn with_text(id: i64, text: Value) -> Map<String, Value> {
+        let mut m = msg(id, "");
+        m.insert("text".into(), text);
+        m
+    }
+
+    #[tokio::test]
+    async fn search_finds_current_text_and_ignores_what_does_not_match() {
+        let s = store("search-current").await;
+        s.merge(1, 10, Some(1), &msg(10, "Sastanak u petak"), 100)
+            .await
+            .unwrap();
+        s.merge(1, 11, Some(1), &msg(11, "nešto drugo"), 100)
+            .await
+            .unwrap();
+        // Another chat in the same file is not this chat's hit.
+        s.merge(2, 12, Some(1), &msg(12, "petak"), 100)
+            .await
+            .unwrap();
+        let hits = s.search(1, "PETAK", 50).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, 10);
+        assert_eq!(hits[0].date, "2025-12-18T16:00:00");
+        assert!(!hits[0].deleted && !hits[0].in_earlier_version);
+        assert_eq!(hits[0].excerpt, "Sastanak u petak");
+        assert!(s.search(1, "   ", 50).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_finds_text_that_was_edited_away() {
+        let s = store("search-version").await;
+        s.merge(1, 10, Some(1), &msg(10, "lozinka je 1234"), 100)
+            .await
+            .unwrap();
+        s.merge(1, 10, Some(1), &msg(10, "[obrisano]"), 200)
+            .await
+            .unwrap();
+        let hits = s.search(1, "lozinka", 50).await.unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].in_earlier_version);
+        assert_eq!(hits[0].excerpt, "lozinka je 1234");
+        // What the message says now is a hit in the ordinary way.
+        let now = s.search(1, "obrisano", 50).await.unwrap();
+        assert!(!now[0].in_earlier_version);
+    }
+
+    #[tokio::test]
+    async fn search_finds_a_deleted_message_and_says_so() {
+        let s = store("search-deleted").await;
+        s.merge(1, 10, Some(1), &msg(10, "vidimo se"), 100)
+            .await
+            .unwrap();
+        s.mark_deleted(1, 10, 300).await.unwrap();
+        let hits = s.search(1, "vidimo", 50).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].deleted);
+    }
+
+    #[tokio::test]
+    async fn search_folds_cyrillic_case_which_sqlite_cannot() {
+        let s = store("search-cyrillic").await;
+        s.merge(1, 10, Some(1), &msg(10, "Ђорђе стиже у 5"), 100)
+            .await
+            .unwrap();
+        for needle in ["ђорђе", "ЂОРЂЕ", "Ђорђе"] {
+            let hits = s.search(1, needle, 50).await.unwrap();
+            assert_eq!(hits.len(), 1, "{needle}");
+        }
+    }
+
+    #[tokio::test]
+    async fn search_reads_text_given_as_entities_as_one_string() {
+        let s = store("search-entities").await;
+        let text = json!([{"type": "bold", "text": "Важно"}, " sutra u 10", {"type": "link", "text": "https://x.rs"}]);
+        s.merge(1, 10, Some(1), &with_text(10, text), 100)
+            .await
+            .unwrap();
+        // Across the boundary between an entity and the plain run after it,
+        // which a search of the raw JSON would never match.
+        let hits = s.search(1, "важно sutra", 50).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].excerpt, "Важно sutra u 10https://x.rs");
+        // And the JSON's own key names are not text.
+        assert!(s.search(1, "bold", 50).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_stops_at_the_limit_oldest_first() {
+        let s = store("search-limit").await;
+        for id in 1..=5 {
+            s.merge(1, id, Some(1), &msg(id, "isto"), 100)
+                .await
+                .unwrap();
+        }
+        let ids: Vec<i64> = s
+            .search(1, "isto", 3)
+            .await
+            .unwrap()
+            .iter()
+            .map(|h| h.id)
+            .collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn a_read_only_store_reads_and_refuses_to_write() {
+        let s = store("read-only").await;
+        s.merge(1, 10, Some(1), &msg(10, "v1"), 100).await.unwrap();
+        s.merge(1, 10, Some(1), &msg(10, "v2"), 200).await.unwrap();
+        s.put_blob(
+            77,
+            "files",
+            "application/pdf",
+            Some("plan.pdf"),
+            b"%PDF",
+            100,
+        )
+        .await
+        .unwrap();
+        s.link_media(1, 10, "file", 77, "files", "files/plan.pdf")
+            .await
+            .unwrap();
+        s.link_media(1, 10, "thumbnail", 78, "files", "files/plan_thumb.jpg")
+            .await
+            .unwrap();
+        let path = s.path().to_path_buf();
+        drop(s);
+
+        let r = Store::open_read(&path).await.unwrap();
+        assert_eq!(r.all_messages(1).await.unwrap().len(), 1);
+        let versions = r.versions_of(1, 10).await.unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].payload["text"], json!("v1"));
+        assert_eq!(versions[0].seen, 200);
+        let media = r.media_of(1, 10).await.unwrap();
+        assert_eq!(media.len(), 2);
+        assert_eq!(media[0].file_name.as_deref(), Some("plan.pdf"));
+        assert_eq!(media[0].size, Some(4));
+        assert_eq!(media[1].size, None, "linked, but the bytes never arrived");
+        assert!(r.merge(1, 11, Some(1), &msg(11, "x"), 300).await.is_err());
     }
 
     #[test]

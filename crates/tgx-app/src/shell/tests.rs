@@ -742,6 +742,240 @@ fn recalling_a_selection_replaces_the_ticks_and_names_what_is_gone() {
     assert!(s.status.contains("1 no longer in the list"), "{}", s.status);
 }
 
+// -- the viewer ----------------------------------------------------------------
+
+/// A database the viewer can "open". The path does not exist, so the detail
+/// request a selection sends fails offline and harmlessly; these tests are
+/// about what the shell does with the answers it is handed.
+fn db(chat_id: i64, title: &str) -> tgx_tg::viewer::Database {
+    tgx_tg::viewer::Database {
+        chat_id,
+        title: title.into(),
+        path: std::env::temp_dir()
+            .join("tgx-viewer-shell-test-none")
+            .join(format!("{title}.sqlite")),
+    }
+}
+
+fn message(id: i64, deleted: bool, version: i64) -> tgx_tg::viewer::Row {
+    tgx_tg::viewer::Row {
+        id,
+        topic_id: 1,
+        date: format!("2025-12-18 16:{id:02}"),
+        from: "Ivana".into(),
+        preview: format!("message {id}"),
+        media: None,
+        deleted: deleted.then(|| "2025-12-20 10:00".into()),
+        version,
+        recovered: false,
+        service: false,
+    }
+}
+
+/// A shell with `db` open and its rows applied.
+fn viewing(database: &tgx_tg::viewer::Database, rows: Vec<tgx_tg::viewer::Row>) -> Shell {
+    let mut s = Shell::headless();
+    s.show(View::Viewer);
+    s.viewer_open(database.clone(), None);
+    assert!(s.viewer.loading);
+    s.apply(Event::ViewerLoaded {
+        path: database.path.clone(),
+        chat_id: database.chat_id,
+        rows: Ok(rows),
+    });
+    s
+}
+
+fn hit(id: i64) -> tgx_tg::search::Hit {
+    tgx_tg::search::Hit {
+        id,
+        topic_id: 1,
+        date: "2025-12-18T16:00:00".into(),
+        deleted: false,
+        in_earlier_version: false,
+        excerpt: String::new(),
+    }
+}
+
+#[test]
+fn the_viewer_is_a_fourth_view_with_its_own_tab() {
+    assert_eq!(View::ALL.len(), 4);
+    assert_eq!(View::ALL[3], View::Viewer);
+    assert_eq!(View::Viewer.label(), "Viewer");
+    let mut s = Shell::headless();
+    s.show(View::Viewer);
+    assert_eq!(s.body, View::Viewer);
+    // And a run starting does not pull the user out of it.
+    s.suggest(View::Queue);
+    assert_eq!(s.body, View::Viewer);
+}
+
+#[test]
+fn a_loaded_chat_counts_its_markers_and_the_filter_narrows_it() {
+    let d = db(7, "Dev");
+    let mut s = viewing(
+        &d,
+        vec![
+            message(1, false, 1),
+            message(2, true, 1),
+            message(3, false, 3),
+        ],
+    );
+    assert!(!s.viewer.loading);
+    assert_eq!(s.viewer.shown, vec![0, 1, 2]);
+    assert_eq!(s.viewer.counts, (1, 1, 0));
+    s.viewer_set_filter(viewer::Filter::Deleted);
+    assert_eq!(s.viewer.shown, vec![1]);
+    s.viewer_set_filter(viewer::Filter::Edited);
+    assert_eq!(s.viewer.shown, vec![2]);
+}
+
+#[test]
+fn rows_for_a_chat_no_longer_open_are_dropped() {
+    // A slow load of the database the user just moved away from must not
+    // replace the one on screen.
+    let (a, b) = (db(1, "A"), db(2, "B"));
+    let mut s = viewing(&a, vec![message(1, false, 1)]);
+    s.viewer_open(b.clone(), None);
+    s.apply(Event::ViewerLoaded {
+        path: a.path.clone(),
+        chat_id: 1,
+        rows: Ok(vec![message(1, false, 1), message(2, false, 1)]),
+    });
+    assert!(s.viewer.loading, "still waiting for B");
+    assert!(s.viewer.rows.is_empty());
+}
+
+#[test]
+fn search_hits_in_this_chat_select_the_first_and_step_through_the_rest() {
+    let d = db(7, "Dev");
+    let rows = (1..=10).map(|id| message(id, false, 1)).collect();
+    let mut s = viewing(&d, rows);
+    // Filtered to Deleted, which none of the hits are: selecting one must put
+    // the filter back rather than select a row nobody can see.
+    s.viewer_set_filter(viewer::Filter::Deleted);
+    s.viewer.query = "sastanak".into();
+    s.viewer_search();
+    let found = tgx_tg::search::Found {
+        chats: vec![tgx_tg::search::ChatHits {
+            chat_id: 7,
+            title: "Dev".into(),
+            path: d.path.clone(),
+            hits: vec![hit(4), hit(9)],
+        }],
+        unreadable: vec![],
+    };
+    s.apply(Event::SearchHits {
+        needle: "sastanak".into(),
+        scope: Some(7),
+        found: Ok(Box::new(found)),
+    });
+    assert_eq!(s.viewer.hits, vec![4, 9]);
+    assert_eq!(s.viewer.selected, Some(4));
+    assert_eq!(s.viewer.hit_at, Some(0));
+    assert_eq!(s.viewer.filter, viewer::Filter::All);
+    assert_eq!(s.viewer.scroll_to, Some(3), "the list jumps to row 4");
+
+    s.viewer_step_hit(1);
+    assert_eq!(s.viewer.selected, Some(9));
+    s.viewer_step_hit(1);
+    assert_eq!(s.viewer.selected, Some(4), "wraps");
+    s.viewer_step_hit(-1);
+    assert_eq!(s.viewer.selected, Some(9));
+}
+
+#[test]
+fn an_answer_to_a_search_nobody_is_asking_any_more_is_dropped() {
+    let d = db(7, "Dev");
+    let mut s = viewing(&d, vec![message(1, false, 1)]);
+    s.viewer.query = "new".into();
+    s.viewer_search();
+    s.apply(Event::SearchHits {
+        needle: "old".into(),
+        scope: Some(7),
+        found: Ok(Box::default()),
+    });
+    assert!(
+        s.viewer.asked.is_some(),
+        "still waiting for the right answer"
+    );
+}
+
+#[test]
+fn a_hit_in_another_database_opens_that_chat_at_that_message() {
+    let (a, b) = (db(1, "A"), db(2, "B"));
+    let mut s = viewing(&a, vec![message(1, false, 1)]);
+    s.viewer.everywhere = true;
+    s.viewer.query = "ђорђе".into();
+    s.viewer_search();
+    let found = tgx_tg::search::Found {
+        chats: vec![tgx_tg::search::ChatHits {
+            chat_id: 2,
+            title: "B".into(),
+            path: b.path.clone(),
+            hits: vec![hit(5), hit(8)],
+        }],
+        unreadable: vec![],
+    };
+    s.apply(Event::SearchHits {
+        needle: "ђорђе".into(),
+        scope: None,
+        found: Ok(Box::new(found)),
+    });
+    assert!(s.viewer.showing_found);
+    assert_eq!(s.viewer.found_rows, vec![(0, 0), (0, 1)]);
+
+    s.viewer_open_hit(0, 1);
+    assert!(!s.viewer.showing_found);
+    assert_eq!(s.viewer.open.as_ref().map(|d| d.chat_id), Some(2));
+    assert!(s.viewer.loading);
+    s.apply(Event::ViewerLoaded {
+        path: b.path.clone(),
+        chat_id: 2,
+        rows: Ok((1..=9).map(|id| message(id, false, 1)).collect()),
+    });
+    assert_eq!(s.viewer.selected, Some(8), "the clicked hit, once loaded");
+    assert_eq!(s.viewer.scroll_to, Some(7));
+    assert_eq!(
+        s.viewer.hits,
+        vec![5, 8],
+        "and its chat's hits for Prev / Next"
+    );
+    assert_eq!(s.viewer.hit_at, Some(1));
+}
+
+#[test]
+fn a_detail_for_a_message_no_longer_selected_is_dropped() {
+    let d = db(7, "Dev");
+    let mut s = viewing(&d, vec![message(1, false, 1), message(2, false, 1)]);
+    s.viewer_select(2, false);
+    let detail = |id| tgx_tg::viewer::Detail {
+        id,
+        date: String::new(),
+        from: String::new(),
+        text: "x".into(),
+        reply_to: None,
+        edited: None,
+        deleted: None,
+        recovered: false,
+        action: None,
+        versions: vec![],
+        media: vec![],
+    };
+    s.apply(Event::ViewerDetail {
+        chat_id: 7,
+        id: 1,
+        detail: Ok(Some(Box::new(detail(1)))),
+    });
+    assert!(s.viewer.detail.is_none());
+    s.apply(Event::ViewerDetail {
+        chat_id: 7,
+        id: 2,
+        detail: Ok(Some(Box::new(detail(2)))),
+    });
+    assert_eq!(s.viewer.detail.as_ref().map(|d| d.id), Some(2));
+}
+
 #[test]
 fn update_databases_does_not_join_a_classic_run() {
     // That run has its own copy of the settings; adding to it would export the
