@@ -627,6 +627,20 @@ fn the_sort_and_grouping_are_taken_from_the_saved_settings() {
 }
 
 #[test]
+fn a_folder_check_logs_problems_as_warnings_and_shows_the_log() {
+    let mut s = shell_with(vec![]);
+    s.checking = true;
+    s.apply(Event::Checked(Ok(vec![
+        "PROBLEM: x: holds 2 chats".into(),
+        "note: y: has never finished a sync".into(),
+    ])));
+    assert!(!s.checking, "the button comes back");
+    assert_eq!(s.journal.warnings(), 1, "only the problem is a warning");
+    assert!(s.journal.to_text().contains("never finished a sync"));
+    assert_eq!(s.body, View::Queue);
+}
+
+#[test]
 fn the_scheduled_sync_fires_when_due_and_yields_to_a_run() {
     use std::time::{Duration, Instant};
     let mut s = shell_with(vec![chat(1, "a", None)]);

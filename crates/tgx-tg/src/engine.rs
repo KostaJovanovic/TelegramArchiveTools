@@ -1894,7 +1894,7 @@ pub async fn sleep_in_slices(total: std::time::Duration) {
 /// the flat file, and its `-wal` and `-shm` with it, moves into the folder
 /// when the folder holds no database yet. The WAL is named after the file it
 /// belongs to; moving one without the other loses committed pages.
-fn archive_path(parent: &Path, name: &str) -> std::io::Result<PathBuf> {
+pub(crate) fn archive_path(parent: &Path, name: &str) -> std::io::Result<PathBuf> {
     let ext = tgx_archive::FILE_EXT;
     let path = parent.join(name).join(format!("{name}.{ext}"));
     let flat = parent.join(format!("{name}.{ext}"));

@@ -95,6 +95,7 @@ impl Shell {
             }
 
             Event::Archived(found) => self.update_found(found),
+            Event::Checked(found) => self.folder_checked(found),
             Event::OnDisk { output_dir, disk } => {
                 // An answer about a destination the user has since moved away
                 // from would mark chats that are not there.

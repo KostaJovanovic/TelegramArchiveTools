@@ -132,6 +132,20 @@ async fn main() -> Result<()> {
             }
             compare(&roots, &db, csv.as_deref()).await
         }
+        "doctor" => {
+            let mut dir = std::path::PathBuf::from(&settings.output_dir);
+            let mut fix = false;
+            for a in args.iter().skip(1) {
+                match a.as_str() {
+                    "--fix" => fix = true,
+                    f if f.starts_with("--") => {
+                        return Err(anyhow!("unknown flag {f:?}\n\n{USAGE}"))
+                    }
+                    folder => dir = folder.into(),
+                }
+            }
+            doctor(&dir, fix).await
+        }
         "import" => {
             let mut db = std::path::PathBuf::from(&settings.output_dir);
             let mut dry_run = false;
@@ -164,6 +178,25 @@ async fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// `tgx doctor`: what is wrong with an export folder, and with `--fix`, put
+/// right what can be.
+async fn doctor(dir: &std::path::Path, fix: bool) -> Result<()> {
+    let found = tgx_tg::doctor::examine(dir).await?;
+    println!("{}: {} finding(s)", dir.display(), found.len());
+    for f in &found {
+        println!("  {}", f.line());
+    }
+    let fixable = found.iter().filter(|f| f.fix.is_some()).count();
+    if fix {
+        for line in tgx_tg::doctor::repair(dir, &found) {
+            println!("  {line}");
+        }
+    } else if fixable > 0 {
+        println!("{fixable} can be fixed: run again with --fix (with no export running)");
+    }
+    Ok(())
 }
 
 /// `tgx import`: copy what only old exports hold into the databases.
@@ -396,6 +429,10 @@ tgx — Telegram Desktop-format exporter
                        offline: list messages old Desktop-format exports hold
                        that the databases do not (ids and dates only); an
                        HTML-only export is matched to a database by chat name
+  tgx doctor [<folder>] [--fix]
+                       offline: what is wrong with an export folder — misplaced
+                       or misnamed databases, leftovers of runs that did not
+                       finish; --fix moves and deletes only those leftovers
   tgx import <export folder>... [--db <folder>] [--dry-run]
                        offline: copy those messages into the databases, marked
                        deleted and recovered (only into a database that has

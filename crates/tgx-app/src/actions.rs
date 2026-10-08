@@ -274,6 +274,17 @@ pub async fn find_archives(settings: Settings, tx: Events) {
     let _ = tx.send(Event::Archived(found));
 }
 
+/// Check folder: what is wrong with the destination, as log lines. Changes
+/// nothing — see `tgx_tg::doctor`.
+pub async fn check_folder(settings: Settings, tx: Events) {
+    let dir = std::path::Path::new(&settings.output_dir);
+    let lines = tgx_tg::doctor::examine(dir)
+        .await
+        .map(|found| found.iter().map(|f| f.line()).collect())
+        .map_err(|e| format!("could not read {}: {e}", dir.display()));
+    let _ = tx.send(Event::Checked(lines));
+}
+
 /// Which chats the destination already holds, for the marks in the list.
 ///
 /// **Quiet on failure.** A destination that does not exist yet is the normal

@@ -188,6 +188,16 @@ impl Shell {
             ))
             .on_hover_text(full);
         });
+        // Read-only: what is found goes to the log. The fixes are the CLI's
+        // (`tgx doctor --fix`), because each moves or deletes files and a
+        // button that does that one click after reporting is a button pressed
+        // twice by accident.
+        row(ui, |ui| {
+            if button(ui, "Check folder", !self.checking, false, &p).clicked() {
+                self.check_folder();
+            }
+            help(ui, "check_folder", CHECK_HELP, &p);
+        });
     }
 
     /// **Classic or Database — an exclusive choice, drawn as one, and it
@@ -658,6 +668,10 @@ const REREAD_ALL_HELP: &str =
      the only way to catch an edit or a deletion older than the window above — \
      or to pick up media after raising the size limit.";
 
+const CHECK_HELP: &str = "Look through the folder for trouble: a database a sync would not find \
+     under its name, two databases for one chat, a file holding several chats, leftovers of a run \
+     that did not finish. Nothing is changed; what is found is listed in the log.";
+
 const SYNC_HELP: &str = "While this window stays open, press Update databases by itself every \
      this many hours: every chat with a database in the destination is synced. 0 turns it off. \
      A run already going is never interrupted; the next one waits for it.";
@@ -764,6 +778,7 @@ mod tests {
             REREAD_HELP,
             REREAD_ALL_HELP,
             SYNC_HELP,
+            CHECK_HELP,
             SPLIT_HELP,
             MEDIA_HELP,
             KINDS_HELP,

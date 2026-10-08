@@ -137,6 +137,8 @@ pub enum Event {
         output_dir: String,
         disk: std::collections::HashMap<i64, crate::list::OnDisk>,
     },
+    /// Check folder's findings, one line each, or why it could not look.
+    Checked(Result<Vec<String>, String>),
 
     // -- counting ---------------------------------------------------------
     /// One chat's total. **`None` is not zero**: it means Telegram would not

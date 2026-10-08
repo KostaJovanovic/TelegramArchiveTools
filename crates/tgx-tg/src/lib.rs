@@ -4,6 +4,7 @@ pub mod compare;
 pub mod config;
 pub mod convert;
 pub mod dialogs;
+pub mod doctor;
 pub mod download;
 pub mod engine;
 pub mod enrich;

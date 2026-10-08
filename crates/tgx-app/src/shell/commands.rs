@@ -245,6 +245,47 @@ impl Shell {
             .spawn(async move { crate::actions::find_archives(settings, tx).await });
     }
 
+    /// Check folder: look through the destination and log what is wrong.
+    pub(super) fn check_folder(&mut self) {
+        self.commit_settings();
+        self.checking = true;
+        let tx = self.bridge.sender();
+        let settings = self.settings.clone();
+        self.bridge
+            .spawn(async move { crate::actions::check_folder(settings, tx).await });
+    }
+
+    /// Check folder came back. Problems are warnings, so Copy warnings takes
+    /// them; notes are ordinary lines. The log is in the Queue view, which is
+    /// shown, since the button is on another.
+    pub(super) fn folder_checked(&mut self, found: Result<Vec<String>, String>) {
+        self.checking = false;
+        self.log_copied = false;
+        let dir = self.settings.output_dir.clone();
+        match found {
+            Err(e) => self.journal.warn(e),
+            Ok(lines) if lines.is_empty() => {
+                self.journal.push(format!("Checked {dir}: nothing wrong"));
+            }
+            Ok(lines) => {
+                self.journal
+                    .push(format!("Checked {dir}: {} finding(s)", lines.len()));
+                for line in lines {
+                    if line.starts_with("PROBLEM") {
+                        self.journal.warn(line);
+                    } else {
+                        self.journal.push(format!("  {line}"));
+                    }
+                }
+                self.journal.push(
+                    "  Fixes are made from the command line: tgx doctor --fix, with no export \
+                     running",
+                );
+            }
+        }
+        self.show(View::Queue);
+    }
+
     /// Restart the scheduled sync's clock from `now` — on launch, when the
     /// interval is changed, and when a run ends.
     pub(super) fn arm_schedule(&mut self, now: std::time::Instant) {

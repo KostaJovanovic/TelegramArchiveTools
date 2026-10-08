@@ -130,6 +130,8 @@ pub struct Shell {
     /// Update databases is reading the destination. Short, but long enough on
     /// a network drive for a second press to start a second scan.
     scanning: bool,
+    /// Check folder is looking; its button is off until it answers.
+    checking: bool,
     /// **The stop signal, shared with the worker.** Setting `exporting = false`
     /// and writing "Stopped" is not stopping: the export went on writing files
     /// and then overwrote the message with its own success. This is the flag
@@ -297,6 +299,7 @@ impl Shell {
             exporting: false,
             counting: false,
             scanning: false,
+            checking: false,
             cancel: Cancel::new(),
             chats: Vec::new(),
             selected: Default::default(),
