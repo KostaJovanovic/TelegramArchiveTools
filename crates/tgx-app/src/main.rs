@@ -105,10 +105,20 @@ fn main() {
     }));
 
     let (w, h) = tgx_ui::components::min_window();
+    // `TGX_SHOT_SIZE=WxH` opens the window at that size, so `tools/shot.ps1`
+    // can photograph the narrow window — which is where layouts break — and
+    // not only the default one. Clamped by the floor below like a drag would be.
+    let size = std::env::var("TGX_SHOT_SIZE")
+        .ok()
+        .and_then(|s| {
+            let (a, b) = s.split_once('x')?;
+            Some([a.trim().parse().ok()?, b.trim().parse().ok()?])
+        })
+        .unwrap_or([w + 320.0, h + 160.0]);
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title(TITLE)
-            .with_inner_size([w + 320.0, h + 160.0])
+            .with_inner_size(size)
             // **The floor the layout was measured at.** Without it the window
             // drags below 900x620, where the queue's Chat column — the only
             // thing naming which row is which — is squeezed to 11px, i.e. gone,

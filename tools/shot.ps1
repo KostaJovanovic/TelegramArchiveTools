@@ -24,6 +24,8 @@ param(
     [string]$View = 'chats',
     [string]$Out = "$env:TEMP\tgx-shot.png",
     [string]$Exe = "dist\TelegramExporter.exe",
+    # WxH, e.g. 900x620 for the floor. Empty keeps the default size.
+    [string]$Size = '',
     # Long enough for a sign-in and a chat list; the app quits by itself as soon
     # as it has written the frame, so this is only a ceiling.
     [int]$TimeoutSeconds = 40
@@ -37,6 +39,7 @@ Remove-Item $raw -Force -ErrorAction SilentlyContinue
 
 $env:TGX_SHOT = $raw
 $env:TGX_SHOT_VIEW = $View
+if ($Size) { $env:TGX_SHOT_SIZE = $Size }
 try {
     $p = Start-Process -FilePath $Exe -PassThru
     if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
@@ -45,7 +48,7 @@ try {
     }
 }
 finally {
-    Remove-Item Env:TGX_SHOT, Env:TGX_SHOT_VIEW -ErrorAction SilentlyContinue
+    Remove-Item Env:TGX_SHOT, Env:TGX_SHOT_VIEW, Env:TGX_SHOT_SIZE -ErrorAction SilentlyContinue
 }
 
 if (-not (Test-Path $raw)) { throw "no frame at $raw -- see TelegramExporterData\tgx.log" }

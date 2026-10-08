@@ -311,6 +311,16 @@ impl Shell {
                 ui.spacing_mut().item_spacing = egui::vec2(space::STEP, 6.0);
                 for (key, label) in MEDIA_LABELS {
                     let on = self.settings.media_kinds.iter().any(|k| k == key);
+                    // **The wrap is asked for by hand.** A wrapping layout
+                    // wraps *widgets*; the nested `horizontal` below is a
+                    // child `Ui`, which is placed at the cursor whether it fits
+                    // or not. So the strip never wrapped: it ran off the right
+                    // edge, widened the whole column with it, and every field
+                    // laid out after it — the size limit, parallel downloads —
+                    // was pushed out of the window.
+                    if ui.available_size_before_wrap().x < tick_width(ui, label, &p) {
+                        ui.end_row();
+                    }
                     // Nested, so the gap between a box and its own label is
                     // `TIGHT` while the gap between two categories is `STEP`.
                     // One `item_spacing` cannot say both, and at a single value
@@ -551,6 +561,21 @@ fn tick(ui: &mut Ui, label: &str, on: bool, enabled: bool, p: &Palette) -> bool 
         .clicked()
 }
 
+/// How wide [`tick`] will draw: the box (`tick_box` is one reading size
+/// square), the gap, and the label as a frameless button, padding included.
+fn tick_width(ui: &Ui, label: &str, p: &Palette) -> f32 {
+    let galley = egui::WidgetText::from(text(label, p)).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Body,
+    );
+    tgx_ui::tokens::window::READING
+        + space::TIGHT
+        + galley.size().x
+        + 2.0 * ui.spacing().button_padding.x
+}
+
 /// A section heading. **Space above it, and no line under it.**
 ///
 /// There were rules down this panel, one per section, and they were the loudest
@@ -597,7 +622,7 @@ fn set_extra(s: &mut tgx_tg::config::Settings, key: &str, on: bool) {
 
 const DESTINATION_HELP: &str =
     "Where exports go. Classic writes one folder per chat here; Database writes \
-     one <chat>.sqlite per chat beside them. What is typed is used as-is and may \
+     one <chat>.sqlite per chat, each in a folder of its own. What is typed is used as-is and may \
      not exist, so Browse is the one way to be certain of the path.";
 
 const HTML_HELP: &str = "Desktop's browsable messages1.html and the pages after it, reproduced \
