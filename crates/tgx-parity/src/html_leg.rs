@@ -24,7 +24,7 @@
 //! had **zero `<img>` elements against Desktop's 649** while this leg was green
 //! over it for the whole of Phases 3–7, because the `src` it lifts is the only
 //! trace the leg looks for. The preview's *pixel size* stays under test even
-//! though its file name is lifted — `add_preview` recomputes it.
+//! though its file name is lifted — `tgx_html::preview::preview_of` recomputes it.
 
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -32,7 +32,6 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use tgx_html::preview::{preview_size, PREVIEW_BOX, STICKER_BOX};
 use tgx_html::writer::HtmlWriter;
 
 pub fn run(topics: &[PathBuf]) -> Result<u32> {
@@ -238,57 +237,6 @@ fn unescape(s: &str) -> String {
         .replace("&amp;", "&")
 }
 
-/// Rebuild the `<img>` Desktop chose for this message, and its CSS size.
-fn add_preview(m: &Map<String, Value>, info: &mut Map<String, Value>) {
-    let s = |k: &str| m.get(k).and_then(Value::as_str).unwrap_or("");
-    let kind = s("media_type");
-    let photo = s("photo");
-    let file = s("file");
-    let is_ph = |v: &str| v.starts_with("(File");
-
-    let wh = |box_size: i64| -> (i64, i64) {
-        let w = m.get("width").and_then(Value::as_i64).unwrap_or(0);
-        let h = m.get("height").and_then(Value::as_i64).unwrap_or(0);
-        preview_size(w, h, box_size).1
-    };
-
-    let thumb_of = |path: &str| -> String {
-        match path.rsplit_once('.') {
-            Some((stem, ext)) => format!("{stem}_thumb.{ext}"),
-            None => format!("{path}_thumb"),
-        }
-    };
-
-    if !photo.is_empty() && !is_ph(photo) {
-        let (w, h) = wh(PREVIEW_BOX);
-        *info = info.clone();
-        info.insert(
-            "preview".into(),
-            json!({ "src": thumb_of(photo), "width": w, "height": h }),
-        );
-        return;
-    }
-    if file.is_empty() || is_ph(file) {
-        return;
-    }
-    let lower = file.to_lowercase();
-    if kind == "sticker" && (lower.ends_with(".webp") || lower.ends_with(".png")) {
-        let (w, h) = wh(STICKER_BOX);
-        info.insert(
-            "preview".into(),
-            json!({ "src": thumb_of(file), "width": w, "height": h }),
-        );
-    } else if matches!(kind, "video_file" | "video_message" | "animation") {
-        if let Some(thumb) = m.get("thumbnail").and_then(Value::as_str) {
-            let (w, h) = wh(PREVIEW_BOX);
-            info.insert(
-                "preview".into(),
-                json!({ "src": thumb, "width": w, "height": h }),
-            );
-        }
-    }
-}
-
 fn check(topic: &Path) -> Result<Vec<PageReport>> {
     let raw = std::fs::read_to_string(topic.join("result.json"))
         .with_context(|| format!("reading {}/result.json", topic.display()))?;
@@ -426,7 +374,9 @@ fn check(topic: &Path) -> Result<Vec<PageReport>> {
             info.insert("reactions_chosen".into(), json!(info_src.reactions_chosen));
         }
 
-        add_preview(&m, &mut info);
+        if let Some(pv) = tgx_html::preview::preview_of(&m) {
+            info.insert("preview".into(), pv);
+        }
         if let Some(src) = &info_src.preview_src {
             if let Some(Value::Object(pv)) = info.get_mut("preview") {
                 pv.insert("src".into(), json!(src));

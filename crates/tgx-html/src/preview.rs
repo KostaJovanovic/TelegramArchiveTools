@@ -4,6 +4,8 @@
 //! of every inline preview, and rounding differently shows up as a one-pixel
 //! difference on most images — which is thousands of diffing lines.
 
+use serde_json::{json, Map, Value};
+
 /// Desktop scales an inline preview to fit this box.
 pub const PREVIEW_BOX: i64 = 260;
 
@@ -64,9 +66,97 @@ pub fn preview_size(width: i64, height: i64, box_size: i64) -> ((i64, i64), (i64
     (px, ((px.0 / 2).max(1), (px.1 / 2).max(1)))
 }
 
+/// The `<img>` Desktop puts inline for a message, rebuilt from its JSON alone:
+/// `{"src", "width", "height"}`, the shape `_p.preview` takes.
+///
+/// For any reader that has a message's `result.json` form and nothing else —
+/// the html leg replaying a reference export, and `tgx unpack` writing a
+/// database back out as a folder. **The engine does not use this**: it has the
+/// planner's own preview name, which carries a `(1)` collision suffix this
+/// cannot know about, and `src` here is only the `<stem>_thumb<ext>` Desktop
+/// would name a preview that took no suffix. The *size* is exact either way —
+/// it comes from `width` and `height` through [`preview_size`] — which is why
+/// the html leg still tests it while overriding the name.
+pub fn preview_of(m: &Map<String, Value>) -> Option<Value> {
+    let s = |k: &str| m.get(k).and_then(Value::as_str).unwrap_or("");
+    let kind = s("media_type");
+    let photo = s("photo");
+    let file = s("file");
+    let is_placeholder = |v: &str| v.starts_with("(File");
+
+    let sized = |src: &str, box_size: i64| {
+        let w = m.get("width").and_then(Value::as_i64).unwrap_or(0);
+        let h = m.get("height").and_then(Value::as_i64).unwrap_or(0);
+        let (_, (w, h)) = preview_size(w, h, box_size);
+        Some(json!({ "src": src, "width": w, "height": h }))
+    };
+    let thumb_of = |path: &str| -> String {
+        match path.rsplit_once('.') {
+            Some((stem, ext)) => format!("{stem}_thumb.{ext}"),
+            None => format!("{path}_thumb"),
+        }
+    };
+
+    if !photo.is_empty() && !is_placeholder(photo) {
+        return sized(&thumb_of(photo), PREVIEW_BOX);
+    }
+    if file.is_empty() || is_placeholder(file) {
+        return None;
+    }
+    let lower = file.to_lowercase();
+    if kind == "sticker" && (lower.ends_with(".webp") || lower.ends_with(".png")) {
+        return sized(&thumb_of(file), STICKER_BOX);
+    }
+    if matches!(kind, "video_file" | "video_message" | "animation") {
+        // Telegram's own thumbnail, already named in the JSON — and only when
+        // a path is recorded, never a guessed one.
+        if let Some(thumb) = m.get("thumbnail").and_then(Value::as_str) {
+            return sized(thumb, PREVIEW_BOX);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn obj(v: Value) -> Map<String, Value> {
+        v.as_object().cloned().unwrap()
+    }
+
+    #[test]
+    fn a_photo_previews_as_its_thumb_at_the_fitted_size() {
+        let m = obj(json!({ "photo": "photos/photo_1.jpg", "width": 480, "height": 320 }));
+        assert_eq!(
+            preview_of(&m),
+            Some(json!({ "src": "photos/photo_1_thumb.jpg", "width": 240, "height": 160 }))
+        );
+    }
+
+    #[test]
+    fn a_file_that_was_not_saved_has_no_preview() {
+        let m = obj(json!({
+            "photo": "(File not included. Change data exporting settings to download.)",
+            "width": 480, "height": 320,
+        }));
+        assert_eq!(preview_of(&m), None);
+        let m = obj(json!({ "file": "video_files/a.mp4", "media_type": "video_file" }));
+        assert_eq!(preview_of(&m), None, "a video with no thumbnail key");
+    }
+
+    #[test]
+    fn a_static_sticker_gets_the_smaller_box_and_an_animated_one_none() {
+        let m = obj(json!({
+            "file": "stickers/s.webp", "media_type": "sticker", "width": 512, "height": 512,
+        }));
+        assert_eq!(
+            preview_of(&m),
+            Some(json!({ "src": "stickers/s_thumb.webp", "width": 192, "height": 192 }))
+        );
+        let m = obj(json!({ "file": "stickers/s.tgs", "media_type": "sticker" }));
+        assert_eq!(preview_of(&m), None);
+    }
 
     #[test]
     fn a_small_photo_is_never_upscaled() {
