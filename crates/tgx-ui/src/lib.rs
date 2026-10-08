@@ -1,6 +1,7 @@
 //! The Swiss/International design system, in egui.
 
 pub mod components;
+pub mod emoji;
 pub mod fonts;
 pub mod theme;
 pub mod tokens;

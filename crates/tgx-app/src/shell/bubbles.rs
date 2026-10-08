@@ -21,6 +21,9 @@ use eframe::egui::{
 use std::collections::HashMap;
 use std::sync::Arc;
 use tgx_tg::viewer::{Attachment, Row, Visual};
+// Every piece of text in a bubble goes through these, so an emoji anywhere —
+// the message, a name, a reply's quote, a reaction, a poll — is in colour.
+use tgx_ui::emoji::EmojiText;
 use tgx_ui::tokens::Palette;
 
 /// The userpic column, and the userpic in it.
@@ -307,7 +310,7 @@ fn pill(
     let wrap = (width - 80.0).clamp(120.0, 440.0);
     let galley = ui
         .painter()
-        .layout(label.to_string(), sans(SMALL + 0.5), ink.pill_text, wrap);
+        .layout_e(label.to_string(), sans(SMALL + 0.5), ink.pill_text, wrap);
     let size = galley.size() + vec2(20.0, 8.0);
     let top = origin.y + 8.0;
     let rect = Rect::from_min_size(pos2(origin.x + (width - size.x) / 2.0, top), size);
@@ -366,7 +369,7 @@ fn pill(
             egui::StrokeKind::Outside,
         );
     }
-    painter.galley(rect.min + vec2(10.0, 4.0), galley, ink.pill_text);
+    painter.galley_e(rect.min + vec2(10.0, 4.0), galley, ink.pill_text);
     (height, click)
 }
 
@@ -399,12 +402,12 @@ fn bubble(
         } else {
             &r.from
         };
-        let g = painter.layout(name.to_string(), semibold(BODY - 0.5), colour, inner);
+        let g = painter.layout_e(name.to_string(), semibold(BODY - 0.5), colour, inner);
         let mut w = g.size().x;
         let h = g.size().y;
         parts.push((y, Part::Text(g, 0.0)));
         if let Some(t) = scene.topic_names.and_then(|n| n.get(&r.topic_id)) {
-            let tg = painter.layout_no_wrap(format!("  ·  {t}"), sans(SMALL), ink.meta);
+            let tg = painter.layout_no_wrap_e(format!("  ·  {t}"), sans(SMALL), ink.meta);
             let tw = tg.size().x;
             if w + tw <= inner {
                 parts.push((y + (h - tg.size().y) / 2.0 + 1.0, Part::Text(tg, w)));
@@ -415,7 +418,7 @@ fn bubble(
         y += h + 2.0;
     }
     if let Some(f) = &r.forwarded {
-        let g = painter.layout(format!("Forwarded from {f}"), sans(SMALL), ink.link, inner);
+        let g = painter.layout_e(format!("Forwarded from {f}"), sans(SMALL), ink.link, inner);
         want_w = want_w.max(g.size().x);
         let h = g.size().y;
         parts.push((y, Part::Text(g, 0.0)));
@@ -436,8 +439,8 @@ fn bubble(
                 ink.meta,
             ),
         };
-        let wg = painter.layout_no_wrap(who, semibold(SMALL), c);
-        let tg = painter.layout_no_wrap(what, sans(SMALL), ink.text);
+        let wg = painter.layout_no_wrap_e(who, semibold(SMALL), c);
+        let tg = painter.layout_no_wrap_e(what, sans(SMALL), ink.text);
         let w = (wg.size().x.max(tg.size().x) + 14.0).clamp(160.0, inner);
         want_w = want_w.max(w);
         parts.push((
@@ -468,11 +471,12 @@ fn bubble(
         parts.push((y, part));
         y += h + 6.0;
     } else if let Some(m) = &r.media {
-        let lg = painter.layout_no_wrap(media_name(m).to_string(), semibold(SMALL + 1.0), ink.text);
+        let lg =
+            painter.layout_no_wrap_e(media_name(m).to_string(), semibold(SMALL + 1.0), ink.text);
         let dg = r
             .media_detail
             .as_ref()
-            .map(|d| painter.layout_no_wrap(d.clone(), sans(SMALL), ink.meta));
+            .map(|d| painter.layout_no_wrap_e(d.clone(), sans(SMALL), ink.meta));
         let w = (MEDIA_H + 10.0 + lg.size().x.max(dg.as_ref().map_or(0.0, |g| g.size().x)) + 8.0)
             .min(inner);
         want_w = want_w.max(w);
@@ -505,7 +509,7 @@ fn bubble(
     foot.push((r.time.clone(), ink.meta));
     let foot: Vec<Arc<Galley>> = foot
         .into_iter()
-        .map(|(s, c)| painter.layout_no_wrap(s, sans(SMALL - 0.5), c))
+        .map(|(s, c)| painter.layout_no_wrap_e(s, sans(SMALL - 0.5), c))
         .collect();
     let foot_gap = 6.0;
     let foot_w: f32 =
@@ -516,7 +520,7 @@ fn bubble(
     // ends), so the time can sit beside it.
     let mut last: Option<(f32, f32)> = None;
     if !r.text.is_empty() {
-        let g = painter.layout(r.text.clone(), sans(BODY), ink.text, inner);
+        let g = painter.layout_e(r.text.clone(), sans(BODY), ink.text, inner);
         let last_w = g.rows.last().map(|row| row.rect().width()).unwrap_or(0.0);
         want_w = want_w.max(g.size().x);
         let h = g.size().y;
@@ -531,7 +535,7 @@ fn bubble(
         // Pills in a flow, wrapping at the bubble's width.
         let (mut x, mut row_y, mut row_h) = (0.0_f32, y, 0.0_f32);
         for (emoji, count) in &r.reactions {
-            let g = painter.layout_no_wrap(format!("{emoji} {count}"), sans(SMALL), ink.link);
+            let g = painter.layout_no_wrap_e(format!("{emoji} {count}"), sans(SMALL), ink.link);
             let size = g.size() + vec2(16.0, 8.0);
             if x > 0.0 && x + size.x > inner {
                 row_y += row_h + 4.0;
@@ -614,7 +618,7 @@ fn bubble(
     for (py, part) in parts {
         let at = pos2(inner_x, rect.top() + py);
         match part {
-            Part::Text(g, dx) => painter.galley(at + vec2(dx, 0.0), g, ink.text),
+            Part::Text(g, dx) => painter.galley_e(at + vec2(dx, 0.0), g, ink.text),
             Part::Reply {
                 to,
                 who,
@@ -636,8 +640,8 @@ fn bubble(
                 );
                 let clip = block.shrink2(vec2(4.0, 0.0));
                 let p = painter.with_clip_rect(clip);
-                p.galley(at + vec2(10.0, 4.0), who, colour);
-                p.galley(at + vec2(10.0, 21.0), what, ink.text);
+                p.galley_e(at + vec2(10.0, 4.0), who, colour);
+                p.galley_e(at + vec2(10.0, 21.0), what, ink.text);
                 let response = ui.interact(block, ui.id().with(("reply", r.id)), Sense::click());
                 if response.clicked() {
                     click = Some(Click::Jump(to));
@@ -657,24 +661,24 @@ fn bubble(
                 let tx = at.x + MEDIA_H + 10.0;
                 match detail {
                     Some(d) => {
-                        p.galley(pos2(tx, at.y + 5.0), label, ink.text);
-                        p.galley(pos2(tx, at.y + 25.0), d, ink.meta);
+                        p.galley_e(pos2(tx, at.y + 5.0), label, ink.text);
+                        p.galley_e(pos2(tx, at.y + 25.0), d, ink.meta);
                     }
-                    None => p.galley(pos2(tx, at.y + 13.0), label, ink.text),
+                    None => p.galley_e(pos2(tx, at.y + 13.0), label, ink.text),
                 }
             }
             Part::Foot => {
                 let mut x = rect.right() - PAD_X - foot_w;
                 for g in &foot {
                     let w = g.size().x;
-                    painter.galley(pos2(x, at.y), g.clone(), ink.meta);
+                    painter.galley_e(pos2(x, at.y), g.clone(), ink.meta);
                     x += w + foot_gap;
                 }
             }
             Part::Reaction(g, dx, size) => {
                 let pill = Rect::from_min_size(at + vec2(dx, 0.0), size);
                 painter.rect_filled(pill, CornerRadius::same(12), ink.link.gamma_multiply(0.16));
-                painter.galley(pill.min + vec2(8.0, 4.0), g, ink.link);
+                painter.galley_e(pill.min + vec2(8.0, 4.0), g, ink.link);
             }
             Part::Picture {
                 kind,
@@ -711,7 +715,7 @@ fn bubble(
                 }
                 let p = painter.with_clip_rect(block.expand(1.0));
                 for (g, dy) in lines {
-                    p.galley(pos2(tx, top + dy), g, ink.text);
+                    p.galley_e(pos2(tx, top + dy), g, ink.text);
                 }
                 if let Some((seed, ww)) = wave {
                     waveform(painter, pos2(tx, top + 4.0), ww, seed, ink.link);
@@ -732,12 +736,12 @@ fn bubble(
                 total,
                 total_y,
             } => {
-                painter.galley(at, question.0, ink.text);
-                painter.galley(at + vec2(0.0, question.1), sub, ink.meta);
+                painter.galley_e(at, question.0, ink.text);
+                painter.galley_e(at + vec2(0.0, question.1), sub, ink.meta);
                 for a in answers {
                     let y0 = at.y + a.y;
-                    painter.galley(pos2(at.x, y0), a.pct, ink.text);
-                    painter.galley(pos2(at.x + POLL_PCT, y0), a.text, ink.text);
+                    painter.galley_e(pos2(at.x, y0), a.pct, ink.text);
+                    painter.galley_e(pos2(at.x + POLL_PCT, y0), a.text, ink.text);
                     let bar_y = y0 + a.h + 4.0;
                     let full = w - POLL_PCT;
                     painter.rect_filled(
@@ -761,7 +765,7 @@ fn bubble(
                         );
                     }
                 }
-                painter.galley(at + vec2(0.0, total_y), total, ink.meta);
+                painter.galley_e(at + vec2(0.0, total_y), total, ink.meta);
             }
         }
     }
@@ -880,11 +884,11 @@ impl Icon {
             Icon::Doc(g, fill) | Icon::Die(g, fill) => {
                 let r = Rect::from_center_size(c, vec2(MEDIA_H, MEDIA_H));
                 painter.rect_filled(r, CornerRadius::same(8), fill);
-                painter.galley(c - g.size() / 2.0, g, Color32::WHITE);
+                painter.galley_e(c - g.size() / 2.0, g, Color32::WHITE);
             }
             Icon::Avatar(g, fill) => {
                 painter.circle_filled(c, half, fill);
-                painter.galley(c - g.size() / 2.0, g, Color32::WHITE);
+                painter.galley_e(c - g.size() / 2.0, g, Color32::WHITE);
             }
         }
     }
@@ -922,14 +926,14 @@ fn paint_picture(
             if matches!(kind, Visual::Video | Visual::Round | Visual::Gif) {
                 play_button(painter, area.center(), 22.0);
             } else {
-                let g = painter.layout(
+                let g = painter.layout_e(
                     format!("{} — open to view", visual_name(kind)),
                     sans(SMALL),
                     ink.pill_text,
                     area.width() - 16.0,
                 );
                 let gs = g.size();
-                painter.galley(area.center() - gs / 2.0, g, ink.pill_text);
+                painter.galley_e(area.center() - gs / 2.0, g, ink.pill_text);
             }
             false
         }
@@ -940,9 +944,9 @@ fn paint_picture(
             } else {
                 format!("{} — not saved in the database", visual_name(kind))
             };
-            let g = painter.layout(what, sans(SMALL), ink.pill_text, area.width() - 16.0);
+            let g = painter.layout_e(what, sans(SMALL), ink.pill_text, area.width() - 16.0);
             let gs = g.size();
-            painter.galley(area.center() - gs / 2.0, g, ink.pill_text);
+            painter.galley_e(area.center() - gs / 2.0, g, ink.pill_text);
             false
         }
         _ => {
@@ -957,7 +961,7 @@ fn paint_picture(
         let bs = b.size() + vec2(10.0, 4.0);
         let pill = Rect::from_min_size(area.min + vec2(6.0, 6.0), bs);
         painter.rect_filled(pill, CornerRadius::same(8), Color32::from_black_alpha(140));
-        painter.galley(pill.min + vec2(5.0, 2.0), b, Color32::WHITE);
+        painter.galley_e(pill.min + vec2(5.0, 2.0), b, Color32::WHITE);
     }
     let response = ui.interact(area, ui.id().with(("pic", id)), Sense::click());
     let clicked = response.clicked();
@@ -1077,8 +1081,8 @@ fn map_tile(painter: &egui::Painter, tile: Rect, ink: &Ink) {
 fn attachment(ui: &Ui, r: &Row, a: &Attachment, scene: &Scene, inner: f32) -> (Part, f32, f32) {
     let painter = ui.painter();
     let ink = scene.ink;
-    let text = |s: String, font: FontId, wrap: f32| painter.layout(s, font, ink.text, wrap);
-    let meta = |s: String| painter.layout(s, sans(SMALL), ink.meta, inner - MEDIA_H - 10.0);
+    let text = |s: String, font: FontId, wrap: f32| painter.layout_e(s, font, ink.text, wrap);
+    let meta = |s: String| painter.layout_e(s, sans(SMALL), ink.meta, inner - MEDIA_H - 10.0);
     // A card's text column: lines stacked, and the whole as tall as the
     // icon at least.
     let card = |icon: Option<Icon>,
@@ -1133,7 +1137,7 @@ fn attachment(ui: &Ui, r: &Row, a: &Attachment, scene: &Scene, inner: f32) -> (P
                 (Visual::Video | Visual::Round, Some(d)) => Some(duration_text(*d)),
                 _ => None,
             }
-            .map(|s| painter.layout_no_wrap(s, semibold(SMALL - 1.0), Color32::WHITE));
+            .map(|s| painter.layout_no_wrap_e(s, semibold(SMALL - 1.0), Color32::WHITE));
             (
                 Part::Picture {
                     kind: *kind,
@@ -1187,7 +1191,8 @@ fn attachment(ui: &Ui, r: &Row, a: &Attachment, scene: &Scene, inner: f32) -> (P
             )
         }
         Attachment::Document { name, size, ext } => {
-            let label = painter.layout_no_wrap(ext.clone(), semibold(SMALL - 1.0), Color32::WHITE);
+            let label =
+                painter.layout_no_wrap_e(ext.clone(), semibold(SMALL - 1.0), Color32::WHITE);
             let mut sub = size
                 .map(|s| crate::list::human_bytes(s.max(0) as u64))
                 .unwrap_or_default();
@@ -1207,7 +1212,7 @@ fn attachment(ui: &Ui, r: &Row, a: &Attachment, scene: &Scene, inner: f32) -> (P
             initials,
             phone,
         } => {
-            let g = painter.layout_no_wrap(
+            let g = painter.layout_no_wrap_e(
                 initials.to_uppercase(),
                 semibold(SMALL + 1.0),
                 Color32::WHITE,
@@ -1235,9 +1240,9 @@ fn attachment(ui: &Ui, r: &Row, a: &Attachment, scene: &Scene, inner: f32) -> (P
         } => {
             let mut lines = vec![text(title.clone(), semibold(BODY - 1.0), inner)];
             if !address.is_empty() {
-                lines.push(painter.layout(address.clone(), sans(SMALL), ink.meta, inner));
+                lines.push(painter.layout_e(address.clone(), sans(SMALL), ink.meta, inner));
             }
-            lines.push(painter.layout(
+            lines.push(painter.layout_e(
                 format!("{lat}, {lon}{}", if *live { "  ·  live" } else { "" }),
                 sans(SMALL),
                 ink.meta,
@@ -1249,7 +1254,7 @@ fn attachment(ui: &Ui, r: &Row, a: &Attachment, scene: &Scene, inner: f32) -> (P
         Attachment::Game { title, description } => card(
             None,
             vec![
-                painter.layout_no_wrap("Game".into(), semibold(SMALL), ink.link),
+                painter.layout_no_wrap_e("Game".into(), semibold(SMALL), ink.link),
                 text(title.clone(), semibold(BODY - 1.0), inner),
                 text(description.clone(), sans(SMALL + 1.0), inner),
             ],
@@ -1264,17 +1269,18 @@ fn attachment(ui: &Ui, r: &Row, a: &Attachment, scene: &Scene, inner: f32) -> (P
         } => card(
             None,
             vec![
-                painter.layout_no_wrap("Invoice".into(), semibold(SMALL), ink.link),
+                painter.layout_no_wrap_e("Invoice".into(), semibold(SMALL), ink.link),
                 text(title.clone(), semibold(BODY - 1.0), inner),
                 text(description.clone(), sans(SMALL + 1.0), inner),
-                painter.layout_no_wrap(amount.clone(), semibold(BODY - 1.0), ink.link),
+                painter.layout_no_wrap_e(amount.clone(), semibold(BODY - 1.0), ink.link),
             ],
             0.0,
             None,
             0.0,
         ),
         Attachment::Dice { emoji, value } => {
-            let g = painter.layout_no_wrap(value.to_string(), semibold(BODY + 6.0), Color32::WHITE);
+            let g =
+                painter.layout_no_wrap_e(value.to_string(), semibold(BODY + 6.0), Color32::WHITE);
             card(
                 Some(Icon::Die(g, name_colour(5))),
                 vec![
@@ -1294,7 +1300,7 @@ fn attachment(ui: &Ui, r: &Row, a: &Attachment, scene: &Scene, inner: f32) -> (P
             let w = inner.min(340.0);
             let q = text(poll.question.clone(), semibold(BODY), w);
             let sub_y = q.size().y + 2.0;
-            let sub = painter.layout_no_wrap(
+            let sub = painter.layout_no_wrap_e(
                 if poll.closed { "Final results" } else { "Poll" }.into(),
                 sans(SMALL),
                 ink.meta,
@@ -1311,8 +1317,9 @@ fn attachment(ui: &Ui, r: &Row, a: &Attachment, scene: &Scene, inner: f32) -> (P
             let mut answers = Vec::new();
             for a in &poll.answers {
                 let pct = (a.voters as f32 / total * 100.0).round();
-                let pg = painter.layout_no_wrap(format!("{pct}%"), semibold(SMALL + 1.0), ink.text);
-                let tg = painter.layout(a.text.clone(), sans(BODY - 1.0), ink.text, w - POLL_PCT);
+                let pg =
+                    painter.layout_no_wrap_e(format!("{pct}%"), semibold(SMALL + 1.0), ink.text);
+                let tg = painter.layout_e(a.text.clone(), sans(BODY - 1.0), ink.text, w - POLL_PCT);
                 let h = tg.size().y.max(pg.size().y);
                 answers.push(PollRow {
                     y,
@@ -1328,7 +1335,7 @@ fn attachment(ui: &Ui, r: &Row, a: &Attachment, scene: &Scene, inner: f32) -> (P
                 1 => "1 vote".to_string(),
                 n => format!("{n} votes"),
             };
-            let tg = painter.layout_no_wrap(votes, sans(SMALL), ink.meta);
+            let tg = painter.layout_no_wrap_e(votes, sans(SMALL), ink.meta);
             let total_y = y;
             let h = y + tg.size().y;
             (

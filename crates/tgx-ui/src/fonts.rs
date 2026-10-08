@@ -108,6 +108,15 @@ pub fn with_system_fallbacks() -> FontDefinitions {
     fonts
 }
 
+/// Segoe UI Emoji's bytes, for [`crate::emoji`] to read its colour table
+/// from — the same copy egui draws the outlines from.
+pub(crate) fn emoji_font() -> Option<&'static [u8]> {
+    system_fallbacks()
+        .iter()
+        .find(|(key, _, _)| *key == "system-emoji")
+        .map(|(_, bytes, _)| *bytes)
+}
+
 /// The fallbacks, in the order a missing glyph is looked for, read once per
 /// process: emoji first, so a heart is the emoji's heart and not a symbol
 /// font's; then Segoe UI for Greek, Arabic, Hebrew and the rest of the

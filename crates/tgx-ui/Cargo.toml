@@ -21,3 +21,11 @@ description = "The Swiss/International design system, in egui."
 # a changelog and moves on a schedule, so a caret here is an ordinary
 # dependency rather than the standing hazard those pins existed to contain.
 eframe = { version = "0.33", default-features = false, features = ["glow"] }
+
+# **Colour emoji**, which egui's text renderer cannot draw: it rasterises a
+# glyph's outline in one colour. Windows' Segoe UI Emoji keeps its colour in a
+# COLR v1 table — layers, clips, transforms, gradients. `ttf-parser` walks that
+# table (it is already in the build, under egui's own font loader, at this
+# version) and `tiny-skia` paints what it describes. See `emoji.rs`.
+ttf-parser = "0.25"
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
