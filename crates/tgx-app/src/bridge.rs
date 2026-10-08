@@ -139,6 +139,8 @@ pub enum Event {
     },
     /// Check folder's findings, one line each, or why it could not look.
     Checked(Result<Vec<String>, String>),
+    /// Export as Classic finished: one line per chat written, or why not.
+    Unpacked(Result<Vec<String>, String>),
     /// Find duplicate media's report as log lines — the totals first, then
     /// the largest groups — or why it could not look.
     Dupes(Result<Vec<String>, String>),

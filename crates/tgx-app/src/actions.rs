@@ -274,6 +274,40 @@ pub async fn find_archives(settings: Settings, tx: Events) {
     let _ = tx.send(Event::Archived(found));
 }
 
+/// Export as Classic: write one database back out as Desktop-format folders
+/// under `out_dir`, offline — see `tgx_tg::unpack`. Counts only in the lines.
+pub async fn unpack(
+    db: std::path::PathBuf,
+    out_dir: std::path::PathBuf,
+    settings: Settings,
+    tx: Events,
+) {
+    let done = tgx_tg::unpack::write_classic(&db, &out_dir, &settings)
+        .await
+        .map(|chats| {
+            chats
+                .iter()
+                .map(|u| {
+                    format!(
+                        "Wrote {} to {}: {} messages ({} deleted), {} files{}",
+                        u.title,
+                        u.root.display(),
+                        u.messages,
+                        u.deleted,
+                        u.files,
+                        if u.missing > 0 {
+                            format!(", {} not in the database", u.missing)
+                        } else {
+                            String::new()
+                        }
+                    )
+                })
+                .collect()
+        })
+        .map_err(|e| format!("Export as Classic failed: {e}"));
+    let _ = tx.send(Event::Unpacked(done));
+}
+
 /// Check folder: what is wrong with the destination, as log lines. Changes
 /// nothing — see `tgx_tg::doctor`.
 pub async fn check_folder(settings: Settings, tx: Events) {

@@ -129,6 +129,8 @@ pub(super) struct ViewerState {
     pub(super) found_rows: Vec<(usize, usize)>,
     /// The list is showing `found` rather than the open chat.
     pub(super) showing_found: bool,
+    /// Export as Classic is writing; its button is off until it answers.
+    pub(super) unpacking: bool,
 }
 
 impl ViewerState {
@@ -215,6 +217,7 @@ impl Shell {
         let p = self.palette;
         let mut chosen = None;
         let mut refresh = false;
+        let mut unpack = false;
         let mut filter = None;
         row(ui, |ui| {
             ui.spacing_mut().item_spacing.x = space::STEP;
@@ -245,6 +248,10 @@ impl Shell {
             if button(ui, "Refresh", !v.listing, false, &p).clicked() {
                 refresh = true;
             }
+            let can_unpack = v.open.is_some() && !v.unpacking;
+            if button(ui, "Export as Classic…", can_unpack, false, &p).clicked() {
+                unpack = true;
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let labels: Vec<&str> = Filter::ALL.iter().map(|f| f.label()).collect();
                 let at = Filter::ALL.iter().position(|f| *f == v.filter).unwrap_or(0);
@@ -265,6 +272,52 @@ impl Shell {
         }
         if let Some(f) = filter {
             self.viewer_set_filter(f);
+        }
+        if unpack {
+            self.viewer_unpack();
+        }
+    }
+
+    /// Export as Classic: ask where, then write the open database out as the
+    /// folders a Classic run would have made — deleted messages included.
+    fn viewer_unpack(&mut self) {
+        let Some(db) = self.viewer.open.clone() else {
+            return;
+        };
+        let Some(out) = rfd::FileDialog::new()
+            .set_title("Export as Classic into…")
+            .set_directory(&self.settings.output_dir)
+            .pick_folder()
+        else {
+            return;
+        };
+        self.viewer.unpacking = true;
+        self.status = format!("Writing {} out as a Classic folder…", db.title);
+        let tx = self.bridge.sender();
+        let settings = self.settings.clone();
+        self.bridge
+            .spawn(async move { crate::actions::unpack(db.path, out, settings, tx).await });
+    }
+
+    /// Export as Classic finished. Logged, so the folder it went to can be
+    /// copied from the log.
+    pub(super) fn viewer_unpacked(&mut self, done: Result<Vec<String>, String>) {
+        self.viewer.unpacking = false;
+        self.log_copied = false;
+        match done {
+            Ok(lines) => {
+                self.status = lines
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "Nothing written".into());
+                for line in lines {
+                    self.journal.push(line);
+                }
+            }
+            Err(e) => {
+                self.status = e.clone();
+                self.journal.warn(e);
+            }
         }
     }
 

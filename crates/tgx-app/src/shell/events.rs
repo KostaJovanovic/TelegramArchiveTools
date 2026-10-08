@@ -115,6 +115,7 @@ impl Shell {
 
             Event::Archived(found) => self.update_found(found),
             Event::Checked(found) => self.folder_checked(found),
+            Event::Unpacked(done) => self.viewer_unpacked(done),
             Event::Dupes(found) => self.dupes_found(found),
             Event::OnDisk { output_dir, disk } => {
                 // An answer about a destination the user has since moved away

@@ -627,6 +627,21 @@ fn the_sort_and_grouping_are_taken_from_the_saved_settings() {
 }
 
 #[test]
+fn export_as_classic_reports_where_it_wrote_and_comes_back() {
+    let mut s = shell_with(vec![]);
+    s.viewer.unpacking = true;
+    s.apply(Event::Unpacked(Ok(vec![
+        "Wrote Dev to X: 3 messages".into()
+    ])));
+    assert!(!s.viewer.unpacking, "the button comes back");
+    assert_eq!(s.status, "Wrote Dev to X: 3 messages");
+    s.viewer.unpacking = true;
+    s.apply(Event::Unpacked(Err("Export as Classic failed: x".into())));
+    assert!(!s.viewer.unpacking);
+    assert_eq!(s.journal.warnings(), 1);
+}
+
+#[test]
 fn a_folder_check_logs_problems_as_warnings_and_shows_the_log() {
     let mut s = shell_with(vec![]);
     s.checking = true;
