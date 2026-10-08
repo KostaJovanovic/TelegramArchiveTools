@@ -207,6 +207,29 @@ pub struct StoredMessage {
     pub deleted_seen: Option<i64>,
 }
 
+/// One topic as the database holds it, as [`Store::topics_of`] reads it.
+#[derive(Debug, Clone)]
+pub struct StoredTopic {
+    pub id: i64,
+    pub title: String,
+    /// The keys a folder export put after Desktop's three in this topic's
+    /// `result.json` header — the topic's own metadata and the chat's details.
+    pub head: Map<String, Value>,
+}
+
+/// One file a message points at, as [`Store::media_rows_of`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaRow {
+    pub message_id: i64,
+    /// `photo` or `file`.
+    pub role: String,
+    pub file_id: i64,
+    pub kind: String,
+    /// Relative to the topic's folder: the name the folder export used, or
+    /// would have used.
+    pub path: String,
+}
+
 /// Merge a freshly read message into one already stored.
 ///
 /// Starts from `stored` and copies [`VOLATILE`] across, removing a key the
@@ -470,6 +493,62 @@ impl Store {
             )
             .await?;
         Ok(())
+    }
+
+    /// The chat's title and Desktop `type` string, or `None` for a chat this
+    /// file does not record.
+    pub async fn chat(&self, chat_id: i64) -> Result<Option<(String, String)>, Error> {
+        let row = self
+            .row(
+                "SELECT title, type FROM chats WHERE id = ?1",
+                params![chat_id],
+            )
+            .await?;
+        Ok(match row {
+            Some(r) => Some((r.get::<String>(0)?, r.get::<String>(1)?)),
+            None => None,
+        })
+    }
+
+    /// Every topic recorded for a chat, by id.
+    ///
+    /// **Not every topic a message names.** A message keeps the topic it was
+    /// filed under for good, and the row describing that topic is only written
+    /// by a run that listed it — so a reader that needs every topic holding
+    /// messages asks [`Self::message_topics`] as well.
+    pub async fn topics_of(&self, chat_id: i64) -> Result<Vec<StoredTopic>, Error> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id, title, head FROM topics WHERE chat_id = ?1 ORDER BY id",
+                params![chat_id],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(StoredTopic {
+                id: row.get::<i64>(0)?,
+                title: row.get::<String>(1)?,
+                head: serde_json::from_str(&row.get::<String>(2)?)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The distinct topic ids this chat's messages are filed under, ascending.
+    pub async fn message_topics(&self, chat_id: i64) -> Result<Vec<i64>, Error> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT DISTINCT topic_id FROM messages WHERE chat_id = ?1 ORDER BY topic_id",
+                params![chat_id],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(row.get::<i64>(0)?);
+        }
+        Ok(out)
     }
 
     // --- messages -----------------------------------------------------------
@@ -975,6 +1054,47 @@ impl Store {
         Ok(())
     }
 
+    /// Every media row of a chat, by message id then role.
+    ///
+    /// One query for the chat rather than one per message: a reader writing a
+    /// folder back out visits every message, and six thousand round trips to
+    /// find that most of them carry nothing is the slow way to learn it.
+    pub async fn media_rows_of(&self, chat_id: i64) -> Result<Vec<MediaRow>, Error> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT message_id, role, file_id, kind, path FROM media
+                  WHERE chat_id = ?1 ORDER BY message_id, role",
+                params![chat_id],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(MediaRow {
+                message_id: row.get::<i64>(0)?,
+                role: row.get::<String>(1)?,
+                file_id: row.get::<i64>(2)?,
+                kind: row.get::<String>(3)?,
+                path: row.get::<String>(4)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Telegram's own thumbnail for a file, as [`Self::put_thumb`] stored it.
+    pub async fn thumb(&self, file_id: i64, kind: &str) -> Result<Option<Vec<u8>>, Error> {
+        let row = self
+            .row(
+                "SELECT bytes FROM thumbs WHERE file_id = ?1 AND kind = ?2",
+                params![file_id, kind],
+            )
+            .await?;
+        Ok(match row {
+            Some(r) => Some(r.get::<Vec<u8>>(0)?),
+            None => None,
+        })
+    }
+
     pub async fn blob(&self, file_id: i64, kind: &str) -> Result<Option<Vec<u8>>, Error> {
         let row = self
             .row(
@@ -1341,6 +1461,55 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.get::<i64>(0).unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_chat_reads_back_its_topics_media_and_thumbnails() {
+        let s = store("read-back").await;
+        s.upsert_chat(7, "Dev Team", "public_supergroup", 100)
+            .await
+            .unwrap();
+        let head = json!({ "topic_id": 3, "topic_pinned": true });
+        s.upsert_topic(7, 3, "Backend", head.as_object().unwrap(), 100)
+            .await
+            .unwrap();
+        // A message filed under a topic no run ever listed.
+        s.merge(7, 10, Some(9), &msg(10, "x"), 100).await.unwrap();
+        s.merge(7, 11, Some(3), &msg(11, "x"), 100).await.unwrap();
+        s.put_thumb(77, "video_files", b"tiny").await.unwrap();
+        s.link_media(7, 11, "file", 77, "video_files", "video_files/a.mp4")
+            .await
+            .unwrap();
+        s.link_media(8, 11, "file", 78, "video_files", "video_files/b.mp4")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.chat(7).await.unwrap(),
+            Some(("Dev Team".into(), "public_supergroup".into()))
+        );
+        assert_eq!(s.chat(8).await.unwrap(), None);
+        let topics = s.topics_of(7).await.unwrap();
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].title, "Backend");
+        assert_eq!(topics[0].head["topic_pinned"], json!(true));
+        assert_eq!(s.message_topics(7).await.unwrap(), vec![3, 9]);
+        assert_eq!(
+            s.media_rows_of(7).await.unwrap(),
+            vec![MediaRow {
+                message_id: 11,
+                role: "file".into(),
+                file_id: 77,
+                kind: "video_files".into(),
+                path: "video_files/a.mp4".into(),
+            }],
+            "another chat's row stays out"
+        );
+        assert_eq!(
+            s.thumb(77, "video_files").await.unwrap().as_deref(),
+            Some(&b"tiny"[..])
+        );
+        assert_eq!(s.thumb(77, "photos").await.unwrap(), None);
     }
 
     #[tokio::test]

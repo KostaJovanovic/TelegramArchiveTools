@@ -14,6 +14,7 @@ pub mod logging;
 pub mod output;
 pub mod plan;
 pub mod split;
+pub mod unpack;
 
 pub use cancel::Cancel;
 pub use client::{ChatInfo, ChatKind, Session};

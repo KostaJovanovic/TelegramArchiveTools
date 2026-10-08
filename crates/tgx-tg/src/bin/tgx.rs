@@ -180,6 +180,25 @@ async fn main() -> Result<()> {
             };
             split(&file, &into, dry_run).await
         }
+        "unpack" => {
+            let mut paths = Vec::new();
+            for a in args.iter().skip(1) {
+                match a.as_str() {
+                    // For this run only, like `export --db`: the formats
+                    // otherwise come from settings.json.
+                    "--no-html" => settings.export_html = false,
+                    "--no-json" => settings.export_json = false,
+                    f if f.starts_with("--") => {
+                        return Err(anyhow!("unknown flag {f:?}\n\n{USAGE}"))
+                    }
+                    path => paths.push(std::path::PathBuf::from(path)),
+                }
+            }
+            let [db, out] = <[_; 2]>::try_from(paths).map_err(|_| {
+                anyhow!("usage: tgx unpack <file.sqlite> <out folder> [--no-html] [--no-json]")
+            })?;
+            unpack(&db, &out, &settings).await
+        }
         "import" => {
             let mut db = std::path::PathBuf::from(&settings.output_dir);
             let mut dry_run = false;
@@ -274,6 +293,35 @@ async fn split(file: &std::path::Path, into: &std::path::Path, dry_run: bool) ->
         );
     } else {
         println!("the original is left as it was");
+    }
+    Ok(())
+}
+
+/// `tgx unpack`: a database back out as a Classic folder, offline.
+///
+/// Counts only, like `compare`: what was written is in the folder.
+async fn unpack(db: &std::path::Path, out: &std::path::Path, settings: &Settings) -> Result<()> {
+    let done = tgx_tg::unpack::write_classic(db, out, settings).await?;
+    for d in &done {
+        println!("{} (id {}) → {}", d.title, d.chat_id, d.root.display());
+        println!(
+            "  {} message(s) in {} folder(s), {} of them deleted on Telegram (kept)",
+            d.messages, d.topics, d.deleted
+        );
+        println!("  {} file(s) written", d.files);
+        if d.missing > 0 {
+            println!(
+                "  {} file(s) the messages name are not in the database — over its size \
+                 ceiling, or never fetched",
+                d.missing
+            );
+        }
+        if d.refused > 0 {
+            println!(
+                "  {} file(s) REFUSED: their recorded path leads outside the export folder",
+                d.refused
+            );
+        }
     }
     Ok(())
 }
@@ -520,6 +568,10 @@ tgx — Telegram Desktop-format exporter
                        offline: copy those messages into the databases, marked
                        deleted and recovered (only into a database that has
                        finished a sync)
+  tgx unpack <file.sqlite> <out folder> [--no-html] [--no-json]
+                       offline: write a database back out as the Classic folder
+                       a run would have made — one per topic for a forum,
+                       deleted messages included, media from the database
 
   export flags:
     --db      Database mode instead of folders: sync into the chat's own
