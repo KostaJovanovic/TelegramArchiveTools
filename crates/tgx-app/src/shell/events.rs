@@ -229,12 +229,20 @@ impl Shell {
             Event::Finished { stopped } => {
                 self.exporting = false;
                 if stopped {
-                    // Nothing left on the work list either: the rows that never
-                    // ran are marked Stopped, and a chat still sitting in
-                    // `pending` would be picked up by the next run as though it
-                    // had been asked for again.
+                    // **The rows stay; the work list goes.** What did not
+                    // finish is marked Paused and waits for Resume queue or
+                    // Clear — the user's call, not Stop's. `pending` is rebuilt
+                    // from those rows on resume rather than kept, because a
+                    // chat the worker had popped but not yet begun is in
+                    // neither list's view of "in flight".
                     self.pending.clear();
-                    self.queue.stop_remaining();
+                    self.queue.pause_remaining();
+                    if self.queue.is_paused() {
+                        self.journal.push(
+                            "Queue paused: Resume queue carries on from the chat that was \
+                             interrupted; Clear empties it",
+                        );
+                    }
                 } else if self.resume_if_more_queued() {
                     // The run is not over — see `resume_if_more_queued`. The
                     // summary below is a report on a finished run, and writing

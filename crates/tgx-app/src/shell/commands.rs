@@ -167,13 +167,17 @@ impl Shell {
             self.status = "No output format selected".into();
             return;
         }
-        let picked: Vec<ChatInfo> = self
-            .chats
+        let picked = self.ticked_chats();
+        self.run_chats(picked);
+    }
+
+    /// The chats ticked in the list, in list order.
+    pub(super) fn ticked_chats(&self) -> Vec<ChatInfo> {
+        self.chats
             .iter()
             .filter(|c| self.selected.contains(&c.id))
             .cloned()
-            .collect();
-        self.run_chats(picked);
+            .collect()
     }
 
     /// Start a run of exactly these chats, or add them to the one going.
@@ -189,6 +193,11 @@ impl Shell {
 
         if self.exporting {
             self.add_to_run(picked);
+            return;
+        }
+        // A stopped run is carried on, not replaced: its rows are still wanted.
+        if self.queue.is_paused() {
+            self.resume_queue(picked);
             return;
         }
 
@@ -443,6 +452,63 @@ impl Shell {
         self.status = format!("Added {n} {chats} to the queue");
         self.journal
             .push(format!("Added {n} {chats} to the run in progress"));
+        self.log_copied = false;
+    }
+
+    /// **Carry on a stopped run**, with any newly ticked chats joining the end.
+    ///
+    /// The work list is rebuilt from the rows, so it cannot disagree with
+    /// them. A chat that has left the chat list since cannot be reached and
+    /// says so on its row rather than sitting at Queued.
+    pub(super) fn resume_queue(&mut self, extra: Vec<ChatInfo>) {
+        if self.exporting {
+            return;
+        }
+        self.commit_settings();
+        if !self.settings.writes_anything() {
+            self.journal
+                .warn("Nothing to write: pick HTML or JSON under Classic, or choose Database.");
+            self.status = "No output format selected".into();
+            return;
+        }
+        self.queue
+            .append(extra.iter().map(|c| (c.id, c.title.clone())));
+        let mut work = Vec::new();
+        for id in self.queue.resume() {
+            match self.chats.iter().find(|c| c.id == id) {
+                Some(chat) => work.push(chat.clone()),
+                None => self.queue.failed(id, "Not in the chat list".into()),
+            }
+        }
+        if work.is_empty() {
+            self.status = self.queue.summary();
+            return;
+        }
+        self.begin_run();
+        self.body_pinned = false;
+        self.suggest(View::Queue);
+        let n = work.len();
+        self.pending.reset(work);
+        let chats = if n == 1 { "chat" } else { "chats" };
+        self.status = format!("Exporting {n} {chats}…");
+        self.journal.push(format!(
+            "Resuming the queue: {n} {chats} into {}",
+            self.settings.output_dir
+        ));
+        self.log_copied = false;
+        self.spawn_export();
+    }
+
+    /// **Clear: empty the queue**, rows and work list both. Only between runs —
+    /// mid-run, × on a row and Stop are the controls.
+    pub(super) fn clear_queue(&mut self) {
+        if self.exporting || self.queue.is_empty() {
+            return;
+        }
+        self.queue.clear();
+        self.pending.clear();
+        self.status = "Queue cleared".into();
+        self.journal.push("Queue cleared");
         self.log_copied = false;
     }
 

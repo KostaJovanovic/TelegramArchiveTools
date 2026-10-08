@@ -38,8 +38,14 @@ impl Shell {
         // flight rather than replacing it. Same slot, same number, so the
         // control does not move under the pointer — only its promise changes,
         // and it changes to the true one.
+        //
+        // **And Resume queue after a Stop**, which carries on the paused rows
+        // — so it needs no ticks of its own; any that are set join the end.
+        let paused = !self.exporting && self.queue.is_paused();
         let start = if self.exporting {
             "Add to queue"
+        } else if paused {
+            "Resume queue"
         } else {
             "Start export"
         };
@@ -54,7 +60,7 @@ impl Shell {
             // exists for; everything else on the bar leads to it or cleans up
             // after it. See `components::button`.
             NavCell::step(3, start)
-                .enabled(self.signed_in && !self.selected.is_empty() && !self.counting)
+                .enabled(self.signed_in && (paused || !self.selected.is_empty()) && !self.counting)
                 .primary(true),
         ];
         let tools = [
@@ -105,6 +111,10 @@ impl Shell {
                             match i {
                                 0 => self.start_sign_in(),
                                 1 => self.start_refresh(),
+                                2 if paused => {
+                                    let picked = self.ticked_chats();
+                                    self.resume_queue(picked);
+                                }
                                 2 => self.start_export(),
                                 _ => {}
                             }

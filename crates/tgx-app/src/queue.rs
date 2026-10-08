@@ -15,17 +15,22 @@ use std::path::PathBuf;
 
 /// Where one chat's job has got to.
 ///
-/// `Stopped` is deliberately distinct from `Failed`. A chat abandoned because
+/// `Paused` is deliberately distinct from `Failed`. A chat left waiting because
 /// the user pressed Stop has nothing wrong with it, and reporting it as a
 /// failure is how someone concludes the export is broken; a chat that genuinely
 /// refused needs its reason kept.
+///
+/// **And it is not finished.** A Stop used to mark everything unrun as
+/// `Stopped` and empty the work list, so carrying on meant ticking the same
+/// chats again. A paused row stays in the queue until the run resumes or the
+/// user clears it — the queue is theirs to empty, not Stop's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobState {
     Queued,
     Exporting,
     Done,
     Failed(String),
-    Stopped,
+    Paused,
 }
 
 impl JobState {
@@ -35,16 +40,13 @@ impl JobState {
             JobState::Queued => "Queued",
             JobState::Exporting => "Exporting",
             JobState::Done => "Done",
-            JobState::Stopped => "Stopped",
+            JobState::Paused => "Paused",
             JobState::Failed(why) => why,
         }
     }
 
     pub fn is_finished(&self) -> bool {
-        matches!(
-            self,
-            JobState::Done | JobState::Stopped | JobState::Failed(_)
-        )
+        matches!(self, JobState::Done | JobState::Failed(_))
     }
 }
 
@@ -283,17 +285,47 @@ impl Queue {
         }
     }
 
-    /// Mark whatever never ran as stopped, once a run has ended early.
+    /// Mark whatever has not finished as paused, once a run has ended early —
+    /// the chat that was interrupted included, since it did not finish either.
     ///
-    /// Without this a queue of ten chats interrupted after three leaves seven
-    /// rows reading "Queued" for the rest of the session, which says a run is
-    /// still coming that never will be.
-    pub fn stop_remaining(&mut self) {
+    /// Not left at "Queued": that says a run is coming, and none is until
+    /// [`resume`](Self::resume).
+    pub fn pause_remaining(&mut self) {
         for job in &mut self.jobs {
             if !job.state.is_finished() {
-                job.state = JobState::Stopped;
+                job.state = JobState::Paused;
             }
         }
+    }
+
+    /// Whether a stopped run left chats waiting to be picked up again.
+    pub fn is_paused(&self) -> bool {
+        self.jobs.iter().any(|j| j.state == JobState::Paused)
+    }
+
+    /// Put every paused row back to Queued, and return every chat the resumed
+    /// run has to reach, in queue order.
+    ///
+    /// The interrupted chat is among them and **starts again from the top**:
+    /// a database sync picks up from what it already stored, and a Classic
+    /// export is a whole folder or nothing.
+    pub fn resume(&mut self) -> Vec<i64> {
+        for job in &mut self.jobs {
+            if job.state == JobState::Paused {
+                job.state = JobState::Queued;
+                job.messages = 0;
+            }
+        }
+        self.jobs
+            .iter()
+            .filter(|j| j.state == JobState::Queued)
+            .map(|j| j.chat_id)
+            .collect()
+    }
+
+    /// Empty the queue. The user's call, and only between runs.
+    pub fn clear(&mut self) {
+        self.jobs.clear();
     }
 
     /// How far the whole run has got, as a fraction, or `None` while that is
@@ -339,17 +371,17 @@ impl Queue {
             .iter()
             .filter(|j| matches!(j.state, JobState::Failed(_)))
             .count();
-        let stopped = self
+        let paused = self
             .jobs
             .iter()
-            .filter(|j| j.state == JobState::Stopped)
+            .filter(|j| j.state == JobState::Paused)
             .count();
         let mut out = format!("Exported {done} of {} chats", self.jobs.len());
         if failed > 0 {
             out.push_str(&format!(", {failed} failed"));
         }
-        if stopped > 0 {
-            out.push_str(&format!(", {stopped} not run"));
+        if paused > 0 {
+            out.push_str(&format!(", {paused} paused"));
         }
         out
     }
@@ -410,27 +442,54 @@ mod tests {
     }
 
     #[test]
-    fn stopping_a_run_does_not_leave_rows_reading_queued() {
-        // Seven rows saying "Queued" for the rest of the session promise a run
-        // that is never coming.
+    fn stopping_a_run_pauses_what_is_left_rather_than_dropping_it() {
+        // The rest of the queue is still wanted; Stop is not Clear.
         let mut q = queue_of(3);
         q.began(1);
         q.finished(1, 10, 10, None, 0, 0, Some(PathBuf::from("a")));
-        q.stop_remaining();
+        q.began(2);
+        q.progressed(2, 400, 900);
+        q.pause_remaining();
+        assert_eq!(q.len(), 3);
         assert_eq!(q.jobs()[0].state, JobState::Done);
-        assert_eq!(q.jobs()[1].state, JobState::Stopped);
-        assert_eq!(q.jobs()[2].state, JobState::Stopped);
+        assert_eq!(q.jobs()[1].state, JobState::Paused, "the interrupted chat");
+        assert_eq!(q.jobs()[2].state, JobState::Paused);
+        assert!(q.is_paused());
     }
 
     #[test]
-    fn a_stopped_chat_is_not_reported_as_a_failure() {
-        // Nothing is wrong with a chat the user chose not to export.
+    fn resuming_picks_up_the_interrupted_chat_and_everything_after_it() {
+        let mut q = queue_of(3);
+        q.finished(1, 10, 10, None, 0, 0, Some(PathBuf::from("a")));
+        q.began(2);
+        q.progressed(2, 400, 900);
+        q.pause_remaining();
+        assert_eq!(q.resume(), vec![2, 3]);
+        assert!(!q.is_paused());
+        assert_eq!(q.jobs()[0].state, JobState::Done, "not run twice");
+        assert_eq!(q.jobs()[1].state, JobState::Queued);
+        assert_eq!(q.jobs()[1].messages, 0, "a stale count is not this run's");
+    }
+
+    #[test]
+    fn a_paused_chat_is_not_reported_as_a_failure() {
+        // Nothing is wrong with a chat the user chose not to export yet.
         let mut q = queue_of(2);
         q.failed(1, "CHAT_ADMIN_REQUIRED".into());
-        q.stop_remaining();
+        q.pause_remaining();
         assert_eq!(q.jobs()[0].state.label(), "CHAT_ADMIN_REQUIRED");
-        assert_eq!(q.jobs()[1].state.label(), "Stopped");
-        assert_eq!(q.summary(), "Exported 0 of 2 chats, 1 failed, 1 not run");
+        assert_eq!(q.jobs()[1].state.label(), "Paused");
+        assert_eq!(q.summary(), "Exported 0 of 2 chats, 1 failed, 1 paused");
+        // A failed row is not retried by a resume: it has its reason.
+        assert_eq!(q.resume(), vec![2]);
+    }
+
+    #[test]
+    fn a_paused_chat_ticked_again_keeps_its_one_row() {
+        let mut q = queue_of(2);
+        q.pause_remaining();
+        assert!(q.append([(2, "chat 2".into())]).is_empty());
+        assert_eq!(q.len(), 2);
     }
 
     #[test]

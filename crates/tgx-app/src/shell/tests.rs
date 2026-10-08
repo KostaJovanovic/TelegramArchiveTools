@@ -398,25 +398,40 @@ fn a_stopped_run_is_not_reported_as_a_success() {
     s.stop();
     s.apply(Event::Finished { stopped: true });
     assert!(!s.exporting);
-    assert_eq!(s.queue.jobs()[1].state, JobState::Stopped);
-    assert!(s.status.as_str().contains("1 not run"), "got {}", s.status);
+    assert_eq!(s.queue.jobs()[1].state, JobState::Paused);
+    assert!(s.status.as_str().contains("1 paused"), "got {}", s.status);
 }
 
 // -- the queue: clearing, adding, removing ---------------------------------
 
 #[test]
-fn a_stop_empties_the_work_list_as_well_as_marking_the_rows() {
-    // A chat left on `pending` after a Stop would be picked up by the next run
-    // as though it had been asked for again — the rows say Stopped and the
-    // export does it anyway.
+fn a_stop_keeps_the_rows_and_only_the_user_clears_them() {
+    // Stop used to mark the rest Stopped and empty the work list, so carrying
+    // on meant ticking every chat again. The rows wait now; the work list is
+    // rebuilt from them on resume, so nothing runs until it is asked for.
     let mut s = shell_with(vec![chat(1, "a", None), chat(2, "b", None)]);
     s.exporting = true;
     s.queue.start([(1, "a".to_string()), (2, "b".to_string())]);
     s.pending.reset(s.chats.clone());
+    s.queue.began(1);
     s.stop();
     s.apply(Event::Finished { stopped: true });
-    assert!(s.pending.is_empty());
-    assert_eq!(s.queue.jobs()[1].state, JobState::Stopped);
+    assert!(s.pending.is_empty(), "nothing runs until Resume");
+    assert_eq!(s.queue.len(), 2);
+    assert!(s.queue.is_paused());
+    assert_eq!(
+        s.queue.jobs()[0].state,
+        JobState::Paused,
+        "the interrupted one"
+    );
+
+    // Clear is the user's, and only between runs.
+    s.exporting = true;
+    s.clear_queue();
+    assert_eq!(s.queue.len(), 2, "no clearing mid-run");
+    s.exporting = false;
+    s.clear_queue();
+    assert!(s.queue.is_empty());
 }
 
 #[test]

@@ -109,6 +109,21 @@ impl Shell {
         row(ui, |ui| {
             ui.label(title("Queue", &p));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = space::STEP;
+                // **Emptying the queue is the user's decision**, and this is
+                // the one place it is made — a Stop leaves the rows paused, and
+                // a run that ends leaves them as its report.
+                if !self.queue.is_empty() && !self.exporting {
+                    if action(ui, caps("Clear", p.fg), true).clicked() {
+                        self.clear_queue();
+                    }
+                    if self.queue.is_paused()
+                        && action(ui, caps("Resume", p.fg), self.signed_in).clicked()
+                    {
+                        let picked = self.ticked_chats();
+                        self.resume_queue(picked);
+                    }
+                }
                 if !self.queue.is_empty() {
                     ui.label(eyebrow(&format!("{} chats", self.queue.len()), &p));
                 }
