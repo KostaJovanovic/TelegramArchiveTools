@@ -800,13 +800,35 @@ fn message(id: i64, deleted: bool, version: i64) -> tgx_tg::viewer::Row {
         id,
         topic_id: 1,
         date: format!("2025-12-18 16:{id:02}"),
+        day: "2025-12-18".into(),
+        time: format!("16:{id:02}"),
         from: "Ivana".into(),
+        from_id: "user1".into(),
+        colour: 1,
+        initials: "I".into(),
+        text: format!("message {id}"),
         preview: format!("message {id}"),
         media: None,
+        media_detail: None,
+        reply_to: None,
+        forwarded: None,
+        edited_at: None,
         deleted: deleted.then(|| "2025-12-20 10:00".into()),
         version,
         recovered: false,
         service: false,
+    }
+}
+
+/// Rows as a load answers them, all in the one topic of a chat that is not
+/// a forum.
+fn loaded(rows: Vec<tgx_tg::viewer::Row>) -> tgx_tg::viewer::Loaded {
+    tgx_tg::viewer::Loaded {
+        rows,
+        topics: vec![tgx_tg::viewer::Topic {
+            id: 1,
+            title: "General".into(),
+        }],
     }
 }
 
@@ -819,7 +841,7 @@ fn viewing(database: &tgx_tg::viewer::Database, rows: Vec<tgx_tg::viewer::Row>) 
     s.apply(Event::ViewerLoaded {
         path: database.path.clone(),
         chat_id: database.chat_id,
-        rows: Ok(rows),
+        rows: Ok(loaded(rows)),
     });
     s
 }
@@ -869,6 +891,51 @@ fn a_loaded_chat_counts_its_markers_and_the_filter_narrows_it() {
 }
 
 #[test]
+fn a_forums_topics_can_be_picked_and_a_message_elsewhere_switches_to_its_topic() {
+    let d = db(7, "Forum");
+    let mut s = Shell::headless();
+    s.show(View::Viewer);
+    s.viewer_open(d.clone(), None);
+    let mut rows: Vec<_> = (1..=6).map(|id| message(id, false, 1)).collect();
+    for r in rows.iter_mut().filter(|r| r.id % 2 == 0) {
+        r.topic_id = 5;
+    }
+    s.apply(Event::ViewerLoaded {
+        path: d.path.clone(),
+        chat_id: 7,
+        rows: Ok(tgx_tg::viewer::Loaded {
+            rows,
+            topics: vec![
+                tgx_tg::viewer::Topic {
+                    id: 1,
+                    title: "General".into(),
+                },
+                tgx_tg::viewer::Topic {
+                    id: 5,
+                    title: "Foto".into(),
+                },
+            ],
+        }),
+    });
+    assert_eq!(s.viewer.shown.len(), 6, "every topic at first");
+    s.viewer_set_topic(Some(5));
+    assert_eq!(s.viewer.shown, vec![1, 3, 5], "only Foto's messages");
+    // Each gets a day separator ahead of it, and the list re-measures.
+    assert_eq!(s.viewer.items.len(), 4);
+    assert!(s.viewer.heights.is_empty());
+
+    // A hit in General, selected while Foto is shown, switches to General.
+    s.viewer_select(3, true);
+    assert_eq!(s.viewer.topic, Some(1));
+    assert_eq!(s.viewer.selected, Some(3));
+    assert_eq!(s.viewer.shown, vec![0, 2, 4]);
+
+    // And opening another database forgets this one's topics.
+    s.viewer_open(db(8, "Other"), None);
+    assert!(s.viewer.topics.is_empty() && s.viewer.topic.is_none());
+}
+
+#[test]
 fn rows_for_a_chat_no_longer_open_are_dropped() {
     // A slow load of the database the user just moved away from must not
     // replace the one on screen.
@@ -878,7 +945,7 @@ fn rows_for_a_chat_no_longer_open_are_dropped() {
     s.apply(Event::ViewerLoaded {
         path: a.path.clone(),
         chat_id: 1,
-        rows: Ok(vec![message(1, false, 1), message(2, false, 1)]),
+        rows: Ok(loaded(vec![message(1, false, 1), message(2, false, 1)])),
     });
     assert!(s.viewer.loading, "still waiting for B");
     assert!(s.viewer.rows.is_empty());
@@ -970,7 +1037,7 @@ fn a_hit_in_another_database_opens_that_chat_at_that_message() {
     s.apply(Event::ViewerLoaded {
         path: b.path.clone(),
         chat_id: 2,
-        rows: Ok((1..=9).map(|id| message(id, false, 1)).collect()),
+        rows: Ok(loaded((1..=9).map(|id| message(id, false, 1)).collect())),
     });
     assert_eq!(s.viewer.selected, Some(8), "the clicked hit, once loaded");
     assert_eq!(s.viewer.scroll_to, Some(7));

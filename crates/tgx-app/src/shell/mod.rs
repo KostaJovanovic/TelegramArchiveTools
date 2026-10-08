@@ -15,6 +15,7 @@
 //! drains in is one a worker asked for. **Nothing in this crate may send an
 //! event by any route that does not wake the context.**
 
+mod bubbles;
 mod chats;
 mod chrome;
 mod commands;
@@ -241,6 +242,9 @@ pub struct Shell {
     /// Frames drawn. Only [`shot`] reads it, to know when the layout has
     /// settled enough to be worth photographing.
     frame_no: u32,
+    /// The last frame something the screenshot should wait for was still
+    /// loading; [`shot`] counts its settling frames from here.
+    shot_busy_until: u32,
     /// The Viewer's state: which database is open, its rows, the selection,
     /// the search. See [`viewer::ViewerState`].
     viewer: viewer::ViewerState,
@@ -338,6 +342,7 @@ impl Shell {
             started: false,
             theme_stale: true,
             frame_no: 0,
+            shot_busy_until: 0,
             viewer: Default::default(),
         }
     }
@@ -544,7 +549,8 @@ fn schedule_from(settings: &Settings, now: std::time::Instant) -> Option<std::ti
 /// `u32`s. Raw because a PNG encoder is a dependency this app has no other use
 /// for; `tools/shot.ps1` turns it into an image.
 ///
-/// `TGX_SHOT_VIEW=chats|settings|queue|viewer` picks which view to draw first.
+/// `TGX_SHOT_VIEW=chats|settings|queue|viewer` picks which view to draw first,
+/// and `TGX_SHOT_DB=<part of a title>` which database the viewer opens.
 ///
 /// Nothing here runs unless the variable is set, and it is read once.
 mod shot {
@@ -556,6 +562,13 @@ mod shot {
 
     pub(super) fn path() -> Option<String> {
         std::env::var("TGX_SHOT").ok().filter(|s| !s.is_empty())
+    }
+
+    pub(super) fn database() -> Option<String> {
+        std::env::var("TGX_SHOT_DB")
+            .ok()
+            .filter(|s| !s.is_empty() && path().is_some())
+            .map(|s| s.to_lowercase())
     }
 
     pub(super) fn view() -> Option<View> {
@@ -686,7 +699,12 @@ impl eframe::App for Shell {
         // After everything has been drawn, so the frame egui hands back is the
         // finished one. Does nothing at all unless `TGX_SHOT` is set.
         if let Some(to) = shot::path() {
-            shot::tick(ctx, self.frame_no, &to);
+            // The viewer reads its database on a worker; a frame taken while
+            // it still says "Reading…" is a photograph of nothing.
+            if self.viewer.listing || self.viewer.loading {
+                self.shot_busy_until = self.frame_no;
+            }
+            shot::tick(ctx, self.frame_no.saturating_sub(self.shot_busy_until), &to);
         }
     }
 

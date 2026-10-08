@@ -157,7 +157,7 @@ pub enum Event {
     ViewerLoaded {
         path: std::path::PathBuf,
         chat_id: i64,
-        rows: Result<Vec<tgx_tg::viewer::Row>, String>,
+        rows: Result<tgx_tg::viewer::Loaded, String>,
     },
     /// One message in full, for the detail pane. Dropped unless it is still
     /// the selected one.

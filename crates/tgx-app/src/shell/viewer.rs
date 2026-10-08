@@ -16,23 +16,24 @@
 //! log or the transcript**: failures name files and errors, the status line
 //! names counts.
 
+use super::bubbles;
 use super::*;
 use eframe::egui::{Align, Layout, Sense, Ui};
 use std::collections::{HashMap, HashSet};
 use tgx_tg::search::Found;
-use tgx_tg::viewer::{Database, Detail, Media, Row};
+use tgx_tg::viewer::{Database, Detail, Loaded, Media, Row, Topic};
 use tgx_ui::components::{
     action, block, button, caps, eyebrow, field, figure, meta, row, rule, segmented, text,
     thousands, tick_box, EmptyState, GUTTER,
 };
 use tgx_ui::tokens::space;
 
-/// Every message row is this tall. One line: date, sender, text, markers.
-///
-/// Shorter than the chat list's 46, because a row here is one line rather than
-/// a title over a caption, and the thing being read is the run of messages —
-/// more of them on screen is the whole benefit.
+/// A row of the every-database results list: one line, date, chat, excerpt.
 const ROW_HEIGHT: f32 = 30.0;
+
+/// Items measured either side of a jump target before the list scrolls to
+/// it, so the guessed heights above it do not land the target off screen.
+const JUMP_MEASURE: usize = 60;
 
 /// The detail pane. Wide enough for a paragraph to read as one, narrow enough
 /// that at the window's 900pt floor the list keeps the larger half.
@@ -131,14 +132,51 @@ pub(super) struct ViewerState {
     pub(super) showing_found: bool,
     /// Export as Classic is writing; its button is off until it answers.
     pub(super) unpacking: bool,
+
+    /// The forum topics the open chat's messages are filed under; more than
+    /// one only for a forum. `topic` is the one shown, `None` for all.
+    pub(super) topics: Vec<Topic>,
+    pub(super) topic: Option<i64>,
+    pub(super) topic_names: HashMap<i64, String>,
+
+    /// What the list draws — day separators and messages in runs — and, for
+    /// each entry of `shown`, which item it is.
+    pub(super) items: Vec<bubbles::Item>,
+    pub(super) item_of_shown: Vec<usize>,
+    /// Each item's height and where it starts. Guessed until it is drawn,
+    /// then measured; `offsets` has one more entry than `items`, the total.
+    pub(super) heights: Vec<f32>,
+    pub(super) offsets: Vec<f32>,
+    /// The width the heights are for. A different width re-guesses them all.
+    pub(super) laid_width: f32,
+    /// Where the list was scrolled to last frame, and how far to move it this
+    /// frame so that an item above the view growing on measurement does not
+    /// push what is being read down the screen.
+    pub(super) last_offset: f32,
+    pub(super) scroll_adjust: f32,
 }
 
 impl ViewerState {
     fn rebuild_shown(&mut self) {
         let filter = self.filter;
+        let topic = self.topic;
         self.shown = (0..self.rows.len())
-            .filter(|&i| filter.keeps(&self.rows[i]))
+            .filter(|&i| {
+                let r = &self.rows[i];
+                filter.keeps(r) && topic.is_none_or(|t| r.topic_id == t)
+            })
             .collect();
+        let (items, item_of) = bubbles::build(&self.rows, &self.shown);
+        self.items = items;
+        self.item_of_shown = item_of;
+        // Guessed afresh on the next frame, at that frame's width.
+        self.heights.clear();
+        self.offsets.clear();
+    }
+
+    /// Several topics, and all of them on screen: each bubble names its own.
+    fn mixing_topics(&self) -> bool {
+        self.topics.len() > 1 && self.topic.is_none()
     }
 
     fn set_hits(&mut self, hits: Vec<i64>) {
@@ -193,7 +231,13 @@ impl Shell {
                 ui.add_space(space::TIGHT);
             });
 
-        if self.viewer.open.is_some() && !self.viewer.showing_found {
+        // **Only once something is selected.** Empty, it said "no message
+        // selected" in a third of the window at the minimum size — the
+        // chat's width, spent on telling the user they had not clicked yet.
+        if self.viewer.open.is_some()
+            && !self.viewer.showing_found
+            && self.viewer.selected.is_some()
+        {
             egui::SidePanel::right("viewer-detail")
                 .frame(bare)
                 .resizable(false)
@@ -212,13 +256,13 @@ impl Shell {
             });
     }
 
-    /// The database picker, Refresh, and the filter.
+    /// The database picker, the topic picker, Refresh and Export as Classic.
     fn viewer_picker_row(&mut self, ui: &mut Ui) {
         let p = self.palette;
         let mut chosen = None;
+        let mut topic = None;
         let mut refresh = false;
         let mut unpack = false;
-        let mut filter = None;
         row(ui, |ui| {
             ui.spacing_mut().item_spacing.x = space::STEP;
             ui.label(eyebrow("Database", &p));
@@ -232,7 +276,7 @@ impl Shell {
             ui.add_enabled_ui(!v.databases.is_empty(), |ui| {
                 egui::ComboBox::from_id_salt("viewer-db")
                     .selected_text(text(current, &p))
-                    .width(240.0)
+                    .width(220.0)
                     .truncate()
                     .show_ui(ui, |ui| {
                         for db in &v.databases {
@@ -243,25 +287,50 @@ impl Shell {
                         }
                     });
             });
-            // Re-reads the folder *and* the chat on screen: the reason to
-            // press it is usually that a sync has just written to both.
-            if button(ui, "Refresh", !v.listing, false, &p).clicked() {
-                refresh = true;
-            }
-            let can_unpack = v.open.is_some() && !v.unpacking;
-            if button(ui, "Export as Classic…", can_unpack, false, &p).clicked() {
-                unpack = true;
+            // **Only a forum has topics to pick between**, so only a forum
+            // gets the picker; for any other chat it would offer one choice.
+            if v.topics.len() > 1 {
+                ui.label(eyebrow("Topic", &p));
+                let current = match v.topic {
+                    None => "All topics".to_string(),
+                    Some(id) => v.topic_names.get(&id).cloned().unwrap_or_default(),
+                };
+                egui::ComboBox::from_id_salt("viewer-topic")
+                    .selected_text(text(current, &p))
+                    .width(170.0)
+                    .truncate()
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(v.topic.is_none(), text("All topics", &p))
+                            .clicked()
+                        {
+                            topic = Some(None);
+                        }
+                        for t in &v.topics {
+                            let on = v.topic == Some(t.id);
+                            if ui.selectable_label(on, text(&t.title, &p)).clicked() {
+                                topic = Some(Some(t.id));
+                            }
+                        }
+                    });
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let labels: Vec<&str> = Filter::ALL.iter().map(|f| f.label()).collect();
-                let at = Filter::ALL.iter().position(|f| *f == v.filter).unwrap_or(0);
-                if let Some(i) = segmented(ui, &labels, at, &p) {
-                    filter = Some(Filter::ALL[i]);
+                let can_unpack = v.open.is_some() && !v.unpacking;
+                if button(ui, "Export as Classic…", can_unpack, false, &p).clicked() {
+                    unpack = true;
+                }
+                // Re-reads the folder *and* the chat on screen: the reason to
+                // press it is usually that a sync has just written to both.
+                if button(ui, "Refresh", !v.listing, false, &p).clicked() {
+                    refresh = true;
                 }
             });
         });
         if let Some(db) = chosen {
             self.viewer_open(db, None);
+        }
+        if let Some(t) = topic {
+            self.viewer_set_topic(t);
         }
         if refresh {
             self.viewer_list_databases();
@@ -270,11 +339,22 @@ impl Shell {
                 self.viewer_open(db, keep);
             }
         }
-        if let Some(f) = filter {
-            self.viewer_set_filter(f);
-        }
         if unpack {
             self.viewer_unpack();
+        }
+    }
+
+    /// Show one topic, or every topic with `None`. The selection stays in
+    /// view when it is in the topic chosen.
+    pub(super) fn viewer_set_topic(&mut self, topic: Option<i64>) {
+        self.viewer.topic = topic;
+        self.viewer.rebuild_shown();
+        if let Some(at) = self
+            .viewer
+            .selected
+            .and_then(|id| self.viewer.index.get(&id))
+        {
+            self.viewer.scroll_to = self.viewer.shown.binary_search(at).ok();
         }
     }
 
@@ -329,6 +409,7 @@ impl Shell {
         let mut step = 0isize;
         let mut toggle = false;
         let mut back_to_found = false;
+        let mut filter = None;
         row(ui, |ui| {
             ui.spacing_mut().item_spacing.x = space::TIGHT;
             let hint = if self.viewer.everywhere {
@@ -382,7 +463,18 @@ impl Shell {
                     }
                 }
             }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let v = &self.viewer;
+                let labels: Vec<&str> = Filter::ALL.iter().map(|f| f.label()).collect();
+                let at = Filter::ALL.iter().position(|f| *f == v.filter).unwrap_or(0);
+                if let Some(i) = segmented(ui, &labels, at, &p) {
+                    filter = Some(Filter::ALL[i]);
+                }
+            });
         });
+        if let Some(f) = filter {
+            self.viewer_set_filter(f);
+        }
         if toggle {
             self.viewer.everywhere = !self.viewer.everywhere;
         }
@@ -460,38 +552,127 @@ impl Shell {
         None
     }
 
+    /// The chat, as bubbles.
+    ///
+    /// **Virtualised over measured heights.** A bubble is as tall as its text,
+    /// so `show_rows` and its one fixed height cannot page this list. Every
+    /// item starts with a guess ([`bubbles::estimate`]); what is drawn is
+    /// measured, and the guess replaced. Only what is on screen is ever laid
+    /// out, so a chat of half a million messages costs a frame what a short
+    /// one does.
     fn viewer_rows(&mut self, ui: &mut Ui) {
         let p = self.palette;
+        let ink = bubbles::ink(&p);
+        ui.painter()
+            .rect_filled(ui.max_rect(), egui::CornerRadius::ZERO, ink.bg);
         if let Some(empty) = self.viewer_empty() {
             empty.show(ui, &p, true);
             return;
         }
-        let pitch = ROW_HEIGHT + ui.spacing().item_spacing.y;
+        let width = ui.available_width();
+        let v = &mut self.viewer;
+        if v.heights.len() != v.items.len() || (v.laid_width - width).abs() > 0.5 {
+            v.laid_width = width;
+            v.heights = v
+                .items
+                .iter()
+                .map(|it| bubbles::estimate(it, &v.rows, width))
+                .collect();
+            offsets_of(&v.heights, &mut v.offsets);
+        }
+
+        let names = v.mixing_topics().then_some(&v.topic_names);
+        let scene = bubbles::Scene {
+            rows: &v.rows,
+            index: &v.index,
+            selected: v.selected,
+            hits: &v.hit_set,
+            topic_names: names,
+            ink,
+        };
+
         let mut area = egui::ScrollArea::vertical()
             .id_salt("viewer-rows")
             .auto_shrink([false, false]);
-        // **A jump lands the row mid-list, not at an edge**, so the messages
-        // around a hit — what it was a reply to, what answered it — are on
-        // screen with it.
-        if let Some(i) = self.viewer.scroll_to.take() {
-            let offset = i as f32 * pitch - ui.available_height() / 2.0 + pitch / 2.0;
-            area = area.vertical_scroll_offset(offset.max(0.0));
+        let mut measured: Vec<(usize, f32)> = Vec::new();
+        // **A jump lands the message mid-pane, not at an edge**, so the ones
+        // around a hit — what it answered, what answered it — are on screen
+        // with it. Its neighbours are measured first, so it lands where the
+        // list will really draw it.
+        if let Some(i) = v.scroll_to.take() {
+            if let Some(&item) = v.item_of_shown.get(i) {
+                let from = item.saturating_sub(JUMP_MEASURE);
+                let to = (item + JUMP_MEASURE).min(v.items.len());
+                for k in from..to {
+                    let (h, _) =
+                        bubbles::draw(ui, &v.items[k], &scene, ui.max_rect().min, width, false);
+                    measured.push((k, h));
+                }
+                for &(k, h) in &measured {
+                    v.heights[k] = h;
+                }
+                measured.clear();
+                offsets_of(&v.heights, &mut v.offsets);
+                let offset = v.offsets[item] - ui.available_height() / 2.0 + v.heights[item] / 2.0;
+                area = area.vertical_scroll_offset(offset.max(0.0));
+            }
+        } else if v.scroll_adjust != 0.0 {
+            area = area.vertical_scroll_offset((v.last_offset + v.scroll_adjust).max(0.0));
         }
-        let mut clicked = None;
-        let v = &self.viewer;
-        area.show_rows(ui, ROW_HEIGHT, v.shown.len(), |ui, range| {
-            for i in range {
-                let Some(r) = v.shown.get(i).and_then(|&r| v.rows.get(r)) else {
-                    continue;
-                };
-                let selected = v.selected == Some(r.id);
-                if message_row(ui, r, selected, v.hit_set.contains(&r.id), &p).clicked() {
-                    clicked = Some(r.id);
+        v.scroll_adjust = 0.0;
+
+        let total = v.offsets.last().copied().unwrap_or(0.0);
+        let mut click = None;
+        let mut adjust = 0.0;
+        let out = area.show_viewport(ui, |ui, viewport| {
+            ui.set_height(total);
+            let top = ui.max_rect().top();
+            let left = ui.max_rect().left();
+            let first = v
+                .offsets
+                .partition_point(|&o| o <= viewport.min.y)
+                .saturating_sub(1);
+            for k in first..v.items.len() {
+                let y = v.offsets[k];
+                if y > viewport.max.y {
+                    break;
+                }
+                let (h, c) = bubbles::draw(
+                    ui,
+                    &v.items[k],
+                    &scene,
+                    egui::pos2(left, top + y),
+                    width,
+                    true,
+                );
+                if c.is_some() {
+                    click = c;
+                }
+                if (h - v.heights[k]).abs() > 0.5 {
+                    // Growing above the top edge pushes the view's contents
+                    // down; the scroll follows it, so what is read stays put.
+                    if y < viewport.min.y {
+                        adjust += h - v.heights[k];
+                    }
+                    measured.push((k, h));
                 }
             }
         });
-        if let Some(id) = clicked {
-            self.viewer_select(id, false);
+        v.last_offset = out.state.offset.y;
+        if !measured.is_empty() {
+            for (k, h) in measured {
+                v.heights[k] = h;
+            }
+            offsets_of(&v.heights, &mut v.offsets);
+            v.scroll_adjust = adjust;
+            // The guesses just became measurements; draw again with them
+            // rather than leave this frame's overlaps on screen.
+            ui.ctx().request_repaint();
+        }
+        match click {
+            Some(bubbles::Click::Select(id)) => self.viewer_select(id, false),
+            Some(bubbles::Click::Jump(id)) => self.viewer_select(id, true),
+            None => {}
         }
     }
 
@@ -676,14 +857,21 @@ impl Shell {
         let chat_id = db.chat_id;
         let v = &mut self.viewer;
         if !v.is_open(&path, chat_id) {
-            // Another chat's hits mean nothing in this one.
+            // Another chat's hits and topics mean nothing in this one.
             v.set_hits(Vec::new());
+            v.topic = None;
+            v.topics.clear();
+            v.topic_names.clear();
         }
         v.open = Some(db);
         v.loading = true;
         v.rows.clear();
         v.index.clear();
         v.shown.clear();
+        v.items.clear();
+        v.item_of_shown.clear();
+        v.heights.clear();
+        v.offsets.clear();
         v.counts = (0, 0, 0);
         v.selected = None;
         v.detail = None;
@@ -701,13 +889,22 @@ impl Shell {
     /// pointer.
     ///
     /// A message the filter is hiding switches the filter to All rather than
-    /// selecting something nobody can see.
+    /// selecting something nobody can see; one in another topic switches to
+    /// its topic.
     pub(super) fn viewer_select(&mut self, id: i64, scroll: bool) {
         let Some(&at) = self.viewer.index.get(&id) else {
             return;
         };
-        if !self.viewer.filter.keeps(&self.viewer.rows[at]) {
+        let row_topic = self.viewer.rows[at].topic_id;
+        let hidden_by_filter = !self.viewer.filter.keeps(&self.viewer.rows[at]);
+        let hidden_by_topic = self.viewer.topic.is_some_and(|t| t != row_topic);
+        if hidden_by_filter {
             self.viewer.filter = Filter::All;
+        }
+        if hidden_by_topic {
+            self.viewer.topic = Some(row_topic);
+        }
+        if hidden_by_filter || hidden_by_topic {
             self.viewer.rebuild_shown();
         }
         if scroll {
@@ -840,7 +1037,14 @@ impl Shell {
                 // first screen is an empty list under a picker is a question
                 // the user has to answer before they can see anything at all.
                 if self.viewer.open.is_none() {
-                    if let Some(first) = self.viewer.databases.first().cloned() {
+                    let wanted = super::shot::database().and_then(|want| {
+                        self.viewer
+                            .databases
+                            .iter()
+                            .find(|d| d.title.to_lowercase().contains(&want))
+                            .cloned()
+                    });
+                    if let Some(first) = wanted.or_else(|| self.viewer.databases.first().cloned()) {
                         self.viewer_open(first, None);
                     }
                 }
@@ -858,14 +1062,14 @@ impl Shell {
         &mut self,
         path: std::path::PathBuf,
         chat_id: i64,
-        rows: Result<Vec<Row>, String>,
+        loaded: Result<Loaded, String>,
     ) {
         if !self.viewer.is_open(&path, chat_id) {
             return;
         }
         self.viewer.loading = false;
-        let rows = match rows {
-            Ok(rows) => rows,
+        let Loaded { rows, topics } = match loaded {
+            Ok(loaded) => loaded,
             Err(e) => {
                 self.status = format!("Failed: {e}");
                 self.journal.warn(e);
@@ -883,6 +1087,13 @@ impl Shell {
             )
         });
         v.rows = rows;
+        v.topic_names = topics.iter().map(|t| (t.id, t.title.clone())).collect();
+        // A topic picked in this chat before a Refresh stays picked; one from
+        // another chat, or no longer here, does not.
+        if v.topic.is_some_and(|t| !v.topic_names.contains_key(&t)) {
+            v.topic = None;
+        }
+        v.topics = topics;
         v.rebuild_shown();
         if let Some(id) = v.select_after_load.take() {
             self.viewer_select(id, true);
@@ -967,70 +1178,17 @@ impl Shell {
     }
 }
 
-/// One message as a list row: date, sender, media and first line, markers.
-fn message_row(
-    ui: &mut Ui,
-    r: &Row,
-    selected: bool,
-    hit: bool,
-    p: &tgx_ui::tokens::Palette,
-) -> egui::Response {
-    let (rect, response) = cell(ui);
-    if selected || response.hovered() {
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::ZERO, p.surface);
+/// Where each item starts, from the heights before it — a free function, so
+/// the list can call it while the rest of the viewer's state is lent out.
+fn offsets_of(heights: &[f32], offsets: &mut Vec<f32>) {
+    offsets.clear();
+    offsets.reserve(heights.len() + 1);
+    let mut y = 0.0;
+    for h in heights {
+        offsets.push(y);
+        y += h;
     }
-    // A search hit is marked in the gutter, where it does not compete with
-    // the text for the eye — the rows between hits are what give a hit its
-    // meaning, and they should not be drowned out.
-    if hit {
-        let bar = egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height()));
-        ui.painter()
-            .rect_filled(bar, egui::CornerRadius::ZERO, p.accent);
-    }
-    inside(ui, rect, |ui| {
-        ui.label(figure(&r.date, p));
-        let from_ink = if r.service { p.muted } else { p.fg };
-        fixed(ui, FROM_W, |ui| {
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(&r.from)
-                        .color(from_ink)
-                        .font(tgx_ui::fonts::medium(tgx_ui::tokens::window::LABEL)),
-                )
-                .truncate(),
-            );
-        });
-        // Markers first, from the right, so a long first line is what gives
-        // way. The nested left-to-right is the status bar's: a truncating
-        // label inside a right-to-left layout would draw against the far edge.
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if let Some(at) = &r.deleted {
-                let day = at.get(..10).unwrap_or(at);
-                ui.label(caps(&format!("deleted {day}"), p.accent));
-            }
-            if r.edited() {
-                ui.label(caps(&format!("edited x{}", r.version - 1), p.muted));
-            }
-            if r.recovered {
-                ui.label(caps("recovered", p.fg));
-            }
-            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                let line = match &r.media {
-                    Some(m) if r.preview.is_empty() => m.clone(),
-                    Some(m) => format!("{m}  {}", r.preview),
-                    None => r.preview.clone(),
-                };
-                let body = if r.service {
-                    meta(line, p)
-                } else {
-                    text(line, p)
-                };
-                ui.add(egui::Label::new(body).truncate());
-            });
-        });
-    });
-    response
+    offsets.push(y);
 }
 
 /// The first line of `s`.

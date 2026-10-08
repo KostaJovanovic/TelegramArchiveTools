@@ -58,15 +58,38 @@ pub struct Row {
     pub topic_id: i64,
     /// `2025-12-18 16:00`, from the payload's own local `date`.
     pub date: String,
+    /// `2025-12-18`, the day separator's key.
+    pub day: String,
+    /// `16:00`, the time in the corner of a bubble.
+    pub time: String,
     /// The sender, or for a service message the actor. Empty when the payload
     /// names neither.
     pub from: String,
+    /// `user123` — what groups consecutive messages into one run of bubbles,
+    /// since two people can share a display name.
+    pub from_id: String,
+    /// Desktop's userpic colour for the sender, 1 to 8 — the same colour the
+    /// HTML export paints, from the same rule.
+    pub colour: u8,
+    /// One or two letters for the sender's userpic.
+    pub initials: String,
+    /// The whole text, entities flattened. For a service message, Desktop's
+    /// sentence for it ("Ivana pinned this message").
+    pub text: String,
     /// The first non-empty line of the text, clipped. For a service message,
     /// its action in brackets.
     pub preview: String,
     /// `[photo]`, `[voice message]`, `[report.pdf]` — what the message
     /// carried, from the payload, whether or not the bytes are stored.
     pub media: Option<String>,
+    /// What else is known of it: `1280×720`, `0:42`, a file's name.
+    pub media_detail: Option<String>,
+    pub reply_to: Option<i64>,
+    /// "Forwarded from" whom.
+    pub forwarded: Option<String>,
+    /// The payload's own `edited` stamp — Telegram's, so a real edit, unlike
+    /// [`Row::version`], which also moves when reactions do.
+    pub edited_at: Option<String>,
     /// When a run first found it gone from Telegram, formatted. `None` while
     /// Telegram still has it.
     pub deleted: Option<String>,
@@ -86,30 +109,143 @@ impl Row {
     }
 }
 
+/// One forum topic that holds messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Topic {
+    pub id: i64,
+    pub title: String,
+}
+
+/// A chat as the viewer holds it: every message, and the topics they are
+/// filed under — more than one only for a forum exported split by topic.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Loaded {
+    pub rows: Vec<Row>,
+    pub topics: Vec<Topic>,
+}
+
 /// Every message of `chat_id` in the database at `path`, oldest first.
-pub async fn load(path: &Path, chat_id: i64) -> Result<Vec<Row>, tgx_archive::Error> {
+pub async fn load(path: &Path, chat_id: i64) -> Result<Loaded, tgx_archive::Error> {
     let path = path.to_path_buf();
     off_the_runtime(async move {
         let store = tgx_archive::Store::open_read(&path).await?;
         let recovered = store.recovered(chat_id).await?;
         let messages = store.all_messages(chat_id).await?;
-        Ok(messages
+        // Every topic a message is filed under, named where a run listed it.
+        // A topic with messages and no row of its own is still a topic.
+        let named: std::collections::HashMap<i64, String> = store
+            .topics_of(chat_id)
+            .await?
             .into_iter()
-            .map(|m| Row {
-                id: m.id,
-                topic_id: m.topic_id,
-                date: local_date(&m.payload),
-                from: sender(&m.payload),
-                preview: preview(&m.payload),
-                media: media_label(&m.payload),
-                deleted: m.deleted_seen.map(unix_date),
-                version: m.version,
-                recovered: recovered.contains(&m.id),
-                service: is_service(&m.payload),
+            .map(|t| (t.id, t.title))
+            .collect();
+        let topics = store
+            .message_topics(chat_id)
+            .await?
+            .into_iter()
+            .map(|id| Topic {
+                id,
+                title: named.get(&id).cloned().unwrap_or_else(|| match id {
+                    1 => "General".into(),
+                    _ => format!("Topic {id}"),
+                }),
             })
-            .collect())
+            .collect();
+        let rows = messages
+            .into_iter()
+            .map(|m| row_of(m, &recovered))
+            .collect();
+        Ok(Loaded { rows, topics })
     })
     .await
+}
+
+fn row_of(m: tgx_archive::StoredMessage, recovered: &std::collections::HashSet<i64>) -> Row {
+    let p = &m.payload;
+    let date = local_date(p);
+    let from = sender(p);
+    let from_id = p
+        .get("from_id")
+        .or_else(|| p.get("actor_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let service = is_service(p);
+    Row {
+        id: m.id,
+        topic_id: m.topic_id,
+        day: date.get(..10).unwrap_or("").to_string(),
+        time: date.get(11..16).unwrap_or("").to_string(),
+        date,
+        colour: colour_of(&from_id),
+        // A sender written as their `@handle` (Settings → own names) would
+        // otherwise be "@" on every userpic.
+        initials: tgx_format::peer::initials_from_name(from.trim_start_matches('@')),
+        from,
+        from_id,
+        text: if service { sentence(p) } else { text_of(p) },
+        preview: preview(p),
+        media: media_label(p),
+        media_detail: media_detail(p),
+        reply_to: p.get("reply_to_message_id").and_then(Value::as_i64),
+        forwarded: p
+            .get("forwarded_from")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        edited_at: p.get("edited").and_then(Value::as_str).map(tidy_date),
+        deleted: m.deleted_seen.map(unix_date),
+        version: m.version,
+        recovered: recovered.contains(&m.id),
+        service,
+    }
+}
+
+/// Desktop's userpic colour for a `from_id` such as `user123`: its digits,
+/// through the same rule the HTML export uses.
+fn colour_of(from_id: &str) -> u8 {
+    let digits: String = from_id.chars().filter(char::is_ascii_digit).collect();
+    tgx_format::peer::userpic_colour(digits.parse().unwrap_or(0))
+}
+
+/// A service message as Desktop's sentence, in plain text: the HTML writer's
+/// own wording, its markup and entities taken out.
+fn sentence(p: &Map<String, Value>) -> String {
+    let html = tgx_html::service::service_text(p, None);
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.replace("&laquo;", "«")
+        .replace("&raquo;", "»")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+}
+
+/// Dimensions, a duration, or a file's name — whichever the payload has.
+fn media_detail(p: &Map<String, Value>) -> Option<String> {
+    let int = |k: &str| p.get(k).and_then(Value::as_i64);
+    if let Some(secs) = int("duration_seconds") {
+        return Some(format!("{}:{:02}", secs / 60, secs % 60));
+    }
+    if let (Some(w), Some(h)) = (int("width"), int("height")) {
+        return Some(format!("{w}×{h}"));
+    }
+    p.get("file_name")
+        .and_then(Value::as_str)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
 }
 
 /// One superseded version, for the detail pane.
@@ -474,14 +610,30 @@ mod tests {
             s.finish_run(run, 1, 0, 0, 0, true, 301).await.unwrap();
         }
 
-        let rows = load(&path, 7).await.unwrap();
+        let loaded = load(&path, 7).await.unwrap();
+        let rows = loaded.rows;
         assert_eq!(rows.len(), 3);
+        // No forum here: everything is filed under topic 1.
+        assert_eq!(
+            loaded.topics,
+            vec![Topic {
+                id: 1,
+                title: "General".into()
+            }]
+        );
 
         let gone = &rows[0];
         assert_eq!(gone.id, 1);
         assert_eq!(gone.date, "2025-12-11 16:01");
         assert_eq!(gone.from, "Ivana");
         assert_eq!(gone.preview, "ovo će nestati");
+        assert_eq!(
+            (gone.day.as_str(), gone.time.as_str()),
+            ("2025-12-11", "16:01")
+        );
+        assert_eq!(gone.from_id, "user1");
+        assert_eq!(gone.colour, tgx_format::peer::userpic_colour(1));
+        assert_eq!(gone.initials, "I");
         assert!(gone.deleted.is_some());
         assert!(!gone.edited() && !gone.recovered);
 
@@ -493,12 +645,23 @@ mod tests {
             "the first line, entities flattened"
         );
         assert_eq!(edited.media.as_deref(), Some("[photo]"));
+        assert_eq!(
+            edited.text, "Druga\nlinija",
+            "the whole text, for the bubble"
+        );
+        assert_eq!(edited.edited_at.as_deref(), Some("2025-12-12 17:00"));
         assert!(edited.deleted.is_none());
 
         let back = &rows[2];
         assert!(back.recovered && back.service);
         assert_eq!(back.from, "Marko");
         assert_eq!(back.preview, "[pin message]");
+        assert!(
+            back.text.starts_with("Marko pinned"),
+            "Desktop's sentence, without its markup: {:?}",
+            back.text
+        );
+        assert!(!back.text.contains('<'));
 
         let d = detail(&path, 7, 2).await.unwrap().unwrap();
         assert_eq!(d.text, "Druga\nlinija");
