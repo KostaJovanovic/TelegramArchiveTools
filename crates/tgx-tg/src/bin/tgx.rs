@@ -135,14 +135,26 @@ async fn main() -> Result<()> {
         "doctor" => {
             let mut dir = std::path::PathBuf::from(&settings.output_dir);
             let mut fix = false;
+            let mut dupes = false;
             for a in args.iter().skip(1) {
                 match a.as_str() {
                     "--fix" => fix = true,
+                    "--dupes" => dupes = true,
                     f if f.starts_with("--") => {
                         return Err(anyhow!("unknown flag {f:?}\n\n{USAGE}"))
                     }
                     folder => dir = folder.into(),
                 }
+            }
+            // A report has nothing to fix; asking for both is a mistake worth
+            // naming rather than quietly running one of them.
+            if dupes && fix {
+                return Err(anyhow!(
+                    "--dupes only reports; it has no --fix. Run them separately."
+                ));
+            }
+            if dupes {
+                return doctor_dupes(&dir).await;
             }
             doctor(&dir, fix).await
         }
@@ -229,6 +241,17 @@ async fn doctor(dir: &std::path::Path, fix: bool) -> Result<()> {
         }
     } else if fixable > 0 {
         println!("{fixable} can be fixed: run again with --fix (with no export running)");
+    }
+    Ok(())
+}
+
+/// `tgx doctor --dupes`: media stored more than once under `dir`, the
+/// largest waste first. Changes nothing.
+async fn doctor_dupes(dir: &std::path::Path) -> Result<()> {
+    let report = tgx_tg::doctor::duplicates(dir).await?;
+    println!("{}:", dir.display());
+    for line in report.lines(20) {
+        println!("{line}");
     }
     Ok(())
 }
@@ -512,6 +535,10 @@ tgx — Telegram Desktop-format exporter
                        offline: what is wrong with an export folder — misplaced
                        or misnamed databases, leftovers of runs that did not
                        finish; --fix moves and deletes only those leftovers
+  tgx doctor [<folder>] --dupes
+                       offline: media held more than once across the databases
+                       and Classic export folders, largest waste first;
+                       reports only, deletes nothing
   tgx split <file.sqlite> [--into <folder>] [--dry-run]
                        offline: one database per chat out of an older file
                        holding several; merges into an existing one (whose

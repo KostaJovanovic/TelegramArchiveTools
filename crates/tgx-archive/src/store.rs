@@ -310,24 +310,30 @@ impl Store {
         &self.path
     }
 
-    /// The chats a database at `path` records, **without writing to it**.
+    /// Open an existing database **without writing to it**: no schema made,
+    /// no switch to WAL. Every write through the handle fails.
     ///
-    /// Not [`Store::open`], which creates the schema in whatever it is given and
-    /// switches it to WAL: this is asked of every `.sqlite` found in a folder
-    /// the user pointed at, and one that is somebody else's file must come out
-    /// of the question untouched. A file this build would not open — another
-    /// schema version, or not one of ours at all — answers an error.
-    pub async fn chats_in(path: &Path) -> Result<Vec<ChatEntry>, Error> {
+    /// For the questions asked of whatever `.sqlite` sits in a folder the user
+    /// pointed at — [`Store::chats_in`], the duplicate report — where a file
+    /// that is somebody else's must come out of the asking untouched. A file
+    /// this build would not open — another schema version, or not one of ours
+    /// at all — answers an error.
+    pub async fn open_read_only(path: &Path) -> Result<Self, Error> {
         let db = libsql::Builder::new_local(path)
             .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .build()
             .await?;
         let conn = db.connect()?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        let mut rows = conn
-            .query("SELECT value FROM meta WHERE key = 'schema_version'", ())
-            .await?;
-        let found: i64 = match rows.next().await? {
+        let store = Self {
+            conn,
+            _db: db,
+            path: path.to_path_buf(),
+        };
+        let found: i64 = match store
+            .row("SELECT value FROM meta WHERE key = 'schema_version'", ())
+            .await?
+        {
             Some(r) => r.get::<String>(0)?.trim().parse().unwrap_or(-1),
             None => -1,
         };
@@ -337,10 +343,23 @@ impl Store {
                 wanted: SCHEMA_VERSION,
             });
         }
+        Ok(store)
+    }
+
+    /// The chats a database at `path` records, **without writing to it**.
+    ///
+    /// Not [`Store::open`], which creates the schema in whatever it is given and
+    /// switches it to WAL: this is asked of every `.sqlite` found in a folder
+    /// the user pointed at, and one that is somebody else's file must come out
+    /// of the question untouched. A file this build would not open — another
+    /// schema version, or not one of ours at all — answers an error.
+    pub async fn chats_in(path: &Path) -> Result<Vec<ChatEntry>, Error> {
+        let store = Self::open_read_only(path).await?;
         // `synced` is the last run that *walked to the end*. A cancelled or
         // failed run also writes a `runs` row, and calling that a sync would
         // tell the list a chat is current when its last attempt stopped short.
-        let mut rows = conn
+        let mut rows = store
+            .conn
             .query(
                 "SELECT c.id, c.title,
                         (SELECT MAX(finished) FROM runs r
@@ -973,6 +992,34 @@ impl Store {
             )
             .await?;
         Ok(())
+    }
+
+    /// Every blob's key, size and name — `(file_id, kind, size, file_name)` —
+    /// **without its bytes.**
+    ///
+    /// What the duplicate report groups on before it reads anything: a file
+    /// can only equal one of the same length, so the bytes are fetched, one
+    /// blob at a time through [`Store::blob`], only for a size more than one
+    /// file shares. Selecting `bytes` here would load every file the database
+    /// holds at once.
+    pub async fn blob_sizes(&self) -> Result<Vec<(i64, String, u64, Option<String>)>, Error> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT file_id, kind, size, file_name FROM blobs ORDER BY file_id, kind",
+                (),
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next().await? {
+            out.push((
+                r.get::<i64>(0)?,
+                r.get::<String>(1)?,
+                u64::try_from(r.get::<i64>(2)?).unwrap_or(0),
+                r.get::<Option<String>>(3)?,
+            ));
+        }
+        Ok(out)
     }
 
     pub async fn blob(&self, file_id: i64, kind: &str) -> Result<Option<Vec<u8>>, Error> {

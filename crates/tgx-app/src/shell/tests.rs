@@ -641,6 +641,29 @@ fn a_folder_check_logs_problems_as_warnings_and_shows_the_log() {
 }
 
 #[test]
+fn a_duplicate_report_is_logged_without_warnings_and_shows_the_log() {
+    // A second copy is space, not damage: none of it may land in Copy
+    // warnings, where it would sit beside an INCOMPLETE export.
+    let mut s = shell_with(vec![]);
+    s.deduping = true;
+    s.apply(Event::Dupes(Ok(vec![
+        "3 file(s) in export folders and 4 blob(s) in databases: 1 held more than once".into(),
+        "  2 copies of 1.0 MB, 1.0 MB extra:".into(),
+        "    A.sqlite: photos 10".into(),
+    ])));
+    assert!(!s.deduping, "the button comes back");
+    assert_eq!(s.journal.warnings(), 0);
+    assert!(s.journal.to_text().contains("photos 10"));
+    assert_eq!(s.body, View::Queue);
+
+    // A folder that could not be read is the one thing that is a warning.
+    s.deduping = true;
+    s.apply(Event::Dupes(Err("could not read X: denied".into())));
+    assert!(!s.deduping);
+    assert_eq!(s.journal.warnings(), 1);
+}
+
+#[test]
 fn the_scheduled_sync_fires_when_due_and_yields_to_a_run() {
     use std::time::{Duration, Instant};
     let mut s = shell_with(vec![chat(1, "a", None)]);

@@ -285,6 +285,25 @@ pub async fn check_folder(settings: Settings, tx: Events) {
     let _ = tx.send(Event::Checked(lines));
 }
 
+/// Find duplicate media: what is stored more than once in the destination,
+/// as log lines. Changes nothing — see `tgx_tg::doctor::duplicates`.
+pub async fn find_dupes(settings: Settings, tx: Events) {
+    let dir = std::path::Path::new(&settings.output_dir);
+    let _ = tx.send(Event::Status(format!(
+        "Looking for duplicate media in {}…",
+        dir.display()
+    )));
+    let lines = tgx_tg::doctor::duplicates(dir)
+        .await
+        .map(|report| report.lines(DUPE_GROUPS_SHOWN))
+        .map_err(|e| format!("could not read {}: {e}", dir.display()));
+    let _ = tx.send(Event::Dupes(lines));
+}
+
+/// How many groups the window lists — the CLI's number, so the two answers
+/// read the same.
+const DUPE_GROUPS_SHOWN: usize = 20;
+
 /// Which chats the destination already holds, for the marks in the list.
 ///
 /// **Quiet on failure.** A destination that does not exist yet is the normal

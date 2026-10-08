@@ -286,6 +286,42 @@ impl Shell {
         self.show(View::Queue);
     }
 
+    /// Find duplicate media: read the destination off the window's thread and
+    /// log what is stored more than once.
+    pub(super) fn find_dupes(&mut self) {
+        if self.deduping {
+            return;
+        }
+        self.commit_settings();
+        self.deduping = true;
+        let tx = self.bridge.sender();
+        let settings = self.settings.clone();
+        self.bridge
+            .spawn(async move { crate::actions::find_dupes(settings, tx).await });
+    }
+
+    /// Find duplicate media came back. **Nothing here is a warning**: a second
+    /// copy is space, not damage, and a warning would put it in Copy warnings
+    /// beside an INCOMPLETE export. The log is in the Queue view, which is
+    /// shown, since the button is on another.
+    pub(super) fn dupes_found(&mut self, found: Result<Vec<String>, String>) {
+        self.deduping = false;
+        self.log_copied = false;
+        let dir = self.settings.output_dir.clone();
+        match found {
+            Err(e) => self.journal.warn(e),
+            Ok(lines) => {
+                self.status = format!("Looked for duplicate media in {dir}");
+                self.journal
+                    .push(format!("Duplicate media in {dir}: nothing is changed"));
+                for line in lines {
+                    self.journal.push(format!("  {line}"));
+                }
+            }
+        }
+        self.show(View::Queue);
+    }
+
     /// Restart the scheduled sync's clock from `now` — on launch, when the
     /// interval is changed, and when a run ends.
     pub(super) fn arm_schedule(&mut self, now: std::time::Instant) {
