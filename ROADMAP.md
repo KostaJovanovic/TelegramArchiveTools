@@ -296,6 +296,17 @@ against the current code during the refactor; the rest are as recorded on
   a time, and a control that is enabled and does nothing teaches that the
   interface is unreliable. The setting still loads and clamps, so an existing
   file opens.
+- **The databases are not encrypted**, and no part of the pinned stack can do
+  it cheaply. libsql 0.9.30 has an `encryption` feature, but it swaps the
+  bundled SQLite for SQLite3MultipleCiphers (AES-256-CBC), which is built with
+  **cmake**: a new requirement for every build and for CI. Feature unification
+  would also switch grammers-session's session file onto the same library —
+  one library, so no symbol clash, and SQLite3MC opens an unkeyed file as plain,
+  but untested. And the trap that makes it worth writing down: **without the
+  feature, `Builder::encryption_config` compiles and writes a plain file**, with
+  only a log line saying so. Any attempt must assert the file on disk is not
+  readable as SQLite, not that the call succeeded. Until then, an `Exports/`
+  folder is protected only by where it is kept.
 
 ---
 
