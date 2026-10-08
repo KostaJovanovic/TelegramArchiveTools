@@ -486,6 +486,23 @@ pub struct ChatInfo {
     /// `None` means *not counted*, which is **not** the same as zero. It paints
     /// blank, sorts last, and every place that sums has to tell the two apart.
     pub message_count: Option<i64>,
+    /// The other half of a basic group Telegram converted into a supergroup.
+    ///
+    /// **Both halves stay in the dialog list**, and they hold different
+    /// messages: everything before the conversion lives only in the old group,
+    /// which is still listed under Groups, usually under the same title. An
+    /// export of the supergroup alone starts at "converted a basic group to
+    /// this supergroup".
+    pub migration: Option<Migration>,
+}
+
+/// Which way a [`ChatInfo`] was converted, and the chat on the other side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Migration {
+    /// This basic group became the supergroup `id`. Nothing new arrives here.
+    Became { id: i64, title: String },
+    /// This supergroup was the basic group `id`, which holds its earlier history.
+    CameFrom { id: i64, title: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -666,6 +683,7 @@ mod tests {
             is_forum: false,
             public: false,
             message_count: None,
+            migration: None,
         };
         let empty = ChatInfo {
             message_count: Some(0),

@@ -109,6 +109,7 @@ mod tests {
             is_forum: false,
             public: false,
             message_count: None,
+            migration: None,
         }
     }
 

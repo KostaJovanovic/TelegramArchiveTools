@@ -6,7 +6,7 @@
 //! [`ChatInfo::message_count`] is an `Option` — see the note on it.
 
 use crate::cancel::Cancel;
-use crate::client::{ChatInfo, ChatKind};
+use crate::client::{ChatInfo, ChatKind, Migration};
 use crate::engine::sleep_in_slices_until;
 use crate::error::{classify, EnrichError};
 use grammers_client::peer::Peer;
@@ -19,11 +19,15 @@ use tgx_media::topics::{GENERAL_TITLE, GENERAL_TOPIC_ID};
 /// Every chat the account can see.
 pub async fn list_chats(client: &Client) -> Result<Vec<ChatInfo>, EnrichError> {
     let mut out = Vec::new();
+    let mut upgrades = Vec::new();
     let mut iter = client.iter_dialogs();
     loop {
         match iter.next().await {
             Ok(Some(dialog)) => {
                 if let Some(info) = chat_info(&dialog) {
+                    if let Some(to) = migrated_to(&dialog) {
+                        upgrades.push((info.id, to));
+                    }
                     out.push(info);
                 }
             }
@@ -31,7 +35,57 @@ pub async fn list_chats(client: &Client) -> Result<Vec<ChatInfo>, EnrichError> {
             Err(e) => return Err(classify(&e)),
         }
     }
+    link_migrations(&mut out, &upgrades);
     Ok(out)
+}
+
+/// The supergroup a basic group was converted into, if it was.
+///
+/// Read off the dialog list's own `Chat`, so marking the pairs costs no request.
+fn migrated_to(dialog: &grammers_client::peer::Dialog) -> Option<i64> {
+    let Peer::Group(g) = &dialog.peer else {
+        return None;
+    };
+    let tl::enums::Chat::Chat(c) = &g.raw else {
+        return None;
+    };
+    match c.migrated_to.as_ref()? {
+        tl::enums::InputChannel::Channel(ch) => Some(ch.channel_id),
+        tl::enums::InputChannel::FromMessage(ch) => Some(ch.channel_id),
+        tl::enums::InputChannel::Empty => None,
+    }
+}
+
+/// Mark both halves of every `(basic group, supergroup)` pair.
+///
+/// **Matched by kind as well as id.** A basic group's and a channel's bare ids
+/// are separate number spaces, so a supergroup sharing the old group's number
+/// is not the same chat. A supergroup the account has left is not listed;
+/// the old group then still says what it became, by id.
+fn link_migrations(chats: &mut [ChatInfo], upgrades: &[(i64, i64)]) {
+    let title_of = |chats: &[ChatInfo], id: i64, kind: ChatKind| {
+        chats
+            .iter()
+            .find(|c| c.id == id && c.kind == kind)
+            .map(|c| c.title.clone())
+    };
+    for &(old, new) in upgrades {
+        let new_title = title_of(chats, new, ChatKind::Supergroup);
+        let old_title = title_of(chats, old, ChatKind::Group).unwrap_or_default();
+        for c in chats.iter_mut() {
+            if c.id == old && c.kind == ChatKind::Group {
+                c.migration = Some(Migration::Became {
+                    id: new,
+                    title: new_title.clone().unwrap_or_default(),
+                });
+            } else if c.id == new && c.kind == ChatKind::Supergroup {
+                c.migration = Some(Migration::CameFrom {
+                    id: old,
+                    title: old_title.clone(),
+                });
+            }
+        }
+    }
 }
 
 fn chat_info(dialog: &grammers_client::peer::Dialog) -> Option<ChatInfo> {
@@ -108,6 +162,7 @@ fn chat_info(dialog: &grammers_client::peer::Dialog) -> Option<ChatInfo> {
         is_forum,
         public,
         message_count: None,
+        migration: None,
     })
 }
 
@@ -480,6 +535,60 @@ pub async fn list_topics(client: &Client, peer: PeerRef) -> Result<Vec<Topic>, E
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn listed(id: i64, title: &str, kind: ChatKind) -> ChatInfo {
+        ChatInfo {
+            id,
+            title: title.into(),
+            kind,
+            last_activity: 0,
+            is_forum: false,
+            public: false,
+            message_count: None,
+            migration: None,
+        }
+    }
+
+    #[test]
+    fn both_halves_of_a_converted_group_name_each_other() {
+        let mut chats = vec![
+            listed(5, "admini", ChatKind::Group),
+            listed(9, "Admini", ChatKind::Supergroup),
+            // Same number as the old group, different number space.
+            listed(5, "unrelated", ChatKind::Supergroup),
+            listed(7, "plain", ChatKind::Group),
+        ];
+        link_migrations(&mut chats, &[(5, 9)]);
+        assert_eq!(
+            chats[0].migration,
+            Some(Migration::Became {
+                id: 9,
+                title: "Admini".into()
+            })
+        );
+        assert_eq!(
+            chats[1].migration,
+            Some(Migration::CameFrom {
+                id: 5,
+                title: "admini".into()
+            })
+        );
+        assert_eq!(chats[2].migration, None);
+        assert_eq!(chats[3].migration, None);
+    }
+
+    #[test]
+    fn an_old_group_whose_supergroup_was_left_still_says_it_was_converted() {
+        let mut chats = vec![listed(5, "admini", ChatKind::Group)];
+        link_migrations(&mut chats, &[(5, 9)]);
+        assert_eq!(
+            chats[0].migration,
+            Some(Migration::Became {
+                id: 9,
+                title: String::new()
+            })
+        );
+    }
 
     #[test]
     fn general_is_always_present_and_first() {

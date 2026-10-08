@@ -15,7 +15,7 @@
 use anyhow::{anyhow, Result};
 use std::io::Write;
 use tgx_tg::cancel::Cancel;
-use tgx_tg::client::Session;
+use tgx_tg::client::{Migration, Session};
 use tgx_tg::config::Settings;
 use tgx_tg::dialogs;
 use tgx_tg::engine::{ChatExporter, Progress};
@@ -837,8 +837,13 @@ async fn chats(settings: &Settings) -> Result<()> {
     list.sort_by_key(|c| -c.last_activity);
     println!("{} chats", list.len());
     for c in &list {
+        let migration = match &c.migration {
+            Some(Migration::Became { id, .. }) => format!("  [upgraded to {id}]"),
+            Some(Migration::CameFrom { id, .. }) => format!("  [was group {id}]"),
+            None => String::new(),
+        };
         println!(
-            "  {:<12} {:<11} {}{}",
+            "  {:<12} {:<11} {}{}{migration}",
             c.id,
             c.kind.label(),
             c.title,

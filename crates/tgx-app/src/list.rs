@@ -10,7 +10,7 @@
 use chrono::{DateTime, Datelike, Local, TimeZone};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use tgx_tg::client::{ChatInfo, ChatKind};
+use tgx_tg::client::{ChatInfo, ChatKind, Migration};
 
 /// A chat's last activity, as Telegram itself words it.
 ///
@@ -48,9 +48,36 @@ pub fn human_when(timestamp: i64, now: DateTime<Local>) -> String {
 /// case have one home — a chat Telegram gave no last message reads as its kind
 /// alone, not as its kind followed by a dangling separator.
 pub fn caption(chat: &ChatInfo, now: DateTime<Local>) -> String {
-    match human_when(chat.last_activity, now) {
+    let mut line = match human_when(chat.last_activity, now) {
         when if when.is_empty() => chat.kind.label().to_string(),
         when => format!("{}  {when}", chat.kind.label()),
+    };
+    if let Some(m) = &chat.migration {
+        line.push_str("    ");
+        line.push_str(&migration_note(m));
+    }
+    line
+}
+
+/// The short mark beside the count on either half of a converted group.
+pub fn migration_mark(m: &Migration) -> &'static str {
+    match m {
+        Migration::Became { .. } => "Upgraded",
+        Migration::CameFrom { .. } => "Was a group",
+    }
+}
+
+/// Where the other half is — the old group is usually listed under the same
+/// title, so the caption names it rather than leaving two lookalikes.
+fn migration_note(m: &Migration) -> String {
+    match m {
+        Migration::Became { title, .. } if !title.is_empty() => {
+            format!("now the supergroup \u{201c}{title}\u{201d}")
+        }
+        Migration::Became { id, .. } => format!("now supergroup {id}, not in your list"),
+        Migration::CameFrom { title, .. } => {
+            format!("earlier messages are in the group \u{201c}{title}\u{201d}")
+        }
     }
 }
 
@@ -520,6 +547,7 @@ mod tests {
             is_forum: false,
             public: false,
             message_count: count,
+            migration: None,
         }
     }
 
@@ -843,6 +871,44 @@ mod tests {
             };
             assert_eq!(visible(&chats, &view).len(), 1, "{needle:?}");
         }
+    }
+
+    #[test]
+    fn both_halves_of_a_converted_group_say_where_the_other_is() {
+        let now = Local::now();
+        let old = ChatInfo {
+            kind: ChatKind::Group,
+            migration: Some(Migration::Became {
+                id: 9,
+                title: "Admini".into(),
+            }),
+            ..chat(5, "admini", None)
+        };
+        let new = ChatInfo {
+            migration: Some(Migration::CameFrom {
+                id: 5,
+                title: "admini".into(),
+            }),
+            ..chat(9, "Admini", None)
+        };
+        let left = ChatInfo {
+            migration: Some(Migration::Became {
+                id: 9,
+                title: String::new(),
+            }),
+            ..old.clone()
+        };
+        assert!(caption(&old, now).contains("now the supergroup \u{201c}Admini\u{201d}"));
+        assert!(
+            caption(&new, now).contains("earlier messages are in the group \u{201c}admini\u{201d}")
+        );
+        assert!(caption(&left, now).contains("supergroup 9, not in your list"));
+        assert_eq!(migration_mark(old.migration.as_ref().unwrap()), "Upgraded");
+        assert_eq!(
+            migration_mark(new.migration.as_ref().unwrap()),
+            "Was a group"
+        );
+        assert!(!caption(&chat(1, "plain", None), now).contains("group \u{201c}"));
     }
 
     #[test]

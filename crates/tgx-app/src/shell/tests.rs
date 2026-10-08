@@ -18,6 +18,7 @@ fn chat(id: i64, title: &str, count: Option<i64>) -> ChatInfo {
         is_forum: false,
         public: false,
         message_count: count,
+        migration: None,
     }
 }
 

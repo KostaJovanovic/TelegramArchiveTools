@@ -314,6 +314,13 @@ impl Shell {
                     ui.label(caps(mark, p.muted));
                     ui.add_space(space::STEP);
                 }
+                // **A converted group is marked in the accent**, on both
+                // halves: the pair usually share a title and hold different
+                // messages, and exporting one of them looks complete.
+                if let Some(m) = &chat.migration {
+                    ui.label(caps(list::migration_mark(m), p.accent));
+                    ui.add_space(space::STEP);
+                }
                 // Title over caption, and the two are one block: no space
                 // between them beyond the leading, because a gap there would
                 // read as two rows rather than one chat with a subtitle.
