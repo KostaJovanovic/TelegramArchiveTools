@@ -228,7 +228,34 @@ async fn compare(
         files.len(),
         roots.len()
     );
-    let (exports, skipped) = compare::read_exports(&files);
+    let (mut exports, mut skipped) = compare::read_exports(&files);
+
+    // HTML-only exports carry no chat id, so they join by name.
+    let html_dirs = compare::find_html(roots, 4);
+    let mut html = Vec::new();
+    for dir in &html_dirs {
+        match compare::read_html(dir) {
+            Ok(e) => html.push(e),
+            Err(e) => skipped.push((dir.clone(), e)),
+        }
+    }
+    if !html_dirs.is_empty() {
+        println!(
+            "reading {} HTML-only export(s), matched to databases by chat name…",
+            html_dirs.len()
+        );
+    }
+    let (matched, unmatched) = compare::match_titles(html, db).await?;
+    for (id, e) in matched {
+        let into = exports.entry(id).or_default();
+        if into.title.is_empty() {
+            into.title = e.title;
+        }
+        into.files.extend(e.files);
+        for (k, v) in e.messages {
+            into.messages.entry(k).or_insert(v);
+        }
+    }
     let (verdicts, unreadable) = compare::compare(exports, db).await?;
 
     let mut total_missing = 0;
@@ -303,6 +330,25 @@ async fn compare(
             );
         }
     }
+    if !unmatched.is_empty() {
+        println!();
+        println!("HTML-only exports whose chat name no database has:");
+        for e in &unmatched {
+            let span = compare::date_span(&e.messages.values().cloned().collect::<Vec<_>>())
+                .map(|(a, b)| format!(", {a} … {b}"))
+                .unwrap_or_default();
+            println!(
+                "  {} — {} messages{span}, {}",
+                e.title,
+                e.messages.len(),
+                e.files
+                    .first()
+                    .and_then(|f| f.parent())
+                    .map(|f| f.display().to_string())
+                    .unwrap_or_default()
+            );
+        }
+    }
     if !skipped.is_empty() || !unreadable.is_empty() {
         println!();
         println!("skipped:");
@@ -348,7 +394,8 @@ tgx — Telegram Desktop-format exporter
   tgx export <title>   export the chat whose title matches
   tgx compare <export folder>... [--db <folder>] [--csv <file>]
                        offline: list messages old Desktop-format exports hold
-                       that the databases do not (ids and dates only)
+                       that the databases do not (ids and dates only); an
+                       HTML-only export is matched to a database by chat name
   tgx import <export folder>... [--db <folder>] [--dry-run]
                        offline: copy those messages into the databases, marked
                        deleted and recovered (only into a database that has

@@ -171,7 +171,22 @@ pub type Skipped = (PathBuf, String);
 /// and none of them is ever a `result.json`; four levels covers a root of
 /// exports, one export, its topic folders and one spare.
 pub fn find_results(roots: &[PathBuf], depth: usize) -> Vec<PathBuf> {
-    fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    find_named(roots, depth, "result.json")
+}
+
+/// Every folder under `roots` that is an **HTML-only** export: a
+/// `messages.html` with no `result.json` beside it. Desktop writes one when
+/// its JSON box is left unticked, and a phone backup often has nothing else.
+pub fn find_html(roots: &[PathBuf], depth: usize) -> Vec<PathBuf> {
+    find_named(roots, depth, "messages.html")
+        .into_iter()
+        .filter_map(|p| p.parent().map(Path::to_path_buf))
+        .filter(|d| !d.join("result.json").exists())
+        .collect()
+}
+
+fn find_named(roots: &[PathBuf], depth: usize, name: &str) -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: usize, name: &str, out: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -179,9 +194,9 @@ pub fn find_results(roots: &[PathBuf], depth: usize) -> Vec<PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 if depth > 0 {
-                    walk(&path, depth - 1, out);
+                    walk(&path, depth - 1, name, out);
                 }
-            } else if path.file_name().is_some_and(|n| n == "result.json") {
+            } else if path.file_name().is_some_and(|n| n == name) {
                 out.push(path);
             }
         }
@@ -189,13 +204,188 @@ pub fn find_results(roots: &[PathBuf], depth: usize) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for root in roots {
         if root.is_file() {
-            out.push(root.clone());
+            if root.file_name().is_some_and(|n| n == name) {
+                out.push(root.clone());
+            }
         } else {
-            walk(root, depth, &mut out);
+            walk(root, depth, name, &mut out);
         }
     }
     out.sort();
     out
+}
+
+/// Read an HTML-only export folder: its chat's name and every message id,
+/// with the date each was sent.
+///
+/// The pages carry **no chat id**, so the result is matched to a database by
+/// name — see [`match_titles`]. Read by plain scanning for the three marks
+/// Desktop's writer (and `tgx-html`, which reproduces it) always puts down:
+///
+/// - `id="message123"` on a message; `id="message-4"` on a day divider, whose
+///   text is the day a service message under it was sent — a service message
+///   has no time of its own in the markup;
+/// - `class="pull_right date details" title="18.12.2025 16:17:52 UTC+01:00"`,
+///   the full date of an ordinary message. *Not* the `date details` span in a
+///   forwarded block, which is the original's date.
+pub fn read_html(folder: &Path) -> Result<Exported, String> {
+    let mut pages: Vec<(u32, PathBuf)> = std::fs::read_dir(folder)
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let n = name.strip_prefix("messages")?.strip_suffix(".html")?;
+            let n = if n.is_empty() { 1 } else { n.parse().ok()? };
+            Some((n, e.path()))
+        })
+        .collect();
+    pages.sort();
+    let mut out = Exported::default();
+    for (_, page) in &pages {
+        let text = std::fs::read_to_string(page).map_err(|e| e.to_string())?;
+        if out.title.is_empty() {
+            out.title = header_title(&text).unwrap_or_default();
+        }
+        scan_page(&text, &mut out.messages);
+    }
+    if out.messages.is_empty() {
+        return Err("no messages in its pages — not a Telegram HTML export".into());
+    }
+    out.files.insert(folder.join("messages.html"));
+    Ok(out)
+}
+
+fn header_title(page: &str) -> Option<String> {
+    let at = page.find(r#"class="text bold""#)?;
+    let rest = &page[at..];
+    let body = &rest[rest.find('>')? + 1..];
+    let body = &body[..body.find("</")?];
+    let title = unescape(body.trim());
+    // A topic page's header is a back link: "‹ Chat".
+    Some(title.trim_start_matches('‹').trim().to_string())
+}
+
+fn scan_page(page: &str, into: &mut BTreeMap<i64, Seen>) {
+    const MARK: &str = "id=\"message";
+    const DATE: &str = "class=\"pull_right date details\" title=\"";
+    let starts: Vec<usize> = page.match_indices(MARK).map(|(i, _)| i).collect();
+    let mut day = String::new();
+    for (n, &at) in starts.iter().enumerate() {
+        let end = starts.get(n + 1).copied().unwrap_or(page.len());
+        let block = &page[at..end];
+        let tag_start = page[..at].rfind('<').unwrap_or(at);
+        let tag = &page[tag_start..at];
+        let id_text = &block[MARK.len()..];
+        let id_text = &id_text[..id_text.find('"').unwrap_or(0)];
+        if id_text.starts_with('-') {
+            if let Some(d) = between(block, "class=\"body details\">", "</div>") {
+                day = day_of(d.trim()).unwrap_or_default();
+            }
+            continue;
+        }
+        let Ok(id) = id_text.parse::<i64>() else {
+            continue;
+        };
+        let service = tag.contains("service");
+        let date = if service {
+            if day.is_empty() {
+                String::new()
+            } else {
+                format!("{day}T00:00:00")
+            }
+        } else {
+            between(block, DATE, "\"")
+                .and_then(desktop_date)
+                .unwrap_or_default()
+        };
+        into.entry(id).or_insert(Seen {
+            id,
+            kind: if service { "service" } else { "message" }.into(),
+            date,
+        });
+    }
+}
+
+fn between<'a>(s: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let from = s.find(open)? + open.len();
+    let to = s[from..].find(close)? + from;
+    Some(&s[from..to])
+}
+
+/// `18.12.2025 16:17:52 UTC+01:00` → `2025-12-18T16:17:52`, the form
+/// `result.json` writes, so the two kinds of export report alike.
+fn desktop_date(title: &str) -> Option<String> {
+    let (date, rest) = title.split_once(' ')?;
+    let time = rest.split(' ').next()?;
+    let mut p = date.split('.');
+    let (d, m, y) = (p.next()?, p.next()?, p.next()?);
+    Some(format!("{y}-{m}-{d}T{time}"))
+}
+
+/// `18 December 2025` → `2025-12-18`.
+fn day_of(text: &str) -> Option<String> {
+    const MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let mut p = text.split_whitespace();
+    let d: u32 = p.next()?.parse().ok()?;
+    let month = p.next()?;
+    let m = MONTHS.iter().position(|x| *x == month)? + 1;
+    let y: u32 = p.next()?.parse().ok()?;
+    Some(format!("{y:04}-{m:02}-{d:02}"))
+}
+
+fn unescape(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Give each HTML export the id of the database whose chat has the same name,
+/// case and surrounding space aside. What matches nobody is returned as is.
+pub async fn match_titles(
+    html: Vec<Exported>,
+    db_dir: &Path,
+) -> std::io::Result<(BTreeMap<i64, Exported>, Vec<Exported>)> {
+    let archived = crate::engine::archived_chats(db_dir).await?;
+    let key = |t: &str| t.trim().to_lowercase();
+    let ids: HashMap<String, i64> = archived
+        .chats
+        .iter()
+        .map(|(id, title)| (key(title), *id))
+        .collect();
+    let mut matched: BTreeMap<i64, Exported> = BTreeMap::new();
+    let mut unmatched = Vec::new();
+    for e in html {
+        match ids.get(&key(&e.title)) {
+            Some(id) => {
+                let into = matched.entry(*id).or_default();
+                if into.title.is_empty() {
+                    into.title = e.title.clone();
+                }
+                into.files.extend(e.files);
+                for (k, v) in e.messages {
+                    into.messages.entry(k).or_insert(v);
+                }
+            }
+            None => unmatched.push(e),
+        }
+    }
+    Ok((matched, unmatched))
 }
 
 /// Read every file and merge by chat id.
@@ -354,6 +544,7 @@ pub fn date_span(messages: &[Seen]) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn tmp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("tgx-compare-{}-{name}", std::process::id()));
@@ -391,6 +582,53 @@ mod tests {
         // The two exports of chat 7 are merged, not one chosen.
         assert_eq!(chats[&7].messages.len(), 3);
         assert_eq!(chats[&7].files.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_html_export_gives_up_its_ids_and_dates_across_pages() {
+        let dir = tmp("html");
+        let export = dir.join("Dev & Co");
+        // Our own writer, which the html leg proves writes Desktop's markup.
+        let mut w = tgx_html::HtmlWriter::new(&export, "Dev & Co", 2);
+        let msgs = [
+            json!({ "id": 5, "type": "message", "date": "2025-12-18T16:17:52",
+                    "from": "A", "from_id": "user1", "text": "x" }),
+            json!({ "id": 6, "type": "service", "date": "2025-12-19T09:00:00",
+                    "actor": "A", "actor_id": "user1", "action": "pin_message",
+                    "message_id": 5, "text": "" }),
+            json!({ "id": 9, "type": "message", "date": "2025-12-19T10:11:12",
+                    "from": "B", "from_id": "user2", "text": "y" }),
+        ];
+        for m in msgs {
+            w.add(m.as_object().unwrap()).unwrap();
+        }
+        w.close().unwrap();
+        assert!(
+            export.join("messages2.html").is_file(),
+            "meant to span pages"
+        );
+
+        assert_eq!(
+            find_html(std::slice::from_ref(&dir), 2),
+            vec![export.clone()]
+        );
+        let e = read_html(&export).unwrap();
+        assert_eq!(e.title, "Dev & Co");
+        let got: Vec<(i64, &str, &str)> = e
+            .messages
+            .values()
+            .map(|m| (m.id, m.kind.as_str(), m.date.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (5, "message", "2025-12-18T16:17:52"),
+                // A service message's time is not in the markup; its day is.
+                (6, "service", "2025-12-19T00:00:00"),
+                (9, "message", "2025-12-19T10:11:12"),
+            ]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
