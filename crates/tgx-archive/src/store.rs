@@ -326,6 +326,9 @@ pub fn merge_volatile(
 ) -> Map<String, Value> {
     let mut out = stored.clone();
     for key in VOLATILE {
+        if *key == "reactions" && same_reactions(stored.get(*key), fresh.get(*key)) {
+            continue;
+        }
         match fresh.get(*key) {
             Some(v) => {
                 out.insert((*key).to_string(), v.clone());
@@ -356,6 +359,41 @@ pub fn merge_volatile(
         }
     }
     tgx_format::order::ordered(&out)
+}
+
+/// The same reactions, reading each named reactor by id and not by name.
+///
+/// **A reactor's name is not part of the message.** The converter writes
+/// whatever the run's name book holds for that person at that moment, and the
+/// book fills as the read goes: someone who has not posted yet by this point of
+/// the walk is named from the roster, someone who has is named from their own
+/// messages, and for a contact the two can differ. A full re-read starts at
+/// the first message and a sync 500 from the end, so the two named the same
+/// reactor differently and every such message was versioned — 848 of 16,608 in
+/// one chat and 5,308 of 44,406 in another, on a pass where nothing had been
+/// edited, each one then marked "edited" in the viewer.
+///
+/// So the stored names stand, as a sender's `from` already does. Anything else
+/// moving — a count, a reaction, who reacted, when — is a real change and
+/// takes the fresh list whole.
+fn same_reactions(stored: Option<&Value>, fresh: Option<&Value>) -> bool {
+    fn without_names(v: &Value) -> Value {
+        let mut v = v.clone();
+        for reaction in v.as_array_mut().into_iter().flatten() {
+            let recent = reaction.get_mut("recent").and_then(Value::as_array_mut);
+            for who in recent.into_iter().flatten() {
+                if let Some(who) = who.as_object_mut() {
+                    who.remove("from");
+                }
+            }
+        }
+        v
+    }
+    match (stored, fresh) {
+        (Some(a), Some(b)) => a == b || without_names(a) == without_names(b),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 pub struct Store {
@@ -2069,6 +2107,51 @@ mod tests {
             merge_volatile(&stored, &fresh)["file"],
             json!("files/original.mp3"),
             "only placeholders are replaceable; history is not"
+        );
+    }
+
+    #[test]
+    fn a_reactor_named_differently_is_not_a_change() {
+        let reacted = |name: &str, count: i64, date: &str| {
+            json!([{ "type": "emoji", "count": count, "emoji": "👍", "recent": [
+                { "from": name, "from_id": "user7", "date": date }
+            ]}])
+        };
+        let mut stored = msg(10, "x");
+        stored.insert(
+            "reactions".into(),
+            reacted("Saved Name", 1, "2025-01-01T10:00:00"),
+        );
+
+        // The same reaction by the same person; only the run's name for them
+        // differs. The stored message stands, byte for byte.
+        let mut renamed = msg(10, "x");
+        renamed.insert(
+            "reactions".into(),
+            reacted("Own Name", 1, "2025-01-01T10:00:00"),
+        );
+        assert_eq!(merge_volatile(&stored, &renamed), stored);
+
+        // A count moving is real, and takes the fresh list whole.
+        let mut more = msg(10, "x");
+        more.insert(
+            "reactions".into(),
+            reacted("Own Name", 2, "2025-01-01T10:00:00"),
+        );
+        assert_eq!(
+            merge_volatile(&stored, &more)["reactions"],
+            more["reactions"]
+        );
+
+        // So is the reaction being made again at another time.
+        let mut later = msg(10, "x");
+        later.insert(
+            "reactions".into(),
+            reacted("Saved Name", 1, "2025-02-02T10:00:00"),
+        );
+        assert_eq!(
+            merge_volatile(&stored, &later)["reactions"],
+            later["reactions"]
         );
     }
 }
