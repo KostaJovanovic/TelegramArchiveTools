@@ -251,13 +251,47 @@ pub async fn load(path: &Path, chat_id: i64) -> Result<Loaded, tgx_archive::Erro
                 }),
             })
             .collect();
+        // The topic id alone covers a forum exported split; this covers one
+        // exported unsplit, where every message is filed under no topic.
+        let roots: std::collections::HashSet<i64> = messages
+            .iter()
+            .filter(|m| creates_topic(&m.payload))
+            .map(|m| m.id)
+            .collect();
         let rows = messages
             .into_iter()
-            .map(|m| row_of(m, &recovered))
+            .map(|m| {
+                let mut row = row_of(m, &recovered);
+                if row.reply_to.is_some_and(|id| roots.contains(&id)) {
+                    row.reply_to = None;
+                }
+                row
+            })
             .collect();
         Ok(Loaded { rows, topics })
     })
     .await
+}
+
+/// The message this one answers, or `None` if it only sits in a topic.
+///
+/// **In a forum every message "replies" to its topic.** Telegram files an
+/// ordinary topic message as a reply to the topic's own *created topic*
+/// message, and Desktop's export records it so — 2,463 of 2,541 messages in
+/// one reference topic. Telegram's apps draw no quote for it, and neither may
+/// we: it made most bubbles in a forum open on "[topic created]". The export
+/// keeps the field, because it is Desktop's; only the viewer reads past it.
+///
+/// A topic's id is its creating message's id. General (1) is not created by a
+/// message, so a reply to message 1 there is a real one.
+fn reply_of(p: &Map<String, Value>, topic_id: i64) -> Option<i64> {
+    p.get("reply_to_message_id")
+        .and_then(Value::as_i64)
+        .filter(|&id| topic_id == 1 || id != topic_id)
+}
+
+fn creates_topic(p: &Map<String, Value>) -> bool {
+    p.get("action").and_then(Value::as_str) == Some("topic_created")
 }
 
 fn row_of(m: tgx_archive::StoredMessage, recovered: &std::collections::HashSet<i64>) -> Row {
@@ -287,7 +321,7 @@ fn row_of(m: tgx_archive::StoredMessage, recovered: &std::collections::HashSet<i
         preview: preview(p),
         media: media_label(p),
         media_detail: media_detail(p),
-        reply_to: p.get("reply_to_message_id").and_then(Value::as_i64),
+        reply_to: reply_of(p, m.topic_id),
         attachment: attachment_of(p),
         file_skipped: ["photo", "file"].iter().any(|k| {
             p.get(*k)
@@ -414,12 +448,20 @@ pub async fn detail(
         let versions = versions_in(&store, chat_id, id).await?;
         let media = media_in(&store, chat_id, id).await?;
         let p = &m.payload;
+        let mut reply_to = reply_of(p, m.topic_id);
+        if let Some(target) = reply_to {
+            if let Some(t) = store.get(chat_id, target).await? {
+                if creates_topic(&t.payload) {
+                    reply_to = None;
+                }
+            }
+        }
         Ok(Some(Detail {
             id,
             date: local_date(p),
             from: sender(p),
             text: text_of(p),
-            reply_to: p.get("reply_to_message_id").and_then(Value::as_i64),
+            reply_to,
             edited: p.get("edited").and_then(Value::as_str).map(tidy_date),
             deleted: m.deleted_seen.map(unix_date),
             recovered,
@@ -1050,6 +1092,46 @@ mod tests {
         assert_eq!(d.versions.len(), 1);
         assert_eq!(d.versions[0].text, "prva");
         assert!(detail(&path, 7, 99).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn sitting_in_a_topic_is_not_replying_to_its_creation() {
+        let path = tmp("topic-replies");
+        {
+            let s = tgx_archive::Store::open(&path).await.unwrap();
+            s.upsert_chat(7, "Forum", "private_supergroup", 1)
+                .await
+                .unwrap();
+            let mut created = msg(15, json!(""));
+            created.insert("type".into(), json!("service"));
+            created.insert("action".into(), json!("topic_created"));
+            let reply = |id: i64, to: i64| {
+                let mut m = msg(id, json!("x"));
+                m.insert("reply_to_message_id".into(), json!(to));
+                m
+            };
+            // Split: filed under topic 15, as Desktop records every message.
+            s.merge(7, 15, Some(15), &created, 1).await.unwrap();
+            s.merge(7, 16, Some(15), &reply(16, 15), 1).await.unwrap();
+            // A real reply inside the topic.
+            s.merge(7, 17, Some(15), &reply(17, 16), 1).await.unwrap();
+            // Unsplit: no topic to compare with, only the target's action.
+            s.merge(7, 18, None, &reply(18, 15), 1).await.unwrap();
+            // General has no creating message: a reply to 1 there is real.
+            s.merge(7, 19, Some(1), &reply(19, 1), 1).await.unwrap();
+        }
+        let rows = load(&path, 7).await.unwrap().rows;
+        let reply = |id: i64| rows.iter().find(|r| r.id == id).unwrap().reply_to;
+        assert_eq!(reply(16), None);
+        assert_eq!(reply(17), Some(16));
+        assert_eq!(reply(18), None);
+        assert_eq!(reply(19), Some(1));
+        assert_eq!(detail(&path, 7, 16).await.unwrap().unwrap().reply_to, None);
+        assert_eq!(detail(&path, 7, 18).await.unwrap().unwrap().reply_to, None);
+        assert_eq!(
+            detail(&path, 7, 17).await.unwrap().unwrap().reply_to,
+            Some(16)
+        );
     }
 
     #[tokio::test]
