@@ -9,6 +9,13 @@ members = [
     "crates/tga-metrics",
     "crates/tga-report",
     "crates/tga-app",
+    # **A copy of TelegramExporter's design system, not a fork of it.** Taken
+    # verbatim from `TelegramExporter/crates/tgx-ui` at 5e17d98 so the two
+    # windows are one product: the same buttons, rows, type roles and rhythm.
+    # Copied rather than referenced by path because a path into a sibling repo
+    # is a fresh clone that does not build. Edit it there and copy it back;
+    # an edit made here is a drift nobody will find.
+    "crates/tgx-ui",
 ]
 
 [workspace.package]

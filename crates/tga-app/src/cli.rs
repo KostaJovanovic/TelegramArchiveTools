@@ -20,15 +20,21 @@ Telegram Export Analyser
 
     TelegramAnalyser <export folder> [options]
     TelegramAnalyser <telegram.sqlite> [options]
+    TelegramAnalyser <exporter output folder> --refresh [--force] [options]
     TelegramAnalyser --from-stats <stats.json> --out <report.html> [options]
 
     With no arguments at all, the window opens instead.
 
     An export is a folder of result.json files, or the exporter's database
-    output -- a telegram.sqlite, named directly or found beside the folder
-    given. Both produce the same report from the same figures.
+    output -- a .sqlite, named directly or found in or one folder below the
+    folder given. Both produce the same report from the same figures.
 
 Options
+    --refresh         re-analyse every database under the folder -- the
+                      exporter writes one per chat, <title>\\<title>.sqlite --
+                      whose report is missing or older than the database or
+                      its notes. Each report goes beside its database.
+    --force           with --refresh, redo every report, changed or not
     --out PATH        where to write the report (default: report.html beside
                       the export)
     --chat ID|TITLE   which chat to read out of a database that holds more
@@ -79,6 +85,8 @@ pub fn run(args: Vec<String>) -> Result<()> {
     let mut quiet = false;
     let mut stamp: Option<String> = None;
     let mut chat: Option<String> = None;
+    let mut refresh = false;
+    let mut force = false;
 
     let mut rest = args[flags_from..].iter();
     while let Some(flag) = rest.next() {
@@ -110,6 +118,8 @@ pub fn run(args: Vec<String>) -> Result<()> {
                 None => bail!("--stamp needs a date"),
             },
             "--quiet" => quiet = true,
+            "--refresh" => refresh = true,
+            "--force" => force = true,
             other => bail!("Unknown option: {other}\n\n{USAGE}"),
         }
     }
@@ -121,6 +131,25 @@ pub fn run(args: Vec<String>) -> Result<()> {
         stamp: stamp.unwrap_or_else(tga_report::today_stamp),
         ..Default::default()
     };
+
+    if force && !refresh {
+        bail!("--force only means something with --refresh");
+    }
+    if refresh {
+        // Every one of these names a single file or a single chat, and a
+        // refresh writes one report per database: there is no one place for
+        // any of them to mean.
+        if out.is_some() || stats_out.is_some() || chat.is_some() || notes_path.is_some() {
+            bail!("--refresh writes one report beside each database; --out, --stats, --chat and --notes name a single one");
+        }
+        if from_stats.is_some() {
+            bail!("--refresh reads databases; --from-stats reads none");
+        }
+        let Some(folder) = folder else {
+            bail!("--refresh needs the folder the exporter writes its databases into");
+        };
+        return refresh_all(&folder, force, digest, quiet, &options);
+    }
 
     // The notes come from wherever they were named, or from beside the export.
     // A `--notes` path that is not there is an error rather than a shrug: the
@@ -188,6 +217,18 @@ pub fn run(args: Vec<String>) -> Result<()> {
     let database = tga_db::find(&folder);
     if database.is_none() && !folder.is_dir() {
         bail!("Not a folder: {}", folder.display());
+    }
+    // The exporter's output folder, one database per chat below it: not one
+    // export, and reading it as a folder export would end on "No result.json".
+    if database.is_none() && tga_read::find_results(&folder, 3).is_empty() {
+        let all = tga_db::find_all(&folder);
+        if all.len() > 1 {
+            bail!(
+                "{} holds {} chat databases, not one export. Name one, or pass --refresh to report on each.",
+                folder.display(),
+                all.len()
+            );
+        }
     }
     // Beside the database, not inside it. A report written next to the file is
     // where somebody handed the folder would look for it either way.
@@ -300,6 +341,76 @@ fn read_database(
         }
     }
     Ok(export)
+}
+
+/// `--refresh`: a report beside every database under `folder` that has moved on
+/// since its last one.
+///
+/// One that fails is named and the rest carry on — sixteen chats should not
+/// hang on the one whose file is mid-sync — but the exit status still says so,
+/// because a scheduled refresh that half-worked must not read as one that did.
+fn refresh_all(
+    folder: &Path,
+    force: bool,
+    digest: bool,
+    quiet: bool,
+    options: &tga_report::Options,
+) -> Result<()> {
+    let plan = crate::refresh::plan(folder);
+    if plan.is_empty() {
+        bail!(
+            "No .sqlite in {} or the folders directly inside it.",
+            folder.display()
+        );
+    }
+    let (mut written, mut current, mut failed) = (0, 0, 0);
+    for target in &plan {
+        let name = target.name();
+        if !target.stale && !force {
+            current += 1;
+            if !quiet {
+                println!("  {name}  up to date");
+            }
+            continue;
+        }
+        let mut progress = |done: usize, total: usize, topic: &str| {
+            if !quiet {
+                println!("  {name}  read {done}/{total}  {topic}");
+            }
+        };
+        match crate::refresh::one(target, digest, options, Some(&mut progress)) {
+            Ok(done) => {
+                written += 1;
+                println!(
+                    "  {name}  {} messages, {} people, {} topics{} -> {}",
+                    thousands(done.messages),
+                    done.people,
+                    done.topics,
+                    if done.events == 0 {
+                        String::new()
+                    } else {
+                        format!(", {} events", done.events)
+                    },
+                    done.out.display()
+                );
+                if let Some(warning) = done.warning {
+                    println!("  {name}  {warning}");
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!("  {name}  failed: {e:#}");
+            }
+        }
+    }
+    println!("{written} written, {current} up to date, {failed} failed");
+    if failed > 0 {
+        bail!(
+            "{failed} of {} databases could not be reported on",
+            plan.len()
+        );
+    }
+    Ok(())
 }
 
 /// The digest's view of the export.

@@ -52,6 +52,29 @@ pub fn open(file: &Path) -> Result<(), String> {
         .map_err(|e| format!("opening {}: {e}", file.display()))
 }
 
+/// Show a folder in the system's file manager.
+///
+/// Its own function rather than a relaxed [`open`], because `open` refusing
+/// anything that is not a file is the check that stops a missing report from
+/// spawning a shell dialog this app did not write.
+pub fn reveal(dir: &Path) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Err(format!("{} is not there any more", dir.display()));
+    }
+    #[cfg(windows)]
+    let spawned = std::process::Command::new(system_root("explorer.exe"))
+        .arg(dir)
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let spawned = std::process::Command::new("open").arg(dir).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let spawned = std::process::Command::new("xdg-open").arg(dir).spawn();
+
+    spawned
+        .map(|_| ())
+        .map_err(|e| format!("opening {}: {e}", dir.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

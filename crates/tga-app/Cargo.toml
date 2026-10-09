@@ -18,10 +18,13 @@ tga-stats = { path = "../tga-stats" }
 tga-metrics = { path = "../tga-metrics" }
 tga-notes = { path = "../tga-notes" }
 tga-report = { path = "../tga-report" }
+# The exporter's design system, so this window and that one are one product.
+# See the workspace manifest for why it is a copy.
+tgx-ui = { path = "../tgx-ui" }
 
 # **`glow`, not `wgpu`, and `default-features = false` to get it.** This window
-# is a text field, two tick boxes, a bar and three buttons; it does not need a
-# modern graphics API, and wgpu drags in a compiler for one. glow is OpenGL,
+# is a list and a row of buttons; it does not need a modern graphics API, and
+# wgpu drags in a compiler for one. glow is OpenGL,
 # which every machine that can run Explorer already has.
 #
 # `default_fonts` is off because the window ships Geist and nothing else -- the
@@ -41,3 +44,11 @@ chrono.workspace = true
 
 # The command half reads a recorded --stats dump straight back into a `Stats`.
 serde_json.workspace = true
+
+# The icon and version resource, for `build.rs`. Gated on the *host*: cargo
+# resolves a `cfg` build-dependency against the machine running the build
+# script, which is the one that needs a resource compiler. Pinned exactly, as
+# the exporter pins it: pre-1.0, and what a breaking release breaks is a build
+# script, which surfaces as an error in a crate whose source did not change.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "=0.1.31"

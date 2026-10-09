@@ -1,0 +1,281 @@
+//! The typefaces, embedded in the binary and handed to the text system.
+//!
+//! `fonts/*.ttf` are a **build artefact, checked in rather than generated**.
+//! They are Geist and Geist Mono with Latin and Cyrillic *merged into one file
+//! per weight*, because a toolkit with no equivalent of CSS `unicode-range`
+//! cannot stitch two files into one family. Do not regenerate or subset them:
+//! the merge is the reason a Russian or Ukrainian chat title renders in the
+//! design's typeface instead of dropping to a system fallback halfway through a
+//! word.
+//!
+//! **The family keys below are ours, not the files'.** This is the one thing
+//! the swap away from GPUI genuinely simplified. A platform text system reads
+//! the `name` table out of the file and registers each face under whatever it
+//! finds there, so asking for `"Geist"` when the file called itself something
+//! else fell back silently to the platform UI font — a window indistinguishable
+//! from one where this module was never called. Guarding that took a hand-rolled
+//! `name`-table parser, a two-variant error type and a post-registration
+//! readback. egui takes a key we choose, so the mismatch it all defended against
+//! cannot occur, and every line of it is gone.
+//!
+//! **`tnum` is no longer requested, and no longer needs to be.** GPUI could
+//! reach DirectWrite with OpenType features; egui's text stack does not shape
+//! with them. The design already sets **every number** in the mono — counts,
+//! sizes, progress, timestamps — and a monospaced face is tabular by
+//! construction, so the one place tabular figures actually mattered still has
+//! them. What is lost is tabular digits in *sans* runs, which the design has
+//! none of.
+
+use eframe::egui::{FontData, FontDefinitions, FontFamily, FontId};
+
+/// The text face key. Every string in the window is set in this.
+pub const SANS: &str = "geist";
+
+/// The figure face key. The design sets **every number** in it — counts, sizes,
+/// progress, timestamps — so that a column of digits stays a column while it
+/// ticks upward, which a proportional face cannot do.
+pub const MONO: &str = "geist-mono";
+
+/// The face headings and emphasis are set in.
+pub const MEDIUM: &str = "geist-medium";
+
+/// The heaviest weight, for the one or two places that need to outrank MEDIUM.
+pub const SEMIBOLD: &str = "geist-semibold";
+
+/// The mono's heavier weight, for a figure that has to stand out from the
+/// column it sits in without leaving the face.
+pub const MONO_MEDIUM: &str = "geist-mono-medium";
+
+/// The three sans weights and the two mono weights, in one array so that
+/// [`definitions`] and the tests below can never disagree about what is
+/// embedded.
+const EMBEDDED: [(&str, &[u8]); 5] = [
+    (SANS, include_bytes!("../fonts/Geist-Regular.ttf")),
+    (MEDIUM, include_bytes!("../fonts/Geist-Medium.ttf")),
+    (SEMIBOLD, include_bytes!("../fonts/Geist-SemiBold.ttf")),
+    (MONO, include_bytes!("../fonts/GeistMono-Regular.ttf")),
+    (MONO_MEDIUM, include_bytes!("../fonts/GeistMono-Medium.ttf")),
+];
+
+/// Every face, under the keys the rest of the design asks for.
+///
+/// Built from [`FontDefinitions::empty`] rather than `default`, which is what
+/// `default_fonts = false` in the manifest is for: egui otherwise ships its own
+/// Ubuntu/Hack pair and merges them in as fallbacks, so a missing glyph would
+/// silently render in a face that is not part of this design.
+pub fn definitions() -> FontDefinitions {
+    let mut fonts = FontDefinitions::empty();
+    for (key, bytes) in EMBEDDED {
+        fonts
+            .font_data
+            .insert(key.to_owned(), FontData::from_static(bytes).into());
+    }
+    fonts
+        .families
+        .insert(FontFamily::Proportional, vec![SANS.to_owned()]);
+    fonts
+        .families
+        .insert(FontFamily::Monospace, vec![MONO.to_owned()]);
+    for key in [MEDIUM, SEMIBOLD, MONO_MEDIUM] {
+        fonts
+            .families
+            .insert(FontFamily::Name(key.into()), vec![key.to_owned()]);
+    }
+    fonts
+}
+
+/// [`definitions`], with Windows' own faces behind every family as
+/// fallbacks — **the one exception to "no face outside this design"**, and
+/// only for glyphs Geist does not have.
+///
+/// The Viewer shows other people's messages, and those are full of emoji and
+/// of scripts Geist was never meant to cover: in the text, in reactions, in
+/// chat titles like `｡◕‿◕｡`. Without a fallback every one drew as an empty
+/// box. The faces are read from the system at run time, not embedded, so the
+/// binary does not grow; on a machine without them the window is exactly
+/// [`definitions`]. egui draws emoji in outline, one colour, which is still
+/// recognisably the emoji.
+pub fn with_system_fallbacks() -> FontDefinitions {
+    let mut fonts = definitions();
+    for (key, bytes, index) in system_fallbacks() {
+        let mut data = FontData::from_static(bytes);
+        data.index = *index;
+        fonts.font_data.insert((*key).to_owned(), data.into());
+        for family in fonts.families.values_mut() {
+            family.push((*key).to_owned());
+        }
+    }
+    fonts
+}
+
+/// Segoe UI Emoji's bytes, for [`crate::emoji`] to read its colour table
+/// from — the same copy egui draws the outlines from.
+pub(crate) fn emoji_font() -> Option<&'static [u8]> {
+    system_fallbacks()
+        .iter()
+        .find(|(key, _, _)| *key == "system-emoji")
+        .map(|(_, bytes, _)| *bytes)
+}
+
+/// The fallbacks, in the order a missing glyph is looked for, read once per
+/// process: emoji first, so a heart is the emoji's heart and not a symbol
+/// font's; then Segoe UI for Greek, Arabic, Hebrew and the rest of the
+/// alphabets; then the symbols; then Microsoft YaHei for CJK and the
+/// half-width forms.
+fn system_fallbacks() -> &'static [(&'static str, &'static [u8], u32)] {
+    static FACES: std::sync::OnceLock<Vec<(&'static str, &'static [u8], u32)>> =
+        std::sync::OnceLock::new();
+    FACES.get_or_init(|| {
+        let dir = std::env::var_os("WINDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| "C:\\Windows".into())
+            .join("Fonts");
+        [
+            ("system-emoji", "seguiemj.ttf", 0),
+            ("system-ui", "segoeui.ttf", 0),
+            ("system-symbol", "seguisym.ttf", 0),
+            ("system-cjk", "msyh.ttc", 0),
+        ]
+        .into_iter()
+        .filter_map(|(key, file, index)| {
+            let bytes = std::fs::read(dir.join(file)).ok()?;
+            // Leaked on purpose: read once, used for the life of the
+            // process, and egui wants `'static` bytes.
+            Some((key, &*Box::leak(bytes.into_boxed_slice()), index))
+        })
+        .collect()
+    })
+}
+
+/// The sans, at a size.
+pub fn sans(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Proportional)
+}
+
+/// The mono, for numbers.
+pub fn mono(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Monospace)
+}
+
+/// The face the headings are set in.
+pub fn medium(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(MEDIUM.into()))
+}
+
+pub fn semibold(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(SEMIBOLD.into()))
+}
+
+/// The mono's heavier weight.
+pub fn mono_medium(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(MONO_MEDIUM.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_embedded_file_is_a_real_truetype_font() {
+        // Catches a copy that produced an empty file or a Git LFS pointer —
+        // both of which compile, ship, and fail only as a wrong-looking window.
+        for (name, bytes) in EMBEDDED {
+            assert!(
+                bytes.len() > 20_000,
+                "{name} is {} bytes, which is not a font",
+                bytes.len()
+            );
+            assert!(
+                matches!(&bytes[..4], b"\x00\x01\x00\x00" | b"true" | b"OTTO"),
+                "{name} does not start with a TrueType or OpenType signature"
+            );
+        }
+    }
+
+    #[test]
+    fn every_family_the_design_asks_for_has_bytes_behind_it() {
+        // egui falls back to an empty glyph set for a family it does not have,
+        // which draws as a window with no text in it at all. This is the
+        // replacement for the old `name`-table readback: the failure is now a
+        // key that was never registered rather than a name that did not match,
+        // and unlike that one it is decidable without a window.
+        let fonts = definitions();
+        for id in [
+            sans(16.0),
+            mono(16.0),
+            medium(16.0),
+            semibold(16.0),
+            mono_medium(16.0),
+        ] {
+            let keys = fonts
+                .families
+                .get(&id.family)
+                .unwrap_or_else(|| panic!("{:?} is not registered", id.family));
+            assert!(!keys.is_empty(), "{:?} has no face behind it", id.family);
+            for key in keys {
+                assert!(fonts.font_data.contains_key(key), "{key} has no bytes");
+            }
+        }
+    }
+
+    #[test]
+    fn no_face_outside_this_design_is_registered() {
+        // `default_fonts` is off in the manifest so that egui's own Ubuntu and
+        // Hack are not merged in as fallbacks. If that feature came back, a
+        // missing glyph would quietly render in a typeface nobody chose, which
+        // is the same class of failure the old `name`-table guard existed for.
+        let fonts = definitions();
+        assert_eq!(fonts.font_data.len(), EMBEDDED.len());
+        for key in fonts.font_data.keys() {
+            assert!(key.starts_with("geist"), "{key} is not part of this design");
+        }
+    }
+
+    #[test]
+    fn every_glyph_the_window_paints_has_a_face_that_carries_it() {
+        // **`default_fonts` is off, so there is no fallback and a missing glyph
+        // is silent.** It compiles, it passes every other test in this crate,
+        // and it shows up only on screen. `\u{25b8}` and `\u{25be}` were set as
+        // text for the chat list's disclosure markers; Geist carries no
+        // Geometric Shapes, so every category heading in the window read
+        // `? CHANNELS` — through three passes over this design, because nothing
+        // here could see it and nobody had looked at one.
+        //
+        // The marker is a painted triangle now (`components::disclosure`), which
+        // has no glyph to be missing. This is the guard for the rest: every
+        // non-ASCII character the design puts on screen belongs in the list
+        // below, and adding one Geist does not have fails here instead of on
+        // someone's screen.
+        use eframe::egui::epaint::text::Fonts;
+        use eframe::egui::epaint::AlphaFromCoverage;
+
+        let mut fonts = Fonts::new(2048, AlphaFromCoverage::default(), definitions());
+        // Every face, because the design sets labels in the mono and titles in
+        // the sans, and a character present in one is not thereby present in the
+        // other.
+        for face in [sans(14.0), mono(11.0), medium(14.0), semibold(14.0)] {
+            for c in [
+                '\u{2026}', // … every hint and status line that elides
+                '\u{2014}', // — a queued job with no topic count
+                '\u{201c}', // “ ” the filter's empty state quotes what was typed
+                '\u{201d}', '\u{0106}', // Ć  Latin Extended-A, for a Serbian chat title
+                '\u{0410}', // А  Cyrillic, which is why the faces are merged
+            ] {
+                assert!(
+                    fonts.has_glyph(&face, c),
+                    "{c:?} has no glyph in {:?}",
+                    face.family
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_sans_and_the_mono_are_two_different_families() {
+        // They are separate files with separate keys, and the design leans on
+        // that: "every number in the mono" means nothing if asking for the mono
+        // hands back the sans.
+        assert_ne!(SANS, MONO);
+        assert_ne!(sans(16.0).family, mono(16.0).family);
+    }
+}

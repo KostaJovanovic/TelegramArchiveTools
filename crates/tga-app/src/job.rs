@@ -15,28 +15,41 @@
 //! `request_repaint`. An `mpsc::Receiver` can only be *polled*, so without that
 //! call nothing appears until some unrelated input causes a frame -- which the
 //! user experiences as having to move the mouse to make the app work.
+//!
+//! **A run is a queue of library rows**, one export after another. One that
+//! fails is reported against its own row and the rest carry on: forty chats
+//! should not hang on the one whose file is mid-sync.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 
-/// The five stages a run passes through, as the bar counts them.
-pub const STAGES: usize = 4;
+use crate::refresh::{Source, Target, Written};
 
 /// What the worker tells the window.
 #[derive(Debug, Clone)]
 pub enum Progress {
-    /// `done` of [`STAGES`], and what is happening.
-    Step { done: usize, label: String },
-    Done {
-        path: PathBuf,
-        messages: usize,
-        topics: usize,
-        people: i64,
-        events: usize,
+    /// `done` exports finished, and what is happening now.
+    Step {
+        done: usize,
+        label: String,
     },
-    /// A bad folder or a malformed export. The only useful thing to do with it
-    /// is put it on screen.
-    Failed(String),
+    /// This row is the one being read.
+    Started(PathBuf),
+    Wrote {
+        path: PathBuf,
+        written: Written,
+    },
+    /// A row that could not be read or written. The run carries on.
+    Failed {
+        path: PathBuf,
+        error: String,
+    },
+    /// The queue is empty, or Stop was pressed and the row in hand finished.
+    Finished {
+        stopped: bool,
+    },
 }
 
 /// Everything a run needs, resolved before the thread starts.
@@ -46,8 +59,7 @@ pub enum Progress {
 /// rather than be torn out from under itself.
 #[derive(Debug, Clone)]
 pub struct Request {
-    pub folder: PathBuf,
-    pub out: PathBuf,
+    pub targets: Vec<Target>,
     pub write_digest: bool,
     pub embed_fonts: bool,
 }
@@ -55,134 +67,179 @@ pub struct Request {
 /// What the notes section says wrote the file.
 pub const SOURCE: &str = "Telegram Export Analyser";
 
+/// A running queue: the events, and the switch that stops it.
+pub struct Run {
+    pub events: Receiver<Progress>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Run {
+    /// Stop **between** exports, never inside one. A report half-written is
+    /// worse than the stale one it would have replaced, and reading a database
+    /// has no point at which stopping leaves anything worth keeping.
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Start a run. The receiver is drained by the window on the next frame.
-pub fn spawn(request: Request, ctx: eframe::egui::Context) -> Receiver<Progress> {
+pub fn spawn(request: Request, ctx: eframe::egui::Context) -> Run {
     let (tx, rx) = channel();
+    let stop = Arc::new(AtomicBool::new(false));
     let tx = Waking { tx, ctx };
+    let flag = stop.clone();
     std::thread::Builder::new()
         .name("tga-analyse".into())
-        .spawn(move || run(request, tx))
+        .spawn(move || run(request, &flag, tx))
         // A thread that cannot be spawned is a machine in trouble, and there is
         // nothing useful to fall back to — the alternative is doing 6 seconds of
         // work on the paint thread.
         .expect("the OS refused a worker thread");
-    rx
+    Run { events: rx, stop }
 }
 
 /// A sender that wakes the window after every message.
 ///
 /// Wrapped rather than left to the caller because "send, then repaint" has to
-/// happen at all eleven send sites and forgetting it at one produces a window
-/// that is a frame behind for the rest of the run.
-struct Waking {
-    tx: Sender<Progress>,
+/// happen at every send site and forgetting it at one produces a window that
+/// is a frame behind for the rest of the run.
+struct Waking<T> {
+    tx: Sender<T>,
     ctx: eframe::egui::Context,
 }
 
-impl Waking {
+impl<T> Waking<T> {
     /// Every send is ignored on failure: the window may have been closed, and a
     /// worker that panics on a closed channel loses the report it had already
     /// written.
-    fn send(&self, event: Progress) {
+    fn send(&self, event: T) {
         let _ = self.tx.send(event);
         self.ctx.request_repaint();
     }
 }
 
-fn run(request: Request, tx: Waking) {
-    let say = |done: usize, label: String| {
-        tx.send(Progress::Step { done, label });
+fn run(request: Request, stop: &AtomicBool, tx: Waking<Progress>) {
+    let options = tga_report::Options {
+        embed_fonts: request.embed_fonts,
+        source: SOURCE.to_string(),
+        ..Default::default()
     };
-
-    say(0, "Reading the export".into());
-    let mut report = |_done: usize, _total: usize, name: &str| {
-        tx.send(Progress::Step {
-            done: 0,
-            label: format!("Reading {name}"),
-        });
-    };
-    // A database first, for the reason in `State::revalidate`: a folder that
-    // holds one may have no `result.json` in it at all.
-    let read = match tga_db::find(&request.folder) {
-        Some(db) => tga_db::load(&db, None, Some(&mut report)),
-        None => tga_read::load(&request.folder, Some(&mut report)),
-    };
-    let export = match read {
-        Ok(export) => export,
-        Err(e) => {
-            tx.send(Progress::Failed(format!("{e}")));
+    let total = request.targets.len();
+    for (index, target) in request.targets.iter().enumerate() {
+        if stop.load(Ordering::Relaxed) {
+            tx.send(Progress::Finished { stopped: true });
             return;
         }
-    };
-    if export.msgs.is_empty() {
-        tx.send(Progress::Failed(
-            "That export has no messages in it.".into(),
-        ));
-        return;
-    }
-
-    say(1, "Counting".into());
-    let (stats, people) = tga_metrics::analyse(&export);
-
-    say(2, "Reading events".into());
-    let notes = tga_notes::load(&request.folder);
-
-    if request.write_digest {
-        say(3, "Writing the digest".into());
-        let target = request.folder.join("analysis");
-        let rows = digest_rows(&export, &people);
-        // A digest that could not be written is worth saying and not worth
-        // failing over: the report is the thing that was asked for.
-        if let Err(e) =
-            tga_notes::write_digest(&rows, &target).and_then(|_| tga_notes::write_brief(&target))
-        {
-            say(3, format!("The digest could not be written: {e}"));
+        let name = target.name();
+        let head = format!("{}/{total}  {name}", index + 1);
+        tx.send(Progress::Started(target.path().to_path_buf()));
+        tx.send(Progress::Step {
+            done: index,
+            label: head.clone(),
+        });
+        let mut report = |_done: usize, _total: usize, topic: &str| {
+            tx.send(Progress::Step {
+                done: index,
+                label: format!("{head}: reading {topic}"),
+            });
+        };
+        let path = target.path().to_path_buf();
+        match crate::refresh::one(target, request.write_digest, &options, Some(&mut report)) {
+            Ok(written) => tx.send(Progress::Wrote { path, written }),
+            Err(e) => tx.send(Progress::Failed {
+                path,
+                error: format!("{e:#}"),
+            }),
         }
     }
-
-    say(3, "Writing the report".into());
-    let html = tga_report::render(
-        &stats,
-        &tga_report::names_from_stats(&stats),
-        &notes,
-        &tga_report::Options {
-            embed_fonts: request.embed_fonts,
-            source: SOURCE.to_string(),
-            ..Default::default()
-        },
-    );
-    if let Err(e) = write_report(&request.out, &html) {
-        tx.send(Progress::Failed(format!("{}: {e}", request.out.display())));
-        return;
-    }
-
-    say(STAGES, "Done".into());
-    tx.send(Progress::Done {
-        path: request.out,
-        messages: export.msgs.len(),
-        topics: export.topics.len(),
-        people: stats.people.speakers as i64,
-        events: notes.events.len(),
-    });
+    tx.send(Progress::Finished { stopped: false });
 }
 
-fn write_report(out: &Path, html: &str) -> std::io::Result<()> {
-    if let Some(parent) = out.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    std::fs::write(out, html)
+/// What the library learns about a row once its file has been opened.
+#[derive(Debug, Clone)]
+pub struct Counted {
+    /// Which scan asked. A count that lands after the folder changed belongs
+    /// to a list that is no longer on screen.
+    pub generation: u64,
+    pub path: PathBuf,
+    /// The chat's real title, which the file's name only approximates: the
+    /// exporter sanitises it for the filesystem.
+    pub title: Option<String>,
+    pub messages: Option<usize>,
+    /// How many chats the file holds. More than one only for a flat
+    /// `telegram.sqlite` from before `tgx split`.
+    pub chats: usize,
+    pub error: Option<String>,
 }
 
-// `digest_rows` used to be duplicated here, character for character, because
-// the window and the command line were separate crates and neither could reach
-// into the other. They are one crate now, so there is one copy, in `cli`.
-use crate::cli::digest_rows;
+/// Open every database in the list and count its messages, one row at a time.
+///
+/// **Off the paint thread because it is not free.** It is one indexed
+/// `COUNT` per file, and forty of them over 36 GB of databases on a USB drive
+/// is a few seconds — long enough to freeze a window that did it inline, short
+/// enough that the list is usable while the figures fill in.
+///
+/// A folder export is not counted: that means parsing every `result.json`,
+/// which is the run itself.
+pub fn count(
+    sources: Vec<Source>,
+    generation: u64,
+    ctx: eframe::egui::Context,
+) -> Receiver<Counted> {
+    let (tx, rx) = channel();
+    let tx = Waking { tx, ctx };
+    std::thread::Builder::new()
+        .name("tga-count".into())
+        .spawn(move || {
+            for source in sources {
+                let Source::Database(db) = source else {
+                    continue;
+                };
+                let counted = match tga_db::chats(&db) {
+                    // Largest first, which is the one `tga_db::load` reads.
+                    Ok(chats) => Counted {
+                        generation,
+                        path: db.clone(),
+                        title: chats.first().map(|c| c.title.clone()),
+                        messages: chats.first().map(|c| c.messages),
+                        chats: chats.len(),
+                        error: None,
+                    },
+                    // Said against the row, before anybody presses Analyse: a
+                    // file from a later schema is refused here by name.
+                    Err(e) => Counted {
+                        generation,
+                        path: db.clone(),
+                        title: None,
+                        messages: None,
+                        chats: 0,
+                        error: Some(format!("{e:#}")),
+                    },
+                };
+                tx.send(counted);
+            }
+        })
+        .expect("the OS refused a worker thread");
+    rx
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn target(dir: &std::path::Path) -> Target {
+        crate::refresh::library(dir)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| Target {
+                source: Source::Folder(dir.to_path_buf()),
+                out: dir.join("report.html"),
+                stale: true,
+                changed: None,
+                reported: None,
+                bytes: 0,
+            })
+    }
 
     #[test]
     fn a_folder_with_no_export_in_it_fails_rather_than_writing_an_empty_report() {
@@ -198,11 +255,11 @@ mod tests {
         let ctx = eframe::egui::Context::default();
         run(
             Request {
-                folder: dir.clone(),
-                out: out.clone(),
+                targets: vec![target(&dir)],
                 write_digest: false,
                 embed_fonts: false,
             },
+            &AtomicBool::new(false),
             Waking { tx, ctx },
         );
 
@@ -210,18 +267,45 @@ mod tests {
         // `tga_read::load` refuses first and names what it looked for, which is
         // the more useful of the two messages — the shell prints it verbatim.
         assert!(
-            seen.iter()
-                .any(|p| matches!(p, Progress::Failed(m) if m.contains("result.json"))),
+            seen.iter().any(
+                |p| matches!(p, Progress::Failed { error, .. } if error.contains("result.json"))
+            ),
             "expected a Failed naming result.json, got {seen:?}"
+        );
+        assert!(
+            matches!(seen.last(), Some(Progress::Finished { stopped: false })),
+            "a failed row still ends the run: {seen:?}"
         );
         assert!(!out.is_file(), "nothing should have been written");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn the_stage_count_matches_what_the_bar_is_told_to_range_over() {
-        // `Done` is stage 4 of 4. If these disagree the bar finishes early or
-        // never fills, and both read as the run having gone wrong.
-        assert_eq!(STAGES, 4);
+    fn stop_is_honoured_before_the_next_export_starts() {
+        let dir = std::env::temp_dir().join("tga-app-stopped");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let (tx, rx) = channel();
+        run(
+            Request {
+                targets: vec![target(&dir), target(&dir)],
+                write_digest: false,
+                embed_fonts: false,
+            },
+            &AtomicBool::new(true),
+            Waking {
+                tx,
+                ctx: eframe::egui::Context::default(),
+            },
+        );
+        let seen: Vec<Progress> = rx.try_iter().collect();
+        assert!(
+            !seen.iter().any(|p| matches!(p, Progress::Started(_))),
+            "a stopped queue started a row: {seen:?}"
+        );
+        assert!(matches!(
+            seen.last(),
+            Some(Progress::Finished { stopped: true })
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

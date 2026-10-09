@@ -19,6 +19,8 @@ mod app;
 mod cli;
 mod job;
 mod open;
+mod refresh;
+mod shot;
 mod state;
 mod theme;
 
@@ -116,15 +118,27 @@ fn main() {
         report_startup_failure(&message);
     }));
 
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_title(app::TITLE)
+        // `TGA_SHOT_SIZE` opens it at a chosen size, so `tools/shot.ps1` can
+        // photograph the floor too; clamped by the floor like a drag.
+        .with_inner_size(shot::size().unwrap_or(theme::WINDOW))
+        // Stated rather than left to chance: the exporter's window drifted
+        // under its own floor and squeezed the only column that named the rows
+        // down to nothing.
+        .with_min_inner_size(theme::min_window())
+        .with_drag_and_drop(true);
+    // **eframe stamps its own logo on the window** when given no icon, and the
+    // taskbar draws the window's icon, not the exe's — so the one `build.rs`
+    // embeds would show in Explorer and nowhere the app is actually running.
+    // The exporter shipped exactly that. The same file, so the two cannot
+    // disagree.
+    let viewport = match window_icon(ICON) {
+        Some(icon) => viewport.with_icon(icon),
+        None => viewport,
+    };
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title(app::TITLE)
-            .with_inner_size(theme::WINDOW)
-            // Stated rather than left to chance: the exporter's window drifted
-            // under its own floor and squeezed the only column that named the
-            // rows down to nothing.
-            .with_min_inner_size(theme::MIN_WINDOW)
-            .with_drag_and_drop(true),
+        viewport,
         ..Default::default()
     };
 
@@ -143,9 +157,57 @@ fn main() {
     }
 }
 
+/// The icon `build.rs` embeds in the exe, drawn by `tools/make_icon.py`.
+const ICON: &[u8] = include_bytes!("../icon/TelegramAnalyser.ico");
+
+/// The largest PNG-encoded image in an `.ico`, decoded for the window.
+///
+/// `tools/make_icon.py` writes the 256px size as PNG — the others are BMP —
+/// and eframe already links a PNG decoder for its own logo, so reading the
+/// directory is all this adds. `None` leaves eframe's default: a missing icon
+/// is cosmetic and never worth failing a launch over.
+fn window_icon(ico: &[u8]) -> Option<eframe::egui::IconData> {
+    let u16_at = |at: usize| Some(u16::from_le_bytes(ico.get(at..at + 2)?.try_into().ok()?));
+    let u32_at = |at: usize| Some(u32::from_le_bytes(ico.get(at..at + 4)?.try_into().ok()?));
+    let count = usize::from(u16_at(4)?);
+    let png = (0..count)
+        .filter_map(|i| {
+            let entry = 6 + 16 * i;
+            // A width byte of 0 means 256.
+            let width = match *ico.get(entry)? {
+                0 => 256,
+                w => u32::from(w),
+            };
+            let size = u32_at(entry + 8)? as usize;
+            let offset = u32_at(entry + 12)? as usize;
+            let bytes = ico.get(offset..offset.checked_add(size)?)?;
+            bytes.starts_with(b"\x89PNG").then_some((width, bytes))
+        })
+        .max_by_key(|(width, _)| *width)?
+        .1;
+    eframe::icon_data::from_png_bytes(png).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_wears_the_exes_own_icon() {
+        let icon = window_icon(ICON).expect("the shipped .ico carries a PNG image");
+        assert_eq!((icon.width, icon.height), (256, 256));
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+        // The one red is in it: the mark is the tallest bar, and an icon that
+        // decoded to a blank tile would still pass the size checks.
+        let red = icon.rgba.chunks(4).any(|px| px == [0xff, 0x33, 0x47, 0xff]);
+        assert!(red, "the accent bar is missing from the decoded icon");
+    }
+
+    #[test]
+    fn a_broken_icon_file_falls_back_rather_than_failing_the_launch() {
+        assert!(window_icon(b"").is_none());
+        assert!(window_icon(&[0, 0, 1, 0, 9, 0]).is_none());
+    }
 
     #[test]
     fn a_panic_before_the_window_opens_blames_the_graphics_stack() {

@@ -25,7 +25,8 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::{Map, Value};
 use tga_read::{Export, Progress};
 
-/// What the exporter names the file.
+/// What the exporter named the file while it kept every chat in one. It now
+/// writes `<title>/<title>.sqlite` per chat; see [`find`].
 pub const FILE_NAME: &str = "telegram.sqlite";
 
 /// The only shape this build knows how to read.
@@ -53,6 +54,14 @@ pub struct Chat {
 ///
 /// Only the root and its immediate children are searched. Deeper would mean
 /// walking a media tree to find a file that is always at the top.
+///
+/// **The exporter stopped writing one flat file.** It now writes one database
+/// per chat, each in a folder of its own — `<output_dir>/<title>/<title>.sqlite`
+/// — so the folder its settings call the export holds no database at the top at
+/// all. One level down is therefore searched too, but only answers when it
+/// finds exactly one: a folder of sixteen chats is not one export, and picking
+/// the alphabetically first would write a report about a chat nobody chose.
+/// [`find_all`] is the question for that folder.
 pub fn find(root: &Path) -> Option<PathBuf> {
     if root.is_file() {
         return is_sqlite(root).then(|| root.to_path_buf());
@@ -61,16 +70,94 @@ pub fn find(root: &Path) -> Option<PathBuf> {
     if named.is_file() {
         return Some(named);
     }
-    let mut found: Vec<PathBuf> = std::fs::read_dir(root)
-        .ok()?
+    // Sorted so a folder with two of them picks the same one every run rather
+    // than whatever the directory happened to yield first.
+    if let Some(first) = sqlite_files(root).into_iter().next() {
+        return Some(first);
+    }
+    let mut below = subfolders(root).into_iter().flat_map(|d| chat_files(&d));
+    match (below.next(), below.next()) {
+        (Some(only), None) => Some(only),
+        _ => None,
+    }
+}
+
+/// Every database under an export root: the root's own, and one in each folder
+/// directly inside it — the exporter's per-chat layout.
+///
+/// A flat `telegram.sqlite` from before the split is listed beside the per-chat
+/// files rather than in place of them. `tgx split` renames it to `.split` only
+/// once every chat has been copied out, so until then it is still somebody's
+/// only copy of a chat, and leaving it out would hide that.
+pub fn find_all(root: &Path) -> Vec<PathBuf> {
+    if root.is_file() {
+        return if is_sqlite(root) {
+            vec![root.to_path_buf()]
+        } else {
+            Vec::new()
+        };
+    }
+    let mut found = sqlite_files(root);
+    for dir in subfolders(root) {
+        found.extend(chat_files(&dir));
+    }
+    found
+}
+
+/// The per-chat databases in one folder: `.sqlite` only, the extension the
+/// exporter writes.
+///
+/// **Narrower than the top level on purpose.** One folder down is where a
+/// folder export keeps its topics, and a topic folder holding somebody's
+/// attachment called `contacts.db` must not turn a folder export into a
+/// database that then fails on its schema.
+fn chat_files(dir: &Path) -> Vec<PathBuf> {
+    sqlite_files(dir)
+        .into_iter()
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("sqlite"))
+        .collect()
+}
+
+/// The last time anything was written to a database, or `None` if it cannot
+/// be told.
+///
+/// **The `-wal` file is read as well as the database.** A database in WAL mode
+/// takes its writes in the side file and only folds them back at a checkpoint,
+/// so the main file's time can sit hours behind a sync that has finished.
+/// Opening read-only, which is all this crate does, changes neither.
+pub fn modified(path: &Path) -> Option<std::time::SystemTime> {
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    [path.to_path_buf(), PathBuf::from(wal)]
+        .iter()
+        .filter_map(|p| p.metadata().and_then(|m| m.modified()).ok())
+        .max()
+}
+
+fn sqlite_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_file() && is_sqlite(p))
         .collect();
-    // Sorted so a folder with two of them picks the same one every run rather
-    // than whatever the directory happened to yield first.
     found.sort();
-    found.into_iter().next()
+    found
+}
+
+fn subfolders(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    found.sort();
+    found
 }
 
 fn is_sqlite(path: &Path) -> bool {
@@ -666,6 +753,55 @@ mod tests {
         assert_eq!(find(&both.db).as_deref(), Some(both.db.as_path()));
         // A folder export is not a database, and must not be mistaken for one.
         assert_eq!(find(&both.folder), None);
+    }
+
+    #[test]
+    fn the_per_chat_layout_is_found_one_folder_down_and_only_when_unambiguous() {
+        // `<output_dir>/<title>/<title>.sqlite`, which is what the exporter
+        // writes now. The output folder holds no database at its own top.
+        let base = std::env::temp_dir().join("tga-db-test-layout");
+        let _ = std::fs::remove_dir_all(&base);
+        let one = base.join("UA KOLAB").join("UA KOLAB.sqlite");
+        std::fs::create_dir_all(one.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&one, b"").expect("touch");
+
+        assert_eq!(find(&base).as_deref(), Some(one.as_path()));
+        assert_eq!(find_all(&base), vec![one.clone()]);
+
+        // A second chat makes the folder a collection, not an export: `find`
+        // stops guessing and `find_all` lists both.
+        let two = base.join("Telegram").join("Telegram.sqlite");
+        std::fs::create_dir_all(two.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&two, b"").expect("touch");
+        assert_eq!(find(&base), None);
+        assert_eq!(find_all(&base), vec![two.clone(), one.clone()]);
+
+        // A flat file from before the split is still a database and still
+        // listed; `tgx split`'s leftover `.split` is not.
+        std::fs::write(base.join(FILE_NAME), b"").expect("touch");
+        std::fs::write(base.join("old.sqlite.split"), b"").expect("touch");
+        assert_eq!(find_all(&base).len(), 3);
+        assert_eq!(find(&base), Some(base.join(FILE_NAME)));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_database_is_dated_by_its_wal_when_that_is_newer() {
+        let base = std::env::temp_dir().join("tga-db-test-modified");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("mkdir");
+        let db = base.join("a.sqlite");
+        std::fs::write(&db, b"").expect("touch");
+        let main = modified(&db).expect("dated");
+
+        let wal = base.join("a.sqlite-wal");
+        let file = std::fs::File::create(&wal).expect("wal");
+        let later = main + std::time::Duration::from_secs(3600);
+        file.set_modified(later).expect("set time");
+        drop(file);
+        assert_eq!(modified(&db), Some(later));
+        assert_eq!(modified(&base.join("missing.sqlite")), None);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

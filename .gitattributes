@@ -34,3 +34,8 @@ crates/tga-report/assets/report.js  -text
 # longer parses, and the failure surfaces as a window in the wrong typeface with
 # no error anywhere.
 *.ttf binary
+
+# The icon, for the same reason: `* text=auto` would treat a run of BMP bytes
+# that happens to look like text as text, and a CRLF inside a DIB is an icon
+# that draws as garbage in Explorer and nowhere else.
+*.ico binary

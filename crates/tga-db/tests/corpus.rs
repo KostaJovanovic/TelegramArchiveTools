@@ -14,7 +14,15 @@ use std::path::PathBuf;
 
 /// `TGA_DATABASE` overrides. Lives on a removable drive, like every corpus
 /// here.
-const DEFAULT: &str = r"L:\9 telegram export";
+///
+/// **This was `L:\9 telegram export\telegram.sqlite`**, one file holding UA
+/// KOLAB and Telegram's service chat. `tgx split` took it apart into one
+/// database per chat, `<title>\<title>.sqlite`, and the flat file is gone. UA
+/// KOLAB's own is the same chat the old file's largest was.
+const DEFAULT: &str = r"L:\9 telegram export\UA KOLAB";
+
+/// The folder the exporter syncs every chat's database into.
+const OUTPUT: &str = r"L:\9 telegram export";
 
 fn corpus() -> Option<PathBuf> {
     let root = std::env::var("TGA_DATABASE")
@@ -112,6 +120,54 @@ fn every_chat_in_the_file_can_be_read_on_its_own() {
             assert_eq!(topic.chat_id, Some(chat.id), "{}", chat.title);
         }
     }
+}
+
+/// Every database the exporter's output folder holds opens, and each is one
+/// chat that reads whole.
+///
+/// This is what a refresh walks, so a file that fails here is a report that
+/// silently stops being redone. Forty chats, 36 GB on disk — nearly all of it
+/// media blobs, which nothing here reads.
+#[test]
+fn every_database_in_the_output_folder_reads() {
+    let root = std::env::var("TGA_DATABASE_OUTPUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(OUTPUT));
+    let all = tga_db::find_all(&root);
+    if all.len() < 2 {
+        let required = std::env::var("TGA_REQUIRE_CORPUS").as_deref() == Ok("1");
+        assert!(
+            !required,
+            "TGA_REQUIRE_CORPUS=1 but no per-chat databases under {}",
+            root.display()
+        );
+        eprintln!("SKIP: no per-chat databases under {}", root.display());
+        return;
+    }
+    // A folder of several is not one export, and `find` must not pretend it is.
+    assert_eq!(
+        tga_db::find(&root),
+        None,
+        "find picked one of {}",
+        all.len()
+    );
+
+    let mut total = 0;
+    for db in &all {
+        let chats = tga_db::chats(db).unwrap_or_else(|e| panic!("{}: {e:#}", db.display()));
+        assert_eq!(
+            chats.len(),
+            1,
+            "{} holds {} chats",
+            db.display(),
+            chats.len()
+        );
+        let export =
+            tga_db::load(db, None, None).unwrap_or_else(|e| panic!("{}: {e:#}", db.display()));
+        assert_eq!(export.msgs.len(), chats[0].messages, "{}", chats[0].title);
+        total += export.msgs.len();
+    }
+    eprintln!("output folder: {} databases, {total} messages", all.len());
 }
 
 #[test]

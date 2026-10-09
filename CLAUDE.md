@@ -17,12 +17,17 @@ the current shape — worth reading once, for what it found.
 
 ## Commands
 
-`save.bat` is the entry point — bare for a menu, or with an action:
+`save.bat` is the entry point — bare for a menu, or with an action. It is
+TelegramExporter's `save.bat` with this repo's checks in it; keep the two in
+the same shape.
 
 ```powershell
-save.bat test               # fmt + clippy + every suite (what `save` runs)
-save.bat save               # test + commit + push
-save.bat build              # release, both exes into dist\
+save.bat test               # fmt + clippy + every suite
+save.bat save               # fmt + clippy + suite + baseline, commit, push
+save.bat commit             # the same, no push
+save.bat --force            # save, then force-with-lease push without asking
+save.bat release            # save, then build
+save.bat build              # release build into dist\
 save.bat run                # the window
 save.bat report <folder>    # write report.html beside an export
 save.bat baseline           # both archives against the last recording
@@ -43,6 +48,7 @@ cargo test --all -- --nocapture            # --nocapture matters; see below
 cargo run -p tga-app --bin TelegramAnalyser -- <folder or telegram.sqlite>
         [--out P] [--chat ID|TITLE] [--digest] [--no-fonts] [--stats P]
         [--notes P] [--stamp T]
+cargo run -p tga-app --bin TelegramAnalyser -- <exporter output folder> --refresh [--force]
 cargo run -p tga-app --bin TelegramAnalyser -- --from-stats <s.json> --out <p>
 ```
 
@@ -83,8 +89,21 @@ tga-report    the ramp, the SVG marks, the one HTML file. Reads a Stats.
 tga-app       the only binary, TelegramAnalyser.exe. cli.rs is the argument
               half; app.rs is the window, egui on glow; state.rs holds every
               rule the window applies, with no toolkit in it, so they stay
-              testable.
+              testable. refresh.rs is the library both halves share: every
+              export under a folder, whether its report is stale, and the one
+              function that analyses one.
+tgx-ui        TelegramExporter's design system, **copied verbatim** (see the
+              workspace Cargo.toml). Edit it in the exporter and copy it back.
 ```
+
+**The window is a library.** Point it at a folder and every export in it is
+a row — the exporter's per-chat databases, or one folder export — with what
+needs a report already ticked; Analyse runs the ticks in turn. It is laid out
+with the exporter's own pieces so the two windows are one product, and
+`tools\shot.ps1 -Folder <path>` photographs it (`TGA_SHOT`; reading the
+screen from outside comes back black under GL). The icon is drawn by
+`tools\make_icon.py` and embedded by `crates/tga-app/build.rs`; regenerate it
+there, never by editing the `.ico`.
 
 `tga-report` renders from a `tga_stats::Stats`, which is exactly what `--stats`
 dumps. That is what lets a recorded dump replay through the writer with no
@@ -168,14 +187,18 @@ Four real corpora, all on removable drives:
 | `N:\telegram export\UA KOLAB TELEGRAM` | 6,643 | 4 | baseline |
 | `J:\temp pureraw\KRGM*` | 333,582 | 10 | baseline |
 | `N:\telegram_export\KROVNA RADNA GRUPA ZA MEDIJE*` | 450,817 | 33 | documents: 150 docx, 238 pdf, 9 txt |
-| `L:\9 telegram export\telegram.sqlite` | 7,077 | 7 | the database format |
+| `L:\9 telegram export\UA KOLAB\UA KOLAB.sqlite` | 8,206 | 7 | the database format |
 
 The fourth is the exporter's database output, not a folder: UA KOLAB again,
 re-exported with only the Database format on, so **there is no `result.json`
 anywhere in it**. That is exactly why it is worth keeping — an export that the
-folder reader cannot see at all. It holds two chats (UA KOLAB and Telegram's
-own service notifications), which the exporter is moving away from; until then
-`--chat` picks and the default is the largest.
+folder reader cannot see at all. It used to be one flat `telegram.sqlite`
+holding two chats; `tgx split` turned it into one database per chat,
+`<title>\<title>.sqlite`, and `L:\9 telegram export` now holds 40 of them
+(36 GB, 1.49M messages). The corpus test reads every one, because that folder
+is what `--refresh` and the window's Refresh walk: a report is redone when it
+is older than its database (or its `-wal`, the exporter syncs in WAL mode) or
+its notes file.
 
 The third is the same group as `KRGM` re-exported later, and it is the only one
 with the media downloaded — which is what makes it the document test's corpus.
@@ -216,9 +239,11 @@ checkout would fail every byte-for-byte compare), `eol=crlf` on `*.bat` (cmd's
   ramp checks from the hex values, and `tga_app::theme::tests` asserts the
   window's copy has not drifted from the report's.
 - The window is `eframe`/`egui` on the **glow** backend, deliberately: it is a
-  text field, two tick boxes, a bar and three buttons, and wgpu drags in a
-  shader compiler for that. Everything the design needs and egui does not
-  default to — square corners, hairline strokes, no shadow, Geist — is set in
-  `tga_app::theme::install` rather than inherited.
+  list and a row of buttons, and wgpu drags in a shader compiler for that.
+  Everything the design needs and egui does not default to — square corners,
+  hairline strokes, no shadow, Geist — comes from `tgx_ui::install`.
 - Toolchain is pinned: Rust 1.97.0, MSVC target.
-- No `origin` remote; `save.bat push` says so and stops.
+- `origin` is `github.com/KostaJovanovic/TelegramAnalyser`, which is **public**
+  — another reason `baseline/`, `reference/` and every real report stay
+  gitignored. `save.bat` asks before every push and only ever forces with
+  `--force-with-lease --force-if-includes`.
