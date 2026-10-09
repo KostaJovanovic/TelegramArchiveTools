@@ -432,6 +432,33 @@ pub struct Detail {
     pub media: Vec<Media>,
 }
 
+/// Each person's profile picture, `(sender key, bytes)`: the one they wear
+/// now, or if the last run did not see them wear any, the newest held. Empty
+/// for a database that keeps none.
+pub async fn userpics(
+    path: &Path,
+    chat_id: i64,
+) -> Result<Vec<(String, Vec<u8>)>, tgx_archive::Error> {
+    let path = path.to_path_buf();
+    off_the_runtime(async move {
+        let store = tgx_archive::Store::open_read(&path).await?;
+        let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        // `userpics_of` lists the worn ones first, then each person's newest,
+        // so the first sighting of a person is the one to show.
+        for pic in store.userpics_of(chat_id).await? {
+            if !seen.insert(pic.peer.clone()) {
+                continue;
+            }
+            if let Some(bytes) = store.blob(pic.photo_id, tgx_archive::USERPIC_KIND).await? {
+                out.push((pic.peer, bytes));
+            }
+        }
+        Ok(out)
+    })
+    .await
+}
+
 /// One message in full, or `None` if the database does not hold it.
 pub async fn detail(
     path: &Path,
@@ -1092,6 +1119,40 @@ mod tests {
         assert_eq!(d.versions.len(), 1);
         assert_eq!(d.versions[0].text, "prva");
         assert!(detail(&path, 7, 99).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn each_person_shows_the_picture_they_wear_now() {
+        let path = tmp("userpics");
+        {
+            let s = tgx_archive::Store::open(&path).await.unwrap();
+            let kind = tgx_archive::USERPIC_KIND;
+            for (id, bytes) in [(1, b"old"), (2, b"now"), (3, b"one")] {
+                s.put_blob(id, kind, "image/jpeg", None, bytes, 1)
+                    .await
+                    .unwrap();
+            }
+            s.record_userpic(7, "user1", 1, Some(100), false, 1)
+                .await
+                .unwrap();
+            s.record_userpic(7, "user1", 2, Some(200), true, 1)
+                .await
+                .unwrap();
+            // Nobody saw user2 wear it on the last run: still their newest.
+            s.record_userpic(7, "user2", 3, None, false, 1)
+                .await
+                .unwrap();
+        }
+        let mut pics = userpics(&path, 7).await.unwrap();
+        pics.sort();
+        assert_eq!(
+            pics,
+            vec![
+                ("user1".to_string(), b"now".to_vec()),
+                ("user2".to_string(), b"one".to_vec())
+            ]
+        );
+        assert!(userpics(&path, 8).await.unwrap().is_empty());
     }
 
     #[tokio::test]

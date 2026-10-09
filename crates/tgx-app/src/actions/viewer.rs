@@ -128,12 +128,49 @@ pub async fn pictures(path: PathBuf, chat_id: i64, ids: Vec<i64>, tx: Events) {
     }
 }
 
+/// The side a profile picture is kept at: a few times the userpic circle, so
+/// it stays sharp on a high-density screen without holding Telegram's 640.
+pub const USERPIC_SIDE: u32 = 96;
+
+/// The open chat's profile pictures, one per person, decoded together on the
+/// blocking pool. A database that cannot be read, or holds none, sends none —
+/// the bubbles keep their initials.
+pub async fn userpics(path: PathBuf, chat_id: i64, tx: Events) {
+    let Ok(found) = viewer::userpics(&path, chat_id).await else {
+        return;
+    };
+    if found.is_empty() {
+        return;
+    }
+    let pics = tokio::task::spawn_blocking(move || {
+        found
+            .into_iter()
+            .filter_map(|(peer, bytes)| {
+                let img = decode_scaled(&[bytes], USERPIC_SIDE)?;
+                Some((peer, std::sync::Arc::new(img)))
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    let _ = tx.send(Event::ViewerUserpics {
+        path,
+        chat_id,
+        pics,
+    });
+}
+
 /// The first of `candidates` that decodes, scaled down to [`PICTURE_SIDE`].
 pub fn decode_first(candidates: &[Vec<u8>]) -> Option<eframe::egui::ColorImage> {
+    decode_scaled(candidates, PICTURE_SIDE)
+}
+
+/// The first of `candidates` that decodes, its longer side at most `side`.
+fn decode_scaled(candidates: &[Vec<u8>], side: u32) -> Option<eframe::egui::ColorImage> {
     candidates.iter().find_map(|bytes| {
         let img = image::load_from_memory(bytes).ok()?;
-        let img = if img.width().max(img.height()) > PICTURE_SIDE {
-            img.thumbnail(PICTURE_SIDE, PICTURE_SIDE)
+        let img = if img.width().max(img.height()) > side {
+            img.thumbnail(side, side)
         } else {
             img
         };

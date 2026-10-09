@@ -161,6 +161,15 @@ pub struct Settings {
     /// the same reason `link_previews` is off.
     pub own_names: bool,
 
+    /// Keep people's profile pictures in the database: [`USERPICS_OFF`],
+    /// [`USERPICS_CURRENT`] (the one each person wears now) or
+    /// [`USERPICS_HISTORY`] (every one they still have up).
+    ///
+    /// Database mode only. Desktop's format has no place for them — its HTML
+    /// paints initials — so a Classic folder is left exactly Desktop's.
+    /// Anything unrecognised reads as the default.
+    pub profile_photos: String,
+
     // Extra requests that recover what Telegram sends only when asked. None of
     // these exist in Desktop's format; each is separately switchable because
     // each costs traffic, and each degrades to nothing on failure.
@@ -216,6 +225,15 @@ pub struct Settings {
     pub saved_selections: Vec<SavedSelection>,
 }
 
+/// [`Settings::profile_photos`]: none kept.
+pub const USERPICS_OFF: &str = "off";
+/// [`Settings::profile_photos`]: the picture each person wears now. One small
+/// download per person, and none on a sync that finds it unchanged.
+pub const USERPICS_CURRENT: &str = "current";
+/// [`Settings::profile_photos`]: every picture each person still has up. One
+/// extra request per person per sync on top of the downloads.
+pub const USERPICS_HISTORY: &str = "history";
+
 /// One entry in [`Settings::saved_selections`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
@@ -242,6 +260,7 @@ impl Default for Settings {
             download_media: true,
             link_previews: false,
             own_names: false,
+            profile_photos: USERPICS_CURRENT.into(),
             full_reactions: true,
             chat_metadata: true,
             invite_links: true,
@@ -340,6 +359,11 @@ impl Settings {
         let mut out: Self = serde_json::from_value(Value::Object(base)).unwrap_or(defaults);
         if out.theme != "dark" && out.theme != "light" {
             out.theme = "dark".into();
+        }
+        if ![USERPICS_OFF, USERPICS_CURRENT, USERPICS_HISTORY]
+            .contains(&out.profile_photos.as_str())
+        {
+            out.profile_photos = USERPICS_CURRENT.into();
         }
         // **`sort_mode` deliberately gets no such normalisation.** It looks like
         // the same case as `theme` and is not: the vocabulary belongs to

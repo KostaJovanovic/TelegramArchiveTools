@@ -160,6 +160,9 @@ pub(super) struct ViewerState {
     pub(super) pictures: HashMap<i64, bubbles::Pic>,
     pub(super) pic_used: HashMap<i64, u64>,
     pub(super) frame: u64,
+    /// The open chat's profile pictures, by sender. Read whole when the chat
+    /// opens: one small picture a person, a few hundred at most.
+    pub(super) userpics: HashMap<String, bubbles::Pic>,
 }
 
 /// Pictures kept as textures at once. At most 720px a side, so this bounds
@@ -599,6 +602,16 @@ impl Shell {
                 *pic = bubbles::Pic::Ready(tex);
             }
         }
+        for (peer, pic) in v.userpics.iter_mut() {
+            if let bubbles::Pic::Decoded(img) = pic {
+                let tex = ui.ctx().load_texture(
+                    format!("viewer-userpic-{peer}"),
+                    (**img).clone(),
+                    egui::TextureOptions::LINEAR,
+                );
+                *pic = bubbles::Pic::Ready(tex);
+            }
+        }
         if v.heights.len() != v.items.len() || (v.laid_width - width).abs() > 0.5 {
             v.laid_width = width;
             v.heights = v
@@ -620,6 +633,7 @@ impl Shell {
             ink,
             pictures: &v.pictures,
             painted: &painted,
+            userpics: &v.userpics,
         };
 
         let mut area = egui::ScrollArea::vertical()
@@ -987,6 +1001,7 @@ impl Shell {
             v.topic_names.clear();
             v.pictures.clear();
             v.pic_used.clear();
+            v.userpics.clear();
         }
         v.open = Some(db);
         v.loading = true;
@@ -1004,8 +1019,28 @@ impl Shell {
         v.select_after_load = then;
         v.showing_found = false;
         let tx = self.bridge.sender();
+        let (pics_path, pics_tx) = (path.clone(), self.bridge.sender());
         self.bridge
             .spawn(async move { crate::actions::viewer::load(path, chat_id, tx).await });
+        self.bridge.spawn(async move {
+            crate::actions::viewer::userpics(pics_path, chat_id, pics_tx).await
+        });
+    }
+
+    /// The chat's profile pictures came back. Kept only if it is still open.
+    pub(super) fn viewer_userpics(
+        &mut self,
+        path: &std::path::Path,
+        chat_id: i64,
+        pics: Vec<(String, std::sync::Arc<egui::ColorImage>)>,
+    ) {
+        if !self.viewer.is_open(path, chat_id) {
+            return;
+        }
+        self.viewer.userpics = pics
+            .into_iter()
+            .map(|(peer, img)| (peer, bubbles::Pic::Decoded(img)))
+            .collect();
     }
 
     /// Select a message: highlight it, ask for it in full, and — when `scroll`

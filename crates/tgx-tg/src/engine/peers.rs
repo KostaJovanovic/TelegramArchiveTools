@@ -51,6 +51,13 @@ impl<'a> ChatExporter<'a> {
         for peer in [msg.sender(), msg.peer()].into_iter().flatten() {
             self.learn_peer(peer);
         }
+        // The sender's picture, and only theirs: a forward origin also passes
+        // through `learn_peer` and need never have been in this chat.
+        if let Some(grammers_client::peer::Peer::User(u)) = msg.sender() {
+            if let tl::enums::User::User(raw) = &u.raw {
+                self.faces.note(raw);
+            }
+        }
     }
 
     pub(super) fn learn_peer(&mut self, peer: &grammers_client::peer::Peer) {

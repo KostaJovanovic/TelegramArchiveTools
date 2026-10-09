@@ -715,6 +715,7 @@ impl eframe::App for Shell {
                 .viewer
                 .pictures
                 .values()
+                .chain(self.viewer.userpics.values())
                 .any(|p| matches!(p, bubbles::Pic::Loading | bubbles::Pic::Decoded(_)));
             if self.viewer.listing || self.viewer.loading || pictures_pending {
                 self.shot_busy_until = self.frame_no;

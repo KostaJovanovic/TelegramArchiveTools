@@ -560,6 +560,11 @@ pub struct ChatExporter<'a> {
     /// has to name `tgx-archive` — the window may depend only on `tgx-ui` and
     /// `tgx-tg`, and `layering.rs` fails the build if that changes.
     store: Option<tgx_archive::Store>,
+    /// Everyone this chat's run met whose profile picture can be asked for:
+    /// the roster and every sender. **This chat's**, cleared at the top of
+    /// every run — a picture belongs in the database of a chat its owner is
+    /// in, not in every chat after it in the queue.
+    faces: crate::userpics::Faces,
 }
 
 impl<'a> ChatExporter<'a> {
@@ -574,6 +579,7 @@ impl<'a> ChatExporter<'a> {
             session,
             peers_tried: std::collections::HashSet::new(),
             store: None,
+            faces: Default::default(),
         }
     }
 
@@ -648,6 +654,7 @@ impl<'a> ChatExporter<'a> {
         // who `own_names` touched is this chat's alone. Left running, the
         // seventh chat of a queue reported 300,410 contacts.
         self.names.aliased = Default::default();
+        self.faces = Default::default();
         // **Classic or Database — the two are a choice, not a set of ticks.**
         //
         // Classic writes Desktop's folders and re-reads the chat from the
@@ -875,6 +882,7 @@ impl<'a> ChatExporter<'a> {
             // and the HTML then derived initials by splitting the display name,
             // the one rule Desktop provably does not use. See `Roster::book`.
             self.names.absorb(&roster.book);
+            self.faces.extend(&roster.faces);
             if !roster.members.is_empty() {
                 if let Some(root) = root {
                     let body = serde_json::to_string_pretty(&roster.to_json())
@@ -1773,6 +1781,39 @@ impl<'a> ChatExporter<'a> {
         // exports under a name that looks like a mistake.
         if !files {
             let _ = std::fs::remove_dir_all(&scratch);
+        }
+
+        // --- profile pictures, into the database only -----------------------
+        // After the read, because the senders are only known by then; Desktop's
+        // format has no place for them, so a folder never gets one.
+        if let Some(store) = &self.store {
+            if self.settings.profile_photos != crate::config::USERPICS_OFF && !cancel.is_cancelled()
+            {
+                let pics_started = std::time::Instant::now();
+                // One transaction for the lot; `close_all` below commits it.
+                store.begin_batch().await?;
+                let t = crate::userpics::sync(
+                    self.client,
+                    store,
+                    chat.id,
+                    &self.faces,
+                    self.settings,
+                    seen_at,
+                    cancel,
+                )
+                .await?;
+                progress(Progress::Log(format!(
+                    "profile pictures ({}): {} people, {} fetched ({}), {} already held, \
+                     {} could not be had — in {:.1}s",
+                    self.settings.profile_photos,
+                    t.people,
+                    t.fetched,
+                    human_bytes(t.bytes),
+                    t.held,
+                    t.failed,
+                    pics_started.elapsed().as_secs_f64()
+                )));
+            }
         }
 
         Self::close_all(

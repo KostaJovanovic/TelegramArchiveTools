@@ -138,6 +138,8 @@ pub struct Roster {
     /// `add_member_facts` has already applied the substitution and counted it
     /// into `aliased`, and a second pass would count it twice.
     pub book: crate::convert::NameBook,
+    /// Everyone listed whose profile picture can be asked for.
+    pub faces: crate::userpics::Faces,
 }
 
 impl Roster {
@@ -280,6 +282,7 @@ async fn basic_group_roster(
 /// `participants.json` would name a contact one way and every message they
 /// sent another — the export disagreeing with itself about who someone is.
 fn add_member(roster: &mut Roster, u: &tl::types::User, own_names: bool) {
+    roster.faces.note(u);
     add_member_facts(
         roster,
         crate::convert::UserFacts {

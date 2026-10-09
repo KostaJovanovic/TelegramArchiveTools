@@ -212,6 +212,9 @@ pub(super) struct Scene<'a> {
     /// Every picture painted this frame, so the list can ask for the ones it
     /// does not have and keep the ones it does.
     pub painted: &'a std::cell::RefCell<Vec<i64>>,
+    /// Profile pictures by sender (`"user1234"`), for the chat's database
+    /// holds them. Anyone missing keeps their initials.
+    pub userpics: &'a HashMap<String, Pic>,
 }
 
 /// Lay out one item at `origin`, `width` wide, and return its height. With
@@ -772,19 +775,27 @@ fn bubble(
 
     if tail {
         let c = pos2(origin.x + LEFT + AVATAR / 2.0, rect.bottom() - AVATAR / 2.0);
-        painter.circle_filled(c, AVATAR / 2.0, colour);
-        let letters = if r.initials.is_empty() {
-            "?".to_string()
+        if let Some(Pic::Ready(tex)) = scene.userpics.get(&r.from_id) {
+            // Telegram's profile pictures are square, so the circle is the
+            // whole picture with its corners rounded off.
+            egui::Image::from_texture(tex)
+                .corner_radius(CornerRadius::same((AVATAR / 2.0) as u8))
+                .paint_at(ui, Rect::from_center_size(c, vec2(AVATAR, AVATAR)));
         } else {
-            r.initials.to_uppercase()
-        };
-        painter.text(
-            c,
-            Align2::CENTER_CENTER,
-            letters,
-            semibold(SMALL + 1.0),
-            Color32::WHITE,
-        );
+            painter.circle_filled(c, AVATAR / 2.0, colour);
+            let letters = if r.initials.is_empty() {
+                "?".to_string()
+            } else {
+                r.initials.to_uppercase()
+            };
+            painter.text(
+                c,
+                Align2::CENTER_CENTER,
+                letters,
+                semibold(SMALL + 1.0),
+                Color32::WHITE,
+            );
+        }
     }
 
     if click.is_none() {

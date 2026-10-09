@@ -16,6 +16,7 @@ pub mod plan;
 pub mod search;
 pub mod split;
 pub mod unpack;
+pub mod userpics;
 pub mod viewer;
 
 pub use cancel::Cancel;

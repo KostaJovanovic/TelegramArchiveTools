@@ -265,6 +265,27 @@ impl Shell {
                 self.commit_settings();
                 self.arm_schedule(std::time::Instant::now());
             }
+            // Here and not under Beyond Desktop: only a database keeps them,
+            // so the choice is on screen only when there is one.
+            let at = USERPICS
+                .iter()
+                .position(|k| *k == self.settings.profile_photos)
+                .unwrap_or(1);
+            let mut picked = None;
+            row(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = space::TIGHT;
+                ui.label(text("Profile pictures", &p));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    help(ui, "profile_photos", PHOTOS_HELP, &p);
+                    // Drawn right to left, so the strip is given in reverse
+                    // and the answer turned back round.
+                    let cells = ["History", "Current", "Off"];
+                    picked = segmented(ui, &cells, 2 - at, &p).map(|i| 2 - i);
+                });
+            });
+            if let Some(i) = picked {
+                self.toggle_setting(move |s| s.profile_photos = USERPICS[i].into());
+            }
         } else {
             for (key, label, why, on) in [
                 (
@@ -684,6 +705,22 @@ const SYNC_HELP: &str = "While this window stays open, press Update databases by
      this many hours: every chat with a database in the destination is synced. 0 turns it off. \
      A run already going is never interrupted; the next one waits for it.";
 
+/// The [`tgx_tg::config::Settings::profile_photos`] values, in the order the
+/// strip shows them left to right.
+const USERPICS: [&str; 3] = [
+    tgx_tg::config::USERPICS_OFF,
+    tgx_tg::config::USERPICS_CURRENT,
+    tgx_tg::config::USERPICS_HISTORY,
+];
+
+const PHOTOS_HELP: &str = "Keep the profile picture of everyone in the chat — its members and \
+     anyone who posted — in the chat's database, and show them in the viewer. Current keeps the \
+     picture each person wears now: one small download per person, and none on a sync that finds \
+     it unchanged; a new one is added and the old one kept. History keeps every picture they \
+     still have up, which costs one more request per person whose picture changed. Desktop's own \
+     export has no pictures, so a Classic folder never gets them. Someone who hides their \
+     picture from you is skipped.";
+
 const SPLIT_HELP: &str =
     "A forum supergroup becomes one folder per topic instead of one folder for \
      all of them. This is the thing Telegram Desktop cannot do. In Database mode \
@@ -786,6 +823,7 @@ mod tests {
             REREAD_HELP,
             REREAD_ALL_HELP,
             SYNC_HELP,
+            PHOTOS_HELP,
             CHECK_HELP,
             DUPES_HELP,
             SPLIT_HELP,

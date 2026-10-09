@@ -178,6 +178,13 @@ pub enum Event {
         /// The file itself is in the database, picture or not.
         has_file: bool,
     },
+    /// The open chat's profile pictures, decoded, by sender (`"user1234"`).
+    /// Carries the database, so pictures for a chat since closed are dropped.
+    ViewerUserpics {
+        path: std::path::PathBuf,
+        chat_id: i64,
+        pics: Vec<(String, std::sync::Arc<eframe::egui::ColorImage>)>,
+    },
     /// What a search found. `scope` is the chat searched, or `None` for every
     /// database in the destination; with `needle`, it is how an answer to a
     /// question nobody is asking any more is recognised and dropped.

@@ -104,6 +104,30 @@ const SKIPPED_PREFIX: &str = "(File ";
 /// see [`Store::merge`] for why it never overwrites one.
 const NO_TOPIC: i64 = 1;
 
+/// People's profile pictures: whose, which, and which one they wear now. The
+/// bytes are in `blobs`, kind [`USERPIC_KIND`], keyed by Telegram's photo id.
+///
+/// **Added beside [`SCHEMA`], not in it, and without a version bump.** An
+/// extra table is invisible to a build that does not know it — every query
+/// here names its tables — so a file that has one still opens in every earlier
+/// build, where a bump would lock them all out of it. `ensure_schema` creates
+/// it in a file of either age; a reader of a file no writer has opened since
+/// asks [`Store::has_userpics`] first.
+///
+/// `date` is when the person set the picture, and only a pass over their whole
+/// photo history learns it — which is also how a sync knows that pass is done.
+/// `current` is 1 on the picture the last run saw them wearing.
+const USERPICS: &str = "\
+CREATE TABLE IF NOT EXISTS userpics (chat_id INTEGER NOT NULL, peer TEXT NOT NULL,
+                                     photo_id INTEGER NOT NULL, date INTEGER,
+                                     current INTEGER NOT NULL DEFAULT 0,
+                                     first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
+                                     PRIMARY KEY (chat_id, peer, photo_id));
+";
+
+/// The `blobs.kind` a profile picture is stored under.
+pub const USERPIC_KIND: &str = "userpics";
+
 const SCHEMA: &str = "\
 CREATE TABLE chats (id INTEGER PRIMARY KEY, title TEXT NOT NULL, type TEXT NOT NULL,
                     first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL);
@@ -184,6 +208,19 @@ pub enum Merge {
     Unchanged,
     /// Different; what was there has been kept in `versions`.
     Changed { previous_version: i64 },
+}
+
+/// One profile picture, as [`Store::userpics_of`] reads it. The bytes are
+/// `Store::blob(photo_id, USERPIC_KIND)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Userpic {
+    /// `"user1234"`, the shape a message's `from_id` carries.
+    pub peer: String,
+    pub photo_id: i64,
+    /// When they set it, unix seconds; known only from a history pass.
+    pub date: Option<i64>,
+    pub current: bool,
+    pub size: i64,
 }
 
 /// One chat a database records, as [`Store::chats_in`] reads it.
@@ -552,7 +589,21 @@ impl Store {
                     .await?;
             }
         }
+        self.conn.execute_batch(USERPICS).await?;
         Ok(())
+    }
+
+    /// Whether this file has the [`USERPICS`] table: one a build before it
+    /// wrote and none since has opened for writing does not, and a read-only
+    /// open cannot add it.
+    async fn has_userpics(&self) -> Result<bool, Error> {
+        Ok(self
+            .row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'userpics'",
+                (),
+            )
+            .await?
+            .is_some())
     }
 
     /// The first row of a query, or `None` if it returned no rows.
@@ -1453,6 +1504,72 @@ impl Store {
         Ok(())
     }
 
+    // --- profile pictures ---------------------------------------------------
+
+    /// Record that `peer` has had picture `photo_id`, whose bytes are already
+    /// in `blobs`. `current` moves the "wearing it now" mark to this one.
+    /// A `date` already known is not forgotten by a call that has none.
+    pub async fn record_userpic(
+        &self,
+        chat_id: i64,
+        peer: &str,
+        photo_id: i64,
+        date: Option<i64>,
+        current: bool,
+        now: i64,
+    ) -> Result<(), Error> {
+        if current {
+            self.conn
+                .execute(
+                    "UPDATE userpics SET current = 0
+                      WHERE chat_id = ?1 AND peer = ?2 AND photo_id <> ?3",
+                    params![chat_id, peer, photo_id],
+                )
+                .await?;
+        }
+        self.conn
+            .execute(
+                "INSERT INTO userpics (chat_id, peer, photo_id, date, current, first_seen, last_seen)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+                 ON CONFLICT(chat_id, peer, photo_id) DO UPDATE
+                    SET date = COALESCE(?4, date), current = MAX(current, ?5), last_seen = ?6",
+                params![chat_id, peer, photo_id, date, current as i64, now],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Every picture this file records for `chat_id`: the ones people wear
+    /// now first, then by person and newest first. Empty for a file written
+    /// before pictures were kept.
+    pub async fn userpics_of(&self, chat_id: i64) -> Result<Vec<Userpic>, Error> {
+        if !self.has_userpics().await? {
+            return Ok(Vec::new());
+        }
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT u.peer, u.photo_id, u.date, u.current, b.size
+                   FROM userpics u
+                   JOIN blobs b ON b.file_id = u.photo_id AND b.kind = ?2
+                  WHERE u.chat_id = ?1
+                  ORDER BY u.current DESC, u.peer, u.date DESC, u.first_seen DESC",
+                params![chat_id, USERPIC_KIND],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next().await? {
+            out.push(Userpic {
+                peer: r.get::<String>(0)?,
+                photo_id: r.get::<i64>(1)?,
+                date: r.get::<Option<i64>>(2)?,
+                current: r.get::<i64>(3)? != 0,
+                size: r.get::<i64>(4)?,
+            });
+        }
+        Ok(out)
+    }
+
     /// Open a write transaction, if one is not open already.
     ///
     /// Six thousand messages is six thousand `INSERT`s, and each one outside a
@@ -2108,6 +2225,65 @@ mod tests {
             json!("files/original.mp3"),
             "only placeholders are replaceable; history is not"
         );
+    }
+
+    #[tokio::test]
+    async fn a_new_profile_picture_takes_the_current_mark_and_the_old_one_stays() {
+        let path = tmp("userpics");
+        {
+            let s = Store::open(&path).await.unwrap();
+            s.put_blob(500, USERPIC_KIND, "image/jpeg", None, b"old", 1)
+                .await
+                .unwrap();
+            s.record_userpic(7, "user1", 500, None, true, 1)
+                .await
+                .unwrap();
+            // A history pass learns the date; a later current-only sync must
+            // not forget it.
+            s.record_userpic(7, "user1", 500, Some(1_700_000_000), true, 2)
+                .await
+                .unwrap();
+            s.record_userpic(7, "user1", 500, None, true, 3)
+                .await
+                .unwrap();
+            s.put_blob(501, USERPIC_KIND, "image/jpeg", None, b"newer", 4)
+                .await
+                .unwrap();
+            s.record_userpic(7, "user1", 501, None, true, 4)
+                .await
+                .unwrap();
+            // Recorded, but its bytes never arrived: not listed.
+            s.record_userpic(7, "user2", 502, None, true, 4)
+                .await
+                .unwrap();
+        }
+        let s = Store::open_read(&path).await.unwrap();
+        let pics = s.userpics_of(7).await.unwrap();
+        assert_eq!(pics.len(), 2);
+        assert_eq!((pics[0].photo_id, pics[0].current), (501, true));
+        assert_eq!(
+            (pics[1].photo_id, pics[1].current, pics[1].date),
+            (500, false, Some(1_700_000_000))
+        );
+        assert_eq!(pics[0].size, 5);
+        assert!(s.userpics_of(8).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_file_from_before_pictures_were_kept_reads_as_having_none() {
+        let path = tmp("userpics-old");
+        {
+            let s = Store::open(&path).await.unwrap();
+            s.conn.execute_batch("DROP TABLE userpics;").await.unwrap();
+        }
+        let s = Store::open_read(&path).await.unwrap();
+        assert!(s.userpics_of(7).await.unwrap().is_empty());
+        drop(s);
+        // And the first write open adds the table to it.
+        let s = Store::open(&path).await.unwrap();
+        s.record_userpic(7, "user1", 1, None, true, 1)
+            .await
+            .unwrap();
     }
 
     #[test]
