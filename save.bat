@@ -167,6 +167,17 @@ echo [git]  stage
 git add .
 git status
 
+rem Nothing staged is not a failure: the work may already be committed and only
+rem waiting to be pushed. Asked before the message prompt, so a clean tree does
+rem not ask for a message it will not use. A commit that fails for any other
+rem reason - a hook rejecting it - still stops here.
+git diff --cached --quiet
+if not errorlevel 1 (
+  echo.
+  echo [git]  nothing new to commit - the earlier commits are what goes out
+  goto pushstep
+)
+
 echo.
 set /p MSG=commit message [v%VERLABEL%]:
 if "%MSG%"=="" set MSG=v%VERLABEL%
@@ -174,13 +185,14 @@ if "%MSG%"=="" set MSG=v%VERLABEL%
 git commit -m "%MSG%"
 if errorlevel 1 (
   echo.
-  echo [err]  git commit failed - nothing to commit, or a hook rejected it
+  echo [err]  git commit failed - a hook rejected it
   set SAVE_ERROR=1
   goto end
 )
 echo.
 echo [git]  committed v%VERLABEL%
 
+:pushstep
 if "%COMMIT_ONLY%"=="1" goto afterpush
 
 call :branchname
