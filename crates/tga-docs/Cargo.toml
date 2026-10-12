@@ -1,0 +1,48 @@
+[package]
+name = "tga-docs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "What a text attachment says, and when it is really from."
+
+# **Nothing here depends on `tga-read`, and nothing else depends on this.**
+#
+# The extraction pulls in a zip reader, an XML parser and a PDF parser, and
+# `tga-report` must stay free of all three -- it is linked into the same
+# executable and a report rendered from a recorded `stats.json` never opens an
+# attachment. Putting these in `tga-notes` would have dragged them into the
+# report, because that is where `Row` lives and `tga-report` depends on it. So
+# this is its own crate and only `tga-app` reaches for it, on the `--digest`
+# path alone.
+[dependencies]
+chrono.workspace = true
+
+# The date inference is a dozen patterns over Latin and Cyrillic Serbian, and
+# hand-rolled digit scanning for that is code nobody can check against the
+# examples it was built from. `once_cell` is not needed: the compiled patterns
+# live in a `OnceLock`.
+regex = "1"
+
+# `.docx` is a zip. `default-features = false` plus `deflate` is the whole of
+# what Word writes; the defaults add bzip2, zstd, lzma and AES, none of which
+# has ever appeared in an Office file.
+zip = { version = "6", default-features = false, features = ["deflate"] }
+
+# Reading `word/document.xml` by hand looked tempting -- it is one tag in a
+# hundred that matters. It is wrong: the text is full of `&amp;`, `&#x2019;`
+# and CDATA, and a tag-stripping regex hands those through raw into the digest.
+quick-xml = "0.42"
+
+# Panics on malformed input; see the `catch_unwind` in `pdf.rs`.
+pdf-extract = "0.12"
+
+# Every `.txt` in both corpora is in fact UTF-8, so this earns nothing today.
+# It is here because a `.txt` is whatever the sender's machine wrote -- Serbian
+# from an older Windows is CP1251, and Notepad still writes UTF-16 with a BOM --
+# and the alternative to a lossy decode is dropping the file with no
+# explanation.
+encoding_rs = "0.8"
+
+[dev-dependencies]
+serde_json.workspace = true

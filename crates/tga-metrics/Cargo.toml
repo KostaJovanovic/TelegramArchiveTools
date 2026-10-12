@@ -1,0 +1,15 @@
+[package]
+name = "tga-metrics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tga-read = { path = "../tga-read" }
+tga-stats = { path = "../tga-stats" }
+serde_json.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tga-read = { path = "../tga-read" }

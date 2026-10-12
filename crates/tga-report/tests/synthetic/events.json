@@ -1,0 +1,5 @@
+{ "version": 1, "source": "an end-to-end test",
+  "events": [
+    {"id":"start","date":"2025-01-02","title":"Krenulo je","summary":"First day.","kind":"milestone","messages":[1,2],"confidence":"high"},
+    {"id":"broken","title":"no date, must be dropped"}
+  ] }

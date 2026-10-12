@@ -1,0 +1,28 @@
+[package]
+name = "tga-report"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The ramp, the SVG marks, and the one HTML file."
+
+# **No `tga-read` and no `tga-metrics`.** The writer renders from the numbers
+# alone -- a `tga_stats::Stats`, which is exactly what `--stats` dumps -- so a
+# recorded dump replays through it with no export on disk. `tests/golden.rs`
+# and `--from-stats` both rest on that.
+#
+# `tga-stats` is data and derives, so depending on it here costs nothing and
+# reaches nothing: it is the shape both halves agree on, not a third half.
+[dependencies]
+tga-stats = { path = "../tga-stats" }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tga-notes = { path = "../tga-notes" }
+
+[dev-dependencies]
+tga-stats = { path = "../tga-stats" }
+# The golden loads `tests/synthetic/events.json` through the real loader rather
+# than hand-building a `Vec<Event>`, so the annotation layer is covered too and
+# not just the writer.
+serde_json = { workspace = true }
+chrono = { workspace = true }

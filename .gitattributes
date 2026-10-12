@@ -1,0 +1,47 @@
+# Line endings, and some of these are load-bearing.
+#
+# This machine has `core.autocrlf=true`, so without a rule git checks text out
+# with CRLF. For source that is harmless: rustc reads CRLF and LF alike, and the
+# exporter's parity legs have always run against a CRLF working tree. For the
+# files below it is not.
+#
+# **No `* text=auto eol=lf` here, although the analyser had one.** It came over
+# with the analyser in the TelegramTools merge, and applying it repo-wide would
+# have changed the line endings of every exporter file on the next checkout --
+# including the HTML assets `tgx-html` copies into an export -- in a step whose
+# whole point was to change no output byte. The analyser's specific rules carry
+# over instead, and they are the ones that mattered.
+
+# **The analyser's goldens and recorded fixtures are compared byte for byte**,
+# against strings the program builds with `\n`. Checked out with CRLF they differ
+# from the render on every line, and the failure reads as "the report drifted"
+# on a fresh clone that has changed nothing. `-text` disables conversion in both
+# directions, so what is committed is what lands on disk.
+crates/tga-report/tests/golden.html           -text
+crates/tga-report/tests/synthetic/stats.json  -text
+crates/tga-report/tests/synthetic/result.json -text
+crates/tga-report/tests/synthetic/events.json -text
+crates/tga-report/tests/fixture.stats.json    -text
+
+# **The report's stylesheet and script are copied into every report verbatim**,
+# so they are the same case one step earlier: checked out with CRLF, every report
+# differs from the golden on 500 lines and nothing in the source has changed.
+# They are `include_str!`d, which is exactly why they need this.
+crates/tga-report/assets/report.css -text
+crates/tga-report/assets/report.js  -text
+
+# **cmd's `goto` cannot find a label in an LF-only batch file.** It fails with
+# "The system cannot find the batch label specified" partway through a run that
+# has already done its work -- which is how the analyser's `save.bat` first
+# shipped.
+*.bat text eol=crlf
+
+# Never touch the typefaces. A CRLF conversion inside a TTF is a font that no
+# longer parses, and the failure surfaces as a window in the wrong typeface with
+# no error anywhere.
+*.ttf binary
+
+# The icons and the HTML export's images, for the same reason: text detection
+# that guesses wrong on a run of bytes is an image that draws as garbage.
+*.ico binary
+*.png binary

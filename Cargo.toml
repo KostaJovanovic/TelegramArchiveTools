@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    # The exporter.
     "crates/tgx-format",
     "crates/tgx-html",
     "crates/tgx-media",
@@ -9,6 +10,17 @@ members = [
     "crates/tgx-ui",
     "crates/tgx-app",
     "crates/tgx-parity",
+    # The analyser, merged in with its history (TELEGRAMTOOLS.md). It carried a
+    # verbatim copy of `tgx-ui` while it lived in its own repository; that copy
+    # is gone, and `crates/tgx-ui` above is the one both windows build from.
+    "crates/tga-read",
+    "crates/tga-db",
+    "crates/tga-docs",
+    "crates/tga-notes",
+    "crates/tga-stats",
+    "crates/tga-metrics",
+    "crates/tga-report",
+    "crates/tga-app",
 ]
 
 [workspace.package]
@@ -24,6 +36,19 @@ license = "MIT"
 # side of it.
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
+# **`preserve_order` is on, and it is on for the analyser too.** The exporter
+# needs it: Desktop's key order is part of the byte-exact `result.json`. Cargo
+# unifies features across everything built in one invocation, so in this
+# workspace every crate's `serde_json::Map` is an IndexMap that keeps insertion
+# order -- including the analyser's, which used to rely on the default BTreeMap
+# sorting its stats dump.
+#
+# That reliance had already broken once, when the analyser's old toolkit
+# switched the feature on behind its back, and `tga_stats::write` has sorted
+# explicitly ever since. **That explicit sort is now permanently load-bearing**:
+# do not remove it on the grounds that a BTreeMap would do it. The merge was
+# checked by `tools/merge_check.ps1`, which hashes the report, the stats dump
+# and the digest before and after.
 serde_json = { version = "1", features = ["preserve_order"] }
 indexmap = { version = "2", features = ["serde"] }
 anyhow = "1"

@@ -1,0 +1,641 @@
+{
+ "activity": {
+  "active_days": 2,
+  "busiest_day": {
+   "date": "2025-01-02",
+   "messages": 2
+  },
+  "empty": false,
+  "first": "2025-01-02",
+  "hour_weekday": [
+   [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    2,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1
+   ],
+   [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  ],
+  "last": "2025-01-04",
+  "mean_per_active_day": 1.5,
+  "per_day": [
+   [
+    "2025-01-02",
+    2
+   ],
+   [
+    "2025-01-03",
+    0
+   ],
+   [
+    "2025-01-04",
+    1
+   ]
+  ],
+  "per_day_by_person": {
+   "user111": {
+    "2025-01-02": 1,
+    "2025-01-04": 1
+   },
+   "user222": {
+    "2025-01-02": 1
+   }
+  },
+  "per_day_by_topic": {
+   "0": {
+    "2025-01-02": 2,
+    "2025-01-04": 1
+   }
+  },
+  "per_hour": [
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   2,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   1
+  ],
+  "per_month": [
+   [
+    "2025-01",
+    3
+   ]
+  ],
+  "per_weekday": [
+   0,
+   0,
+   0,
+   2,
+   0,
+   1,
+   0
+  ],
+  "quietest": {
+   "days": 1,
+   "from": "2025-01-03",
+   "to": "2025-01-03"
+  },
+  "span_days": 3
+ },
+ "awards": [],
+ "churn": {
+  "active": [
+   2
+  ],
+  "announced_joins": [
+   0
+  ],
+  "announced_leaves": [
+   0
+  ],
+  "events": [],
+  "months": [
+   "2025-01"
+  ],
+  "roster_dated": 0,
+  "roster_joins": [
+   0
+  ],
+  "roster_size": 0
+ },
+ "content": {
+  "domains": [
+   [
+    "example.com",
+    1
+   ]
+  ],
+  "edited": 0,
+  "emoji": [],
+  "emoji_by_person": {},
+  "emoji_total": 0,
+  "forward_sources": [],
+  "forwards": 0,
+  "hashtags": [
+   [
+    "kolab",
+    1
+   ]
+  ],
+  "lengths": [
+   [
+    "no text",
+    1
+   ],
+   [
+    "1-2",
+    0
+   ],
+   [
+    "3-5",
+    2
+   ],
+   [
+    "6-10",
+    0
+   ],
+   [
+    "11-20",
+    0
+   ],
+   [
+    "21-50",
+    0
+   ],
+   [
+    "51-100",
+    0
+   ],
+   [
+    "101+",
+    0
+   ]
+  ],
+  "links_total": 1,
+  "mean_words": 3.0,
+  "media_bytes": 0,
+  "media_kinds": [
+   {
+    "bytes": 0,
+    "kind": "photo",
+    "label": "Photos",
+    "saved": 1,
+    "sent": 1
+   }
+  ],
+  "media_messages": 1,
+  "media_saved": 1,
+  "mentions": [],
+  "messages": 3,
+  "stickers": [],
+  "total_chars": 46,
+  "total_words": 6,
+  "with_text": 2
+ },
+ "conversation": {
+  "edges": [
+   {
+    "count": 1,
+    "from": "user222",
+    "from_name": "Bob",
+    "to": "user111",
+    "to_name": "Ana"
+   }
+  ],
+  "fastest": [],
+  "latency_cap": 86400,
+  "latency_counted": 1,
+  "latency_median": 300,
+  "latency_p90": 300,
+  "orphan_replies": 0,
+  "reaction_edges": [
+   {
+    "count": 1,
+    "from": "user222",
+    "from_name": "Bob",
+    "to": "user111",
+    "to_name": "Ana"
+   }
+  ],
+  "replies": 1,
+  "reply_share": 0.3333333333333333,
+  "self_replies": 0,
+  "session_gap": 1800,
+  "session_longest": {
+   "messages": 2,
+   "minutes": 5.0,
+   "opened_by": "Ana",
+   "start": "2025-01-02 09:15",
+   "topic": 0,
+   "voices": 2
+  },
+  "session_median_messages": 1,
+  "session_median_voices": 1,
+  "sessions": 2,
+  "slowest": [],
+  "starters": [
+   {
+    "count": 2,
+    "key": "user111",
+    "name": "Ana"
+   }
+  ]
+ },
+ "export": {
+  "members_count": null,
+  "messages": 3,
+  "name": "synthetic",
+  "root": "C:\\synthetic",
+  "roster_complete": null,
+  "service_messages": 0,
+  "topics": 1
+ },
+ "graph": {
+  "edges": [
+   {
+    "a": "user111",
+    "b": "user222",
+    "weight": 2
+   }
+  ],
+  "hidden": 0,
+  "nodes": [
+   {
+    "degree": 2,
+    "key": "user111",
+    "messages": 2,
+    "size": 1.0,
+    "x": 1.0,
+    "y": 0.0
+   },
+   {
+    "degree": 2,
+    "key": "user222",
+    "messages": 1,
+    "size": 0.5,
+    "x": 0.0,
+    "y": 0.0
+   }
+  ]
+ },
+ "people": {
+  "known_members": 0,
+  "roster_complete": null,
+  "rows": [
+   {
+    "aliases": [],
+    "avg_words": 1.5,
+    "by_topic": {
+     "0": 2
+    },
+    "chars": 17,
+    "edited": 0,
+    "first": "2025-01-02 09:15",
+    "forwards": 0,
+    "hours": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "joined": null,
+    "key": "user111",
+    "last": "2025-01-04 23:40",
+    "media": 1,
+    "messages": 2,
+    "name": "Ana",
+    "reacted_messages": 1,
+    "reactions_received": 2,
+    "replies": 0,
+    "role": "",
+    "share": 0.6666666666666666,
+    "votes_given": 0,
+    "words": 3
+   },
+   {
+    "aliases": [],
+    "avg_words": 3.0,
+    "by_topic": {
+     "0": 1
+    },
+    "chars": 29,
+    "edited": 0,
+    "first": "2025-01-02 09:20",
+    "forwards": 0,
+    "hours": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "joined": null,
+    "key": "user222",
+    "last": "2025-01-02 09:20",
+    "media": 0,
+    "messages": 1,
+    "name": "Bob",
+    "reacted_messages": 0,
+    "reactions_received": 0,
+    "replies": 1,
+    "role": "",
+    "share": 0.3333333333333333,
+    "votes_given": 1,
+    "words": 3
+   }
+  ],
+  "silent_members": 0,
+  "speakers": 2,
+  "top3_share": 1.0,
+  "total_messages": 3,
+  "votes_anonymous": 1,
+  "votes_named": 1,
+  "votes_total": 2
+ },
+ "renamed": [],
+ "streak": {
+  "days": 1,
+  "ended": "2025-01-04",
+  "name": "Ana"
+ },
+ "superlatives": [
+  {
+   "date": "2025-01-04 23:40",
+   "id": 3,
+   "text": "(photo)",
+   "title": "Most reacted to",
+   "topic": 0,
+   "unit": "reactions",
+   "value": 2,
+   "who": "Ana"
+  },
+  {
+   "date": "2025-01-02 09:15",
+   "id": 1,
+   "text": "prvi dan, krećemo",
+   "title": "Longest message",
+   "topic": 0,
+   "unit": "words",
+   "value": 3,
+   "who": "Ana"
+  },
+  {
+   "date": "2025-01-02 09:15",
+   "id": 1,
+   "text": "prvi dan, krećemo",
+   "title": "Most replied to",
+   "topic": 0,
+   "unit": "replies",
+   "value": 1,
+   "who": "Ana"
+  },
+  {
+   "date": "2025-01-02",
+   "id": null,
+   "text": "",
+   "title": "Busiest day",
+   "topic": null,
+   "unit": "messages",
+   "value": 2,
+   "who": ""
+  },
+  {
+   "date": "2025-01-03 to 2025-01-03",
+   "id": null,
+   "text": "",
+   "title": "Longest silence",
+   "topic": null,
+   "unit": "days",
+   "value": 1,
+   "who": ""
+  }
+ ],
+ "topics": [
+  {
+   "avg_words": 2.0,
+   "first": "2025-01-02",
+   "index": 0,
+   "last": "2025-01-04",
+   "media": 1,
+   "messages": 3,
+   "name": "Scratch Group",
+   "reactions": 2,
+   "replies": 1,
+   "top": "Ana",
+   "voices": 2,
+   "words": 6
+  }
+ ]
+}

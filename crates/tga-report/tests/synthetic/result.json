@@ -1,0 +1,16 @@
+{
+ "name": "Scratch Group",
+ "type": "public_supergroup",
+ "id": 1234567890,
+ "messages": [
+  {"id": 1, "type": "message", "date": "2025-01-02T09:15:00", "date_unixtime": "1735806900",
+   "from": "Ana", "from_id": "user111", "text": "prvi dan, krećemo", "text_entities": [{"type":"plain","text":"prvi dan, krećemo"}]},
+  {"id": 2, "type": "message", "date": "2025-01-02T09:20:00", "date_unixtime": "1735807200",
+   "from": "Bob", "from_id": "user222", "reply_to_message_id": 1,
+   "text": "ok https://example.com #kolab", "text_entities": [{"type":"plain","text":"ok "},{"type":"link","text":"https://example.com"},{"type":"plain","text":" "},{"type":"hashtag","text":"#kolab"}]},
+  {"id": 3, "type": "message", "date": "2025-01-04T23:40:00", "date_unixtime": "1735987200",
+   "from": "Ana", "from_id": "user111", "photo": "photos/x.jpg", "width": 1, "height": 1,
+   "text": "", "text_entities": [],
+   "reactions": [{"type":"emoji","emoji":"👍","count":2,"recent":[{"from":"Bob","from_id":"user222","date":"2025-01-04T23:41:00"}]}]}
+ ]
+}

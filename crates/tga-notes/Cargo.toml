@@ -1,0 +1,17 @@
+[package]
+name = "tga-notes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The hand-written annotation layer, and the digest a model reads."
+
+# **No `tga-read`.** This crate carries the `Event` type that `tga-report`
+# renders, and `tga-report` must not depend on the reader -- that rule is what
+# lets a recorded `stats.json` replay through the writer with no export on
+# disk. So the digest takes a plain [`digest::Row`] and the caller does the
+# mapping from `Export`.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }

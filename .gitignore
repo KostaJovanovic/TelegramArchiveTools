@@ -4,6 +4,10 @@
 # api_hash and a Telegram session key, which is a *bearer credential* — anyone
 # who can read it can act as the account. It must never be committed.
 TelegramExporterData/
+# The same folder under the merged tool's name (TELEGRAMTOOLS.md, phase 2).
+# Listed before anything is ever written there, because this repository is
+# public and the line that matters is the one nobody remembers to add.
+TelegramToolsData/
 Exports/
 
 # The built exe and whatever it writes beside itself. The folder itself is
@@ -20,6 +24,23 @@ Exports/
 # people, and this repository has a CI workflow — that is, a push publishes it.
 # Removing this line commits those messages, and git keeps them for good.
 /reference/
+
+# The analyser's recorded output: whole reports and stats dumps of real
+# archives, written by `save.bat baseline` and `tools/merge_check.ps1` and
+# compared against after every change. Same content as /reference/ and the same
+# rule -- somebody else's conversation, so never in git.
+/baseline/
+
+# Reports and stats dumps written while testing. Each is a self-contained
+# megabyte of somebody else's archive.
+report*.html
+*.stats.json
+
+# ...except the golden's input, the one stats dump that is safe to commit:
+# `crates/tga-report/tests/fixture.stats.json` is hand-written and names nobody.
+# Without this line the rule above swallows it and the golden test fails on a
+# fresh clone with "no fixture" rather than with a diff.
+!crates/tga-report/tests/fixture.stats.json
 
 # Bytecode from the scripts in tools/. Regenerated on every run and specific to
 # one interpreter version, so committing it only ever produces conflicts.

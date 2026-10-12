@@ -1,0 +1,32 @@
+[package]
+name = "tga-db"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "An export that is a SQLite file rather than a folder."
+
+# **Depends on `tga-read` and produces its `Export`.** Nothing here reimplements
+# a message, a header or a roster entry: the database keeps the same JSON the
+# folder export writes, so this crate's whole job is to get that JSON out of a
+# table and hand it to the reader. A second parser would drift from the first,
+# and the two clocks and the thread rule are exactly what it would drift on.
+#
+# Only `tga-app` depends on this, the way only `tga-app` depends on `tga-docs`
+# — it links a C SQLite and nothing else in the tree should pay for that.
+[dependencies]
+tga-read = { path = "../tga-read" }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+
+# `bundled` compiles SQLite into the binary rather than looking for one on the
+# machine. A report is a thing you hand somebody; "install SQLite first" is not
+# part of the deal. The exporter pins `libsql` instead, because grammers
+# already links it there — no such constraint here, and rusqlite is the plainer
+# of the two for reading.
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+# The corpus test runs a real database through the metrics, which is the claim
+# worth proving: an `Export` from SQLite needs no special handling downstream.
+[dev-dependencies]
+tga-metrics = { path = "../tga-metrics" }

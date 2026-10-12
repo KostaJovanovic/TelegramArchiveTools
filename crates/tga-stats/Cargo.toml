@@ -1,0 +1,18 @@
+[package]
+name = "tga-stats"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The shape of everything the analyser computes."
+
+# **Nothing here but data.** This crate exists so that `tga-metrics` and
+# `tga-report` can agree on a shape without either depending on the other --
+# the writer renders from the numbers alone, which is what lets a recorded dump
+# replay through it with no export on disk. Adding a dependency here would put
+# it in both halves of the program at once, so there is one.
+[dependencies]
+serde = { workspace = true }
+# For `write` only -- the dump's own format, which has to be the same file
+# however the program that produced it was built. See the note there.
+serde_json = { workspace = true }
