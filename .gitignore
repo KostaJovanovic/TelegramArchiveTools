@@ -3,16 +3,15 @@
 # Portable by design: all state lives beside the executable. It holds the
 # api_hash and a Telegram session key, which is a *bearer credential* — anyone
 # who can read it can act as the account. It must never be committed.
-TelegramExporterData/
-# The same folder under the merged tool's name (TELEGRAMTOOLS.md, phase 2).
-# Listed before anything is ever written there, because this repository is
-# public and the line that matters is the one nobody remembers to add.
 TelegramToolsData/
+# Its name before the merge. TelegramTools renames it on first launch, but a
+# checkout that has not run since still has one.
+TelegramExporterData/
 Exports/
 
 # The built exe and whatever it writes beside itself. The folder itself is
 # tracked (dist/.gitkeep) so a fresh clone has somewhere to build into; its
-# contents never are — TelegramExporterData\ holds the session key.
+# contents never are — TelegramToolsData\ holds the session key.
 /dist/*
 !/dist/.gitkeep
 
@@ -35,6 +34,8 @@ Exports/
 # megabyte of somebody else's archive.
 report*.html
 *.stats.json
+# A report being written, before it is renamed into place.
+*.html.part
 
 # ...except the golden's input, the one stats dump that is safe to commit:
 # `crates/tga-report/tests/fixture.stats.json` is hand-written and names nobody.

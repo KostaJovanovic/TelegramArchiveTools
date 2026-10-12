@@ -1,6 +1,6 @@
 //! Creating the data directory and restricting it to the current user.
 //!
-//! `TelegramExporterData/` holds a Telegram **session key, which is a bearer
+//! `TelegramToolsData/` holds a Telegram **session key, which is a bearer
 //! credential**: anyone who can read it can act as the account. The ACL is the
 //! only thing standing between that and every other account on the machine,
 //! and it does not exist at all on FAT32 or exFAT.

@@ -20,10 +20,13 @@ mod chats;
 mod chrome;
 mod commands;
 mod events;
+mod library;
 mod queue;
 mod settings;
 mod signin;
 mod viewer;
+
+pub(crate) use chrome::RAIL_WIDTH;
 
 use crate::bridge::{Activity, Bridge, Event};
 use crate::journal::Journal;
@@ -72,14 +75,24 @@ pub enum View {
     /// Read what the databases hold: one chat at a time, deleted and edited
     /// messages marked, every earlier version, a search.
     ///
-    /// **Last, because it is the one view that is not part of making an
-    /// export** — the other three are the sequence, this is what the sequence
-    /// leaves behind. It needs no sign-in and no connection.
+    /// **After the export views, because it is not part of making an
+    /// export** — those are the sequence, this is what the sequence leaves
+    /// behind. It needs no sign-in and no connection.
     Viewer,
+    /// Every export under a folder, and a report for each: what was the
+    /// analyser's whole window. See [`library`].
+    Library,
 }
 
 impl View {
-    pub const ALL: [View; 4] = [View::Chats, View::Settings, View::Queue, View::Viewer];
+    /// In the order the rail lists them.
+    pub const ALL: [View; 5] = [
+        View::Chats,
+        View::Queue,
+        View::Viewer,
+        View::Library,
+        View::Settings,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -87,6 +100,7 @@ impl View {
             View::Settings => "Settings",
             View::Queue => "Queue",
             View::Viewer => "Viewer",
+            View::Library => "Library",
         }
     }
 }
@@ -131,6 +145,9 @@ pub struct Shell {
     selection_name: String,
 
     signed_in: bool,
+    /// Who is signed in, as Telegram names them — the rail's foot says it.
+    /// `None` until a sign-in answers, and after none.
+    account: Option<String>,
     /// Tracked separately from `chats.is_empty()`: the list is empty both
     /// before a sign-in and after one that found nothing, and those two need
     /// opposite instructions.
@@ -248,6 +265,9 @@ pub struct Shell {
     /// The Viewer's state: which database is open, its rows, the selection,
     /// the search. See [`viewer::ViewerState`].
     viewer: viewer::ViewerState,
+    /// The Library's state: its folder, its rows, and the analyser run. See
+    /// [`library::Library`].
+    library: library::Library,
 }
 
 impl Shell {
@@ -284,7 +304,7 @@ impl Shell {
             Ok(b) => b,
             Err(e) => {
                 crate::report_startup_failure(&format!(
-                    "TelegramExporter could not start its background worker: {e}\n\
+                    "TelegramTools could not start its background worker: {e}\n\
                      Nothing that talks to Telegram can run without it. This is \
                      not a graphics problem."
                 ));
@@ -344,6 +364,8 @@ impl Shell {
             frame_no: 0,
             shot_busy_until: 0,
             viewer: Default::default(),
+            library: Default::default(),
+            account: None,
         }
     }
 
@@ -392,6 +414,7 @@ impl Shell {
         // [`shot::chats`] — so the Chats view still has rows to photograph.
         if shot::path().is_some() {
             self.signed_in = true;
+            self.account = Some("Demo Account".into());
             self.apply(crate::bridge::Event::Chats(shot::chats()));
             return;
         }
@@ -560,8 +583,10 @@ fn schedule_from(settings: &Settings, now: std::time::Instant) -> Option<std::ti
 /// `u32`s. Raw because a PNG encoder is a dependency this app has no other use
 /// for; `tools/shot.ps1` turns it into an image.
 ///
-/// `TGX_SHOT_VIEW=chats|settings|queue|viewer` picks which view to draw first,
-/// and `TGX_SHOT_DB=<part of a title>` which database the viewer opens.
+/// `TGX_SHOT_VIEW=chats|settings|queue|viewer|library` picks which view to draw
+/// first, `TGX_SHOT_DB=<part of a title>` which database the viewer opens, and
+/// `TGX_SHOT_LIBRARY=<folder>` which folder the Library lists — never the
+/// real destination, which is other people's chat titles.
 ///
 /// Nothing here runs unless the variable is set, and it is read once.
 mod shot {
@@ -580,6 +605,12 @@ mod shot {
             .ok()
             .filter(|s| !s.is_empty() && path().is_some())
             .map(|s| s.to_lowercase())
+    }
+
+    pub(super) fn library() -> Option<String> {
+        std::env::var("TGX_SHOT_LIBRARY")
+            .ok()
+            .filter(|s| !s.is_empty() && path().is_some())
     }
 
     /// `TGX_SHOT_FIND=<label>`: once the database loads, bring the first
@@ -636,6 +667,7 @@ mod shot {
             "settings" => Some(View::Settings),
             "queue" => Some(View::Queue),
             "viewer" => Some(View::Viewer),
+            "library" => Some(View::Library),
             _ => None,
         }
     }
@@ -697,6 +729,13 @@ impl eframe::App for Shell {
             self.apply(event);
         }
         self.rebuild_rows_if_stale();
+        // The analyser's workers report on their own channels, not the
+        // bridge's; they wake the window the same way. See `library`.
+        self.library.drain();
+        if self.body == View::Library {
+            self.library.open_once(&self.settings.output_dir, ctx);
+            self.library.dropped(ctx);
+        }
         // egui draws nothing on an idle window, so the timer has to ask for the
         // frame it will fire on — otherwise the sync waits for a mouse move.
         if let Some(wait) = self.tick_schedule(std::time::Instant::now()) {
@@ -722,9 +761,18 @@ impl eframe::App for Shell {
         // than behind it. Do not add it back without solving both.
         let bare = egui::Frame::NONE.fill(p.bg);
 
-        // **One bar, because there were two and they read as two menus.** See
-        // [`Shell::top_bar`]: where you are on the left, what to do on the
-        // right, one hairline under the lot.
+        // **The rail first, so it runs the full height of the window.** Where
+        // you are is on the left, from top to bottom, and who you are signed
+        // in as at its foot — see [`Shell::rail`].
+        egui::SidePanel::left("rail")
+            .frame(bare)
+            .exact_width(chrome::RAIL_WIDTH)
+            .resizable(false)
+            .show_separator_line(false)
+            .show(ctx, |ui| self.rail(ui));
+
+        // **One bar: what this view is on the left, what to do on the
+        // right.** See [`Shell::top_bar`].
         //
         // **An exact height, because `Ui::set_height` does not give one.** The
         // bar asked for `NAV_HEIGHT` from the inside and the panel still sized
@@ -734,15 +782,14 @@ impl eframe::App for Shell {
             .frame(bare)
             .exact_height(tgx_ui::tokens::metrics::NAV_HEIGHT)
             .show_separator_line(false)
-            .show(ctx, |ui| self.top_bar(ui));
+            .show(ctx, |ui| self.top_bar(ui, ctx));
 
         egui::TopBottomPanel::bottom("status")
             .frame(bare)
             .show_separator_line(false)
             .show(ctx, |ui| self.status_bar(ui));
 
-        // **One body, full width.** There is no side column any more; see
-        // [`View`] for what four permanent panels cost.
+        // **One body.** See [`View`] for what four permanent panels cost.
         egui::CentralPanel::default()
             .frame(bare)
             .show(ctx, |ui| match self.body {
@@ -750,6 +797,7 @@ impl eframe::App for Shell {
                 View::Settings => self.settings_panel(ui),
                 View::Queue => self.queue_view(ui),
                 View::Viewer => self.viewer_panel(ui),
+                View::Library => self.library.panel(ui, &p),
             });
 
         // Last, so it takes its clicks before anything under it does.
@@ -766,7 +814,8 @@ impl eframe::App for Shell {
                 .values()
                 .chain(self.viewer.userpics.values())
                 .any(|p| matches!(p, bubbles::Pic::Loading | bubbles::Pic::Decoded(_)));
-            if self.viewer.listing || self.viewer.loading || pictures_pending {
+            if self.viewer.listing || self.viewer.loading || pictures_pending || self.library.busy()
+            {
                 self.shot_busy_until = self.frame_no;
             }
             shot::tick(ctx, self.frame_no.saturating_sub(self.shot_busy_until), &to);
@@ -779,6 +828,11 @@ impl eframe::App for Shell {
     /// after.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.cancel.cancel();
+        // The analyser stops between reports, never inside one. Its worker is
+        // not the bridge's and nothing here waits for it — as in the analyser's
+        // own window. A report being written at the moment of quitting is
+        // lost rather than cut short: `refresh::one` renames it into place.
+        self.library.stop();
         self.bridge.shutdown(std::time::Duration::from_secs(10));
         // After the drain, so an Open media still writing is not raced. See
         // `tgx_tg::viewer::temp_dir` for why the copies do not outlive the

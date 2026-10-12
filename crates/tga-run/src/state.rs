@@ -412,9 +412,16 @@ impl State {
             .collect();
         let total: usize = picked.iter().filter_map(|e| e.messages).sum();
         let uncounted = picked.iter().any(|e| e.messages.is_none());
-        tgx_ui::selection_label(picked.len(), total as i64, uncounted)
-            .replace("chat,", "export,")
-            .replace("chats,", "exports,")
+        // The chat list's wording, `tgx_ui::selection_label`, with exports for
+        // chats. Written out rather than called: this crate has no toolkit in
+        // it, and `tgx-ui` is one.
+        let n = picked.len();
+        if n == 0 {
+            return "Nothing selected".into();
+        }
+        let exports = if n == 1 { "export" } else { "exports" };
+        let at_least = if uncounted { "at least " } else { "" };
+        format!("{n} {exports}, {at_least}{} messages", thousands(total))
     }
 
     /// Whether Analyse does anything.
@@ -556,6 +563,19 @@ pub fn finished_status(written: usize, failed: &[String], stopped: bool) -> Stri
         [] => format!("{head}."),
         [first, ..] => format!("{head}; {} failed — {first}", failed.len()),
     }
+}
+
+/// `6,643`.
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// `2.4 GB`. Decimal units, as Explorer's own column is not and as the

@@ -1,18 +1,26 @@
 [package]
-name = "tgx-app"
+name = "tt-app"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "The Telegram exporter."
+description = "TelegramTools: export Telegram chats, and report on what was exported."
 
+# **One executable.** It was three: `TelegramExporter.exe`, the exporter's
+# `tgx.exe` command line, and `TelegramAnalyser.exe`. The argv decides now —
+# none opens the window, `analyse` runs the analyser's command, anything else
+# is one of the exporter's. See `main.rs`.
 [[bin]]
-name = "TelegramExporter"
+name = "TelegramTools"
 path = "src/main.rs"
 
+# Three crates and no further down: the design system, the Telegram side, and
+# the analyser's runner. `layering.rs` holds it there — a window that reached
+# `tga-db` or `grammers-*` directly would be doing a library's work.
 [dependencies]
 tgx-ui = { path = "../tgx-ui" }
 tgx-tg = { path = "../tgx-tg" }
+tga-run = { path = "../tga-run" }
 
 # The window toolkit. See `tgx-ui/Cargo.toml` for why glow and why no default
 # fonts; the two must agree, because this crate hands `tgx-ui` the context it
@@ -28,19 +36,22 @@ eframe = { version = "0.33", default-features = false, features = ["glow"] }
 # SVG, datepicker and syntect extras are all opt-in and none is wanted here.
 egui_extras = { version = "0.33", default-features = false }
 
-# The native folder picker, for "Open output folder" and for choosing where an
-# export goes. Hand-rolling one means reimplementing the sidebar, the recent
-# list and the path box, and getting a worse version of a dialog people already
-# know.
+# The native folder picker, for "Open output folder", for choosing where an
+# export goes, and for pointing the library somewhere else. Hand-rolling one
+# means reimplementing the sidebar, the recent list and the path box, and
+# getting a worse version of a dialog people already know.
 rfd = "0.16"
 
 # The Viewer's pictures: photos, stickers, and the frames of videos and GIFs,
 # decoded out of the database. eframe already links this crate for its window
 # icon, with PNG only; the formats Telegram actually stores are added here —
-# and here rather than in `tgx-tg`, so the `tgx` CLI carries no decoders.
+# and here rather than in `tgx-tg`, so the engine carries no decoders.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+# `signal` is for the command line's Ctrl-C: the JSON is streamed, so tearing
+# the process down mid-write leaves a zero-byte file rather than a partial
+# export.
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "signal"] }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 log = { workspace = true }

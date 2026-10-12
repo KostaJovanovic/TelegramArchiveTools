@@ -68,10 +68,9 @@ jobs:
         if: ${{ hashFiles('reference/MANIFEST.txt') == '' }}
         run: echo "::warning::the parity legs did not run - no corpus on CI (reference/ is gitignored, so json/html/media were skipped)"
 
-      # Both binaries until TELEGRAMTOOLS.md's phase 2 makes them one, from one
-      # build so they always agree.
+      # The one binary: the window, the exporter's commands and `analyse`.
       - name: Release build
-        run: cargo build --locked --release -p tgx-app -p tga-app
+        run: cargo build --locked --release -p tt-app
 
       # Record each size so a sudden jump is visible, the way the
       # Git-Bash-vs-PowerShell OpenSSL discovery was (+2.5 MB from the wrong
@@ -81,7 +80,7 @@ jobs:
       - name: Binary size
         shell: pwsh
         run: |
-          foreach ($name in "TelegramExporter.exe", "TelegramAnalyser.exe") {
+          foreach ($name in @("TelegramTools.exe")) {
             $mb = [math]::Round((Get-Item "target/release/$name").Length / 1MB, 1)
             Write-Host "$name is $mb MB"
             if ($mb -gt 30) {
@@ -93,6 +92,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: TelegramTools
-          path: |
-            target/release/TelegramExporter.exe
-            target/release/TelegramAnalyser.exe
+          path: target/release/TelegramTools.exe

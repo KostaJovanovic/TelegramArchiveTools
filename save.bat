@@ -9,11 +9,11 @@ rem TelegramTools: the exporter and the analyser, one repository since the merge
 rem recorded in TELEGRAMTOOLS.md. Only used when the checkout has no origin.
 set REPO=https://github.com/KostaJovanovic/TelegramTools.git
 
-rem Two binaries until phase 2 of the merge makes them one. Both come out of
-rem one `cargo build --release`, so dist\ cannot hold one from Tuesday and the
-rem other from Friday.
-set EXENAME=TelegramExporter.exe
-set ANALYSER=TelegramAnalyser.exe
+rem One binary: the window with no arguments, the exporter's commands and
+rem `analyse` behind its argv. The two it replaced are listed so `build` can
+rem stop a copy of either still running out of dist\ and take it out of there.
+set EXENAME=TelegramTools.exe
+set "OLDEXES=TelegramExporter.exe TelegramAnalyser.exe"
 
 rem The one check that cannot be faked: a real Telegram Desktop export of the
 rem same chat, replayed through our writers and diffed line for line. It lives
@@ -124,7 +124,7 @@ echo   10 wire     diff a live export against the reference run
 echo   11 baseline the analyser's reports against the last recording
 echo   12 bless    re-record the analyser's committed golden
 echo   13 report   write report.html beside an export
-echo   14 run      the analyser's window
+echo   14 run      the window, from source
 echo   15 clean    report the build cache, and empty it
 echo   16 quit
 echo.
@@ -337,14 +337,14 @@ rem A running instance holds both the linker output and its dist\ copy open,
 rem so the build fails and then the copy does. Killing it first is not optional.
 rem taskkill exits non-zero when nothing was running, which is the normal case.
 echo [exe]  stop any running instance
-taskkill /F /IM %EXENAME% >nul 2>&1
-if errorlevel 1 (echo        %EXENAME% none running) else (echo        %EXENAME% stopped)
-taskkill /F /IM %ANALYSER% >nul 2>&1
-if errorlevel 1 (echo        %ANALYSER% none running) else (echo        %ANALYSER% stopped)
+for %%e in (%EXENAME% %OLDEXES%) do (
+  taskkill /F /IM %%e >nul 2>&1
+  if errorlevel 1 (echo        %%e none running) else (echo        %%e stopped)
+)
 
 echo [exe]  cargo build --release
 call :clock TS
-cargo build --release -p tgx-app -p tga-app
+cargo build --release -p tt-app
 if errorlevel 1 (
   echo.
   echo [err]  build failed
@@ -354,28 +354,32 @@ if errorlevel 1 (
 call :since TS "release build"
 
 rem The exe ships from dist\, not from target\. cargo clean empties target,
-rem and the exporter keeps its state beside its own executable -- so an exe
-rem living in a build directory would take TelegramExporterData\ and Exports\
+rem and the app keeps its state beside its own executable -- so an exe
+rem living in a build directory would take TelegramToolsData\ and Exports\
 rem down with it. dist\ is a folder you can copy anywhere and it still works.
 if not exist "dist" mkdir dist
-for %%e in (%EXENAME% %ANALYSER%) do (
-  if not exist "target\release\%%e" (
-    echo [err]  build reported success but target\release\%%e is missing
-    set SAVE_ERROR=1
-    goto end
-  )
-  copy /y "target\release\%%e" "dist\%%e" >nul
-  if errorlevel 1 (
-    echo [err]  could not copy %%e into dist\ - is it still running?
-    set SAVE_ERROR=1
-    goto end
+if not exist "target\release\%EXENAME%" (
+  echo [err]  build reported success but target\release\%EXENAME% is missing
+  set SAVE_ERROR=1
+  goto end
+)
+copy /y "target\release\%EXENAME%" "dist\%EXENAME%" >nul
+if errorlevel 1 (
+  echo [err]  could not copy %EXENAME% into dist\ - is it still running?
+  set SAVE_ERROR=1
+  goto end
+)
+rem The exes it replaced. Left beside it they would still start -- and the old
+rem exporter would make a fresh TelegramExporterData\ and ask to sign in again,
+rem since TelegramTools renames that folder on first launch.
+for %%e in (%OLDEXES%) do (
+  if exist "dist\%%e" (
+    del /q "dist\%%e" && echo [ok]   dist\%%e removed, replaced by %EXENAME%
   )
 )
 
 echo.
-for %%e in (%EXENAME% %ANALYSER%) do (
-  for /f %%s in ('powershell -NoProfile -Command "'{0:N1}' -f ((Get-Item 'dist\%%e').Length/1MB)"') do echo [ok]   dist\%%e  %%s MB
-)
+for /f %%s in ('powershell -NoProfile -Command "'{0:N1}' -f ((Get-Item 'dist\%EXENAME%').Length/1MB)"') do echo [ok]   dist\%EXENAME%  %%s MB
 
 rem The cache, reported where somebody will actually read it. target\ reached
 rem 45 GB without a single line of this script ever mentioning it, and cargo
@@ -521,7 +525,7 @@ goto end
 echo === baseline: record what the report looks like now ===
 call :checkcargo
 if errorlevel 1 goto end
-cargo build -q --release -p tga-app
+cargo build -q --release -p tt-app
 if errorlevel 1 (set SAVE_ERROR=1 & goto end)
 if not exist "baseline" mkdir "baseline"
 rem Three legs, not two. Neither export has an events file beside it, so the
@@ -566,7 +570,7 @@ echo.
 call :checkcargo
 if errorlevel 1 goto end
 call :clock TS
-cargo run -q --release -p tga-app --bin TelegramAnalyser -- "%FOLDER%" --quiet
+cargo run -q --release -p tt-app -- analyse "%FOLDER%" --quiet
 if errorlevel 1 set SAVE_ERROR=1
 call :since TS "report"
 goto end
@@ -575,15 +579,15 @@ goto end
 rem ---------------------------------------------------------------------------
 :runwindow
 echo.
-echo === run: the analyser's window ===
+echo === run: the window ===
 echo.
 rem **`cargo run`, not `start dist\...`.** `start` inside a batch that has its
 rem output redirected does not detach -- cmd holds on and the action never
 rem returns, so `save.bat run` would hang the terminal while looking like it had
-rem detached. To run what `build` shipped, run it: `dist\TelegramAnalyser.exe`.
+rem detached. To run what `build` shipped, run it: `dist\TelegramTools.exe`.
 call :checkcargo
 if errorlevel 1 goto end
-cargo run -p tga-app --bin TelegramAnalyser
+cargo run -p tt-app
 if errorlevel 1 set SAVE_ERROR=1
 goto end
 
@@ -843,7 +847,7 @@ if not exist "baseline\*.report.html" (
 )
 echo.
 echo [chk]  analyser baseline
-cargo build -q --release -p tga-app
+cargo build -q --release -p tt-app
 if errorlevel 1 exit /b 1
 call :onebase "ua-kolab" "%REFEXPORT%"
 call :onebase "krgm" "%KRGMEXPORT%"
@@ -865,7 +869,7 @@ echo [rec]  %~1
 set "NOTESARG="
 if not "%~3"=="" set NOTESARG=--notes "%~3"
 call :clock TS
-target\release\%ANALYSER% "%~2" --quiet --stamp "1 January 2000" !NOTESARG! --out "baseline\%~1.report.html" --stats "baseline\%~1.stats.json"
+target\release\%EXENAME% analyse "%~2" --quiet --stamp "1 January 2000" !NOTESARG! --out "baseline\%~1.report.html" --stats "baseline\%~1.stats.json"
 if errorlevel 1 (set SAVE_ERROR=1 & exit /b 1)
 call :since TS "%~1"
 exit /b 0
@@ -882,7 +886,7 @@ if not exist "baseline\%~1.report.html" (
 set "NOTESARG="
 if not "%~3"=="" set NOTESARG=--notes "%~3"
 call :clock TS
-target\release\%ANALYSER% "%~2" --quiet --stamp "1 January 2000" !NOTESARG! --out "baseline\_now-%~1.report.html" --stats "baseline\_now-%~1.stats.json"
+target\release\%EXENAME% analyse "%~2" --quiet --stamp "1 January 2000" !NOTESARG! --out "baseline\_now-%~1.report.html" --stats "baseline\_now-%~1.stats.json"
 if errorlevel 1 (set "BASE_FAILED=1" & exit /b 1)
 call :samebytes "baseline\%~1.report.html" "baseline\_now-%~1.report.html" "%~1 report"
 call :samebytes "baseline\%~1.stats.json"  "baseline\_now-%~1.stats.json"  "%~1 stats "

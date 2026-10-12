@@ -130,7 +130,7 @@ pub async fn examine(dir: &Path) -> std::io::Result<Vec<Finding>> {
                 path: path.clone(),
                 what: format!(
                     "holds {} chats — from before one database per chat; no run writes into \
-                     it. Split it with: tgx split \"{}\"",
+                     it. Split it with: TelegramTools split \"{}\"",
                     chats.len(),
                     path.display()
                 ),

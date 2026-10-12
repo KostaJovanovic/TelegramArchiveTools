@@ -11,10 +11,13 @@
 //! or a malformed export becomes a [`Progress::Failed`] on screen rather than a
 //! panic that takes the thread with no message at all.
 //!
-//! The one thing it does hold is a clone of the egui context, and only to call
-//! `request_repaint`. An `mpsc::Receiver` can only be *polled*, so without that
-//! call nothing appears until some unrelated input causes a frame -- which the
-//! user experiences as having to move the mouse to make the app work.
+//! The one thing it does hold is a [`Wake`]: the window's "draw a frame",
+//! called after every send. An `mpsc::Receiver` can only be *polled*, so
+//! without that call nothing appears until some unrelated input causes a frame
+//! -- which the user experiences as having to move the mouse to make the app
+//! work. It used to be a clone of the egui context itself; it is a callback
+//! now so this crate has no toolkit in it, and the window passes
+//! `move || ctx.request_repaint()`.
 //!
 //! **A run is a queue of library rows**, one export after another. One that
 //! fails is reported against its own row and the rest carry on: forty chats
@@ -83,11 +86,14 @@ impl Run {
     }
 }
 
+/// What wakes the window after a send: `request_repaint`, in the app.
+pub type Wake = Arc<dyn Fn() + Send + Sync>;
+
 /// Start a run. The receiver is drained by the window on the next frame.
-pub fn spawn(request: Request, ctx: eframe::egui::Context) -> Run {
+pub fn spawn(request: Request, wake: Wake) -> Run {
     let (tx, rx) = channel();
     let stop = Arc::new(AtomicBool::new(false));
-    let tx = Waking { tx, ctx };
+    let tx = Waking { tx, wake };
     let flag = stop.clone();
     std::thread::Builder::new()
         .name("tga-analyse".into())
@@ -106,7 +112,7 @@ pub fn spawn(request: Request, ctx: eframe::egui::Context) -> Run {
 /// is a frame behind for the rest of the run.
 struct Waking<T> {
     tx: Sender<T>,
-    ctx: eframe::egui::Context,
+    wake: Wake,
 }
 
 impl<T> Waking<T> {
@@ -115,7 +121,7 @@ impl<T> Waking<T> {
     /// written.
     fn send(&self, event: T) {
         let _ = self.tx.send(event);
-        self.ctx.request_repaint();
+        (self.wake)();
     }
 }
 
@@ -188,13 +194,9 @@ pub struct Counted {
 ///
 /// A folder export is not counted: that means parsing every `result.json`,
 /// which is the run itself.
-pub fn count(
-    sources: Vec<Source>,
-    generation: u64,
-    ctx: eframe::egui::Context,
-) -> Receiver<Counted> {
+pub fn count(sources: Vec<Source>, generation: u64, wake: Wake) -> Receiver<Counted> {
     let (tx, rx) = channel();
-    let tx = Waking { tx, ctx };
+    let tx = Waking { tx, wake };
     std::thread::Builder::new()
         .name("tga-count".into())
         .spawn(move || {
@@ -259,7 +261,7 @@ mod tests {
         let _ = std::fs::remove_file(&out);
 
         let (tx, rx) = channel();
-        let ctx = eframe::egui::Context::default();
+        let wake: Wake = Arc::new(|| {});
         run(
             Request {
                 targets: vec![target(&dir)],
@@ -268,7 +270,7 @@ mod tests {
                 handles_only: false,
             },
             &AtomicBool::new(false),
-            Waking { tx, ctx },
+            Waking { tx, wake },
         );
 
         let seen: Vec<Progress> = rx.try_iter().collect();
@@ -303,7 +305,7 @@ mod tests {
             &AtomicBool::new(true),
             Waking {
                 tx,
-                ctx: eframe::egui::Context::default(),
+                wake: Arc::new(|| {}),
             },
         );
         let seen: Vec<Progress> = rx.try_iter().collect();

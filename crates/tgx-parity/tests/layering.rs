@@ -110,53 +110,68 @@ fn tgx_archive_does_not_depend_on_tgx_tg() {
     );
 }
 
-/// `tgx-app` is the window. It reaches Telegram only through `tgx-tg`, which
+/// `tt-app` is the window. It reaches Telegram only through `tgx-tg`, which
 /// owns the client, the engine and every typed error the UI is allowed to see.
 /// A direct `grammers-*` dependency lets a wire type reach the widgets, and the
-/// seam that keeps GPUI on the main thread and tokio on its own stops being the
+/// seam that keeps egui on the main thread and tokio on its own stops being the
 /// only way across.
 ///
-/// This assertion was missing while `tgx-app/Cargo.toml` carried an unused
+/// This assertion was missing while the window's manifest carried an unused
 /// `grammers-client`, so the manifest and CLAUDE.md disagreed and the test that
 /// exists to catch exactly that did not look.
 #[test]
-fn tgx_app_does_not_depend_on_grammers() {
-    let names = dependency_names(&manifest("tgx-app"));
+fn tt_app_does_not_depend_on_grammers() {
+    let names = dependency_names(&manifest("tt-app"));
     let offenders: Vec<&String> = names.iter().filter(|n| n.starts_with("grammers")).collect();
     assert!(
         offenders.is_empty(),
-        "tgx-app/Cargo.toml depends on {offenders:?} — the window must reach Telegram only \
+        "tt-app/Cargo.toml depends on {offenders:?} — the window must reach Telegram only \
          through tgx-tg, which owns the client and the typed errors the UI may see. A direct \
          grammers-* dependency lets a wire type reach the widgets. See CLAUDE.md's \
          Architecture section."
     );
 }
 
-/// CLAUDE.md says "tgx-app: the window. Depends only on tgx-ui + tgx-tg", and
-/// until this test existed that was a sentence rather than a rule.
+/// CLAUDE.md says "tt-app: the window. Depends only on tgx-ui, tgx-tg and
+/// tga-run", and this is what makes that a rule rather than a sentence.
 ///
 /// It is worth a check of its own because the pressure to break it is real and
 /// looks harmless every time: the window needs one constant or one type from a
 /// lower crate — the database file name, say — and adding the path dependency
 /// is a one-line change that compiles. Then the window knows about the store's
 /// vocabulary, and the seam that keeps every Telegram and storage concern
-/// behind `tgx-tg` has a second hole in it. Whatever the window needs, `tgx-tg`
-/// re-exports or does on its behalf.
+/// behind `tgx-tg` — and every analysis concern behind `tga-run` — has a second
+/// hole in it. Whatever the window needs, one of the three re-exports or does
+/// on its behalf.
 #[test]
-fn tgx_app_depends_only_on_tgx_ui_and_tgx_tg() {
-    let names = dependency_names(&manifest("tgx-app"));
-    let ours: Vec<&String> = names.iter().filter(|n| n.starts_with("tgx-")).collect();
-    let strays: Vec<&&String> = ours
+fn tt_app_depends_only_on_tgx_ui_tgx_tg_and_tga_run() {
+    let names = dependency_names(&manifest("tt-app"));
+    let strays: Vec<&String> = names
         .iter()
-        .filter(|n| n.as_str() != "tgx-ui" && n.as_str() != "tgx-tg")
+        .filter(|n| n.starts_with("tgx-") || n.starts_with("tga-") || n.starts_with("tt-"))
+        .filter(|n| !["tgx-ui", "tgx-tg", "tga-run"].contains(&n.as_str()))
         .collect();
     assert!(
         strays.is_empty(),
-        "tgx-app/Cargo.toml depends on {strays:?} — the window may name only tgx-ui and \
-         tgx-tg. Anything it needs from a lower crate comes through tgx-tg, which owns the \
-         client, the engine, the store and every typed error the UI is allowed to see. \
+        "tt-app/Cargo.toml depends on {strays:?} — the window may name only tgx-ui, tgx-tg \
+         and tga-run. Anything it needs from a lower crate comes through one of them. \
          See CLAUDE.md's Architecture section."
     );
+}
+
+/// **`tga-run` has no toolkit in it**, which is what lets the command line and
+/// the window drive the same code and lets its tests run with no window. The
+/// design system is a toolkit: `tgx-ui` installs into an egui context.
+#[test]
+fn tga_run_has_no_window_in_it() {
+    let names = dependency_names(&manifest("tga-run"));
+    for banned in ["tgx-ui", "eframe", "egui", "rfd"] {
+        assert!(
+            !names.iter().any(|n| n == banned),
+            "tga-run/Cargo.toml depends on {banned} — the analyser's runner is driven by an \
+             argv and by the window alike, and must work with neither on screen."
+        );
+    }
 }
 
 // -- the analyser's rules ------------------------------------------------------
@@ -190,7 +205,7 @@ fn no_analyser_crate_reaches_telegram() {
     for name in analyser {
         let offenders: Vec<String> = dependency_names(&manifest(&name))
             .into_iter()
-            .filter(|n| n.starts_with("grammers") || n == "tgx-tg" || n == "tgx-app")
+            .filter(|n| n.starts_with("grammers") || n == "tgx-tg" || n == "tt-app")
             .collect();
         assert!(
             offenders.is_empty(),
@@ -255,18 +270,18 @@ fn tga_notes_depends_on_neither_the_reader_nor_the_documents() {
 /// `tga-docs` links a zip reader, an XML parser and a PDF parser that panics
 /// on bad input, and `tga-db` links the store. Neither belongs anywhere near
 /// the report, so the one crate that drives a run is the only one that may
-/// reach them.
+/// reach them. That crate is `tga-run`; the window goes through it.
 #[test]
-fn only_the_analysers_front_end_reaches_documents_and_databases() {
+fn only_the_analysers_runner_reaches_documents_and_databases() {
     for name in crates("") {
-        if name == "tga-app" || name == "tga-db" {
+        if name == "tga-run" || name == "tga-db" {
             continue;
         }
         let names = dependency_names(&manifest(&name));
         for heavy in ["tga-docs", "tga-db"] {
             assert!(
                 !names.iter().any(|n| n == heavy),
-                "{name}/Cargo.toml depends on {heavy} — only tga-app may. See CLAUDE.md's \
+                "{name}/Cargo.toml depends on {heavy} — only tga-run may. See CLAUDE.md's \
                  Architecture section."
             );
         }

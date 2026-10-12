@@ -1,16 +1,21 @@
-//! A command-line exporter.
+//! The exporter's commands: `TelegramTools login|chats|export|…`.
 //!
-//! The GUI is the product, but this exists for a specific reason: it is the
+//! The window is the product, but this exists for a specific reason: it is the
 //! only way to exercise the engine against a real account without a window, and
 //! `convert.rs` is the one module in the pipeline no parity harness can verify.
 //! Everything downstream of the wire is pinned byte for byte; this is how the
 //! wire itself gets tested.
 //!
 //! ```text
-//! tgx login
-//! tgx chats
-//! tgx export "UA KOLAB TELEGRAM"
+//! TelegramTools login
+//! TelegramTools chats
+//! TelegramTools export "UA KOLAB TELEGRAM"
 //! ```
+//!
+//! **This was its own binary, `tgx.exe`**, built from `tgx-tg`. It is the same
+//! code behind the one executable's argv now; `main` hands it everything that
+//! is not `analyse`. What changed is only that it no longer owns `main`: the
+//! runtime is built here, and the log was already opened by the caller.
 
 use anyhow::{anyhow, Result};
 use std::io::Write;
@@ -20,18 +25,17 @@ use tgx_tg::config::Settings;
 use tgx_tg::dialogs;
 use tgx_tg::engine::{ChatExporter, Progress};
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // The same file the window writes, for the same reason: this binary exists
-    // to exercise the wire, and the wire is the one part of the pipeline with
-    // no parity leg over it. `RUST_LOG=debug` here is the closest thing to a
-    // trace of what Telegram actually sent.
-    if let Err(e) = tgx_tg::logging::init() {
-        eprintln!("could not open the log: {e}");
-    }
+/// Run one exporter command. `args` is argv with the program name dropped.
+pub fn run(args: Vec<String>) -> Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(command(args))
+}
 
+async fn command(args: Vec<String>) -> Result<()> {
     // The same check `actions::report_data_dir_protection` makes for the window.
-    // `tgx login` writes a bearer credential into this folder, and this is the
+    // `login` writes a bearer credential into this folder, and this is the
     // surface most likely to be run from a stick or a shared machine — the two
     // places the ACL is most likely to have failed. Saying nothing here left the
     // GUI as the only thing that ever mentioned it.
@@ -44,7 +48,6 @@ async fn main() -> Result<()> {
         );
     }
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("help");
 
     let mut settings = Settings::load();
@@ -69,7 +72,7 @@ async fn main() -> Result<()> {
         "chats" => chats(&settings).await,
         "export" => {
             // The flags are read off the whole tail rather than positionally,
-            // so `tgx export --db "Dev Team"` and `tgx export "Dev Team" --db`
+            // so `export --db "Dev Team"` and `export "Dev Team" --db`
             // both work. A title starting with `--` is not a thing this tool
             // has to support.
             let flags: Vec<&str> = args
@@ -95,7 +98,9 @@ async fn main() -> Result<()> {
                 .map(String::as_str)
                 .map(str::trim)
                 .find(|w| !w.is_empty() && !w.starts_with("--"))
-                .ok_or_else(|| anyhow!("usage: tgx export [--db] [--full] <chat title>"))?;
+                .ok_or_else(|| {
+                    anyhow!("usage: TelegramToolsexport [--db] [--full] <chat title>")
+                })?;
             export(&settings, want).await
         }
         "compare" => {
@@ -127,7 +132,7 @@ async fn main() -> Result<()> {
             }
             if roots.is_empty() {
                 return Err(anyhow!(
-                    "usage: tgx compare <export folder>... [--db <folder>] [--csv <file>]"
+                    "usage: TelegramToolscompare <export folder>... [--db <folder>] [--csv <file>]"
                 ));
             }
             compare(&roots, &db, csv.as_deref()).await
@@ -179,7 +184,7 @@ async fn main() -> Result<()> {
                 }
             }
             let file = file.ok_or_else(|| {
-                anyhow!("usage: tgx split <file.sqlite> [--into <folder>] [--dry-run]")
+                anyhow!("usage: TelegramToolssplit <file.sqlite> [--into <folder>] [--dry-run]")
             })?;
             // Beside the file by default: that is where its chats' databases
             // already are, when there are any.
@@ -219,7 +224,7 @@ async fn main() -> Result<()> {
                 [dir, text] => (std::path::PathBuf::from(dir), text.clone()),
                 _ => {
                     return Err(anyhow!(
-                        "usage: tgx search [<folder>] <text> [--limit N] — quote text with spaces"
+                        "usage: TelegramToolssearch [<folder>] <text> [--limit N] — quote text with spaces"
                     ))
                 }
             };
@@ -243,7 +248,9 @@ async fn main() -> Result<()> {
                 }
             }
             let [db, out] = <[_; 2]>::try_from(paths).map_err(|_| {
-                anyhow!("usage: tgx unpack <file.sqlite> <out folder> [--no-html] [--no-json]")
+                anyhow!(
+                    "usage: TelegramToolsunpack <file.sqlite> <out folder> [--no-html] [--no-json]"
+                )
             })?;
             unpack(&db, &out, &settings).await
         }
@@ -269,7 +276,7 @@ async fn main() -> Result<()> {
             }
             if roots.is_empty() {
                 return Err(anyhow!(
-                    "usage: tgx import <export folder>... [--db <folder>] [--dry-run]"
+                    "usage: TelegramToolsimport <export folder>... [--db <folder>] [--dry-run]"
                 ));
             }
             import(&roots, &db, dry_run).await
@@ -281,7 +288,7 @@ async fn main() -> Result<()> {
     }
 }
 
-/// `tgx doctor`: what is wrong with an export folder, and with `--fix`, put
+/// `doctor`: what is wrong with an export folder, and with `--fix`, put
 /// right what can be.
 async fn doctor(dir: &std::path::Path, fix: bool) -> Result<()> {
     let found = tgx_tg::doctor::examine(dir).await?;
@@ -300,7 +307,7 @@ async fn doctor(dir: &std::path::Path, fix: bool) -> Result<()> {
     Ok(())
 }
 
-/// `tgx search`: every message in the folder's databases that says `needle`.
+/// `search`: every message in the folder's databases that says `needle`.
 ///
 /// **The one command here that prints message text**, because finding it is
 /// what was asked for — to this terminal only. Nothing of it goes to
@@ -377,7 +384,7 @@ fn excerpt(text: &str, needle: &str) -> String {
     out
 }
 
-/// `tgx doctor --dupes`: media stored more than once under `dir`, the
+/// `doctor --dupes`: media stored more than once under `dir`, the
 /// largest waste first. Changes nothing.
 async fn doctor_dupes(dir: &std::path::Path) -> Result<()> {
     let report = tgx_tg::doctor::duplicates(dir).await?;
@@ -388,7 +395,7 @@ async fn doctor_dupes(dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// `tgx split`: one database per chat out of a file holding several.
+/// `split`: one database per chat out of a file holding several.
 async fn split(file: &std::path::Path, into: &std::path::Path, dry_run: bool) -> Result<()> {
     if dry_run {
         for p in tgx_tg::split::plan(file, into).await? {
@@ -433,7 +440,7 @@ async fn split(file: &std::path::Path, into: &std::path::Path, dry_run: bool) ->
     Ok(())
 }
 
-/// `tgx unpack`: a database back out as a Classic folder, offline.
+/// `unpack`: a database back out as a Classic folder, offline.
 ///
 /// Counts only, like `compare`: what was written is in the folder.
 async fn unpack(db: &std::path::Path, out: &std::path::Path, settings: &Settings) -> Result<()> {
@@ -462,7 +469,7 @@ async fn unpack(db: &std::path::Path, out: &std::path::Path, settings: &Settings
     Ok(())
 }
 
-/// `tgx import`: copy what only old exports hold into the databases.
+/// `import`: copy what only old exports hold into the databases.
 ///
 /// Prints ids and counts only, like `compare`.
 async fn import(roots: &[std::path::PathBuf], db: &std::path::Path, dry_run: bool) -> Result<()> {
@@ -509,7 +516,7 @@ async fn import(roots: &[std::path::PathBuf], db: &std::path::Path, dry_run: boo
     Ok(())
 }
 
-/// `tgx compare`: what old exports hold that the databases do not.
+/// `compare`: what old exports hold that the databases do not.
 ///
 /// Offline, and it prints ids and dates only — see `tgx_tg::compare`.
 async fn compare(
@@ -682,39 +689,46 @@ async fn compare(
     Ok(())
 }
 
-const USAGE: &str = "\
-tgx — Telegram Desktop-format exporter
+pub const USAGE: &str = "\
+TelegramTools -- export Telegram chats, and report on what was exported
 
-  tgx login            sign in (once; the session is saved)
-  tgx chats            list every chat this account can see
-  tgx export <title>   export the chat whose title matches
-  tgx compare <export folder>... [--db <folder>] [--csv <file>]
+  With no arguments the window opens. From cmd.exe, run an interactive
+  command (login) as `start /wait TelegramTools login`: the exe is a window
+  program, and cmd does not wait for one unless told to.
+
+  TelegramTools login            sign in (once; the session is saved)
+  TelegramTools chats            list every chat this account can see
+  TelegramTools export <title>   export the chat whose title matches
+  TelegramTools analyse <export> [options]
+                       offline: write a report on an export or a database;
+                       `TelegramTools analyse --help` for its options
+  TelegramTools compare <export folder>... [--db <folder>] [--csv <file>]
                        offline: list messages old Desktop-format exports hold
                        that the databases do not (ids and dates only); an
                        HTML-only export is matched to a database by chat name
-  tgx doctor [<folder>] [--fix]
+  TelegramTools doctor [<folder>] [--fix]
                        offline: what is wrong with an export folder — misplaced
                        or misnamed databases, leftovers of runs that did not
                        finish; --fix moves and deletes only those leftovers
-  tgx doctor [<folder>] --dupes
+  TelegramTools doctor [<folder>] --dupes
                        offline: media held more than once across the databases
                        and Classic export folders, largest waste first;
                        reports only, deletes nothing
-  tgx split <file.sqlite> [--into <folder>] [--dry-run]
+  TelegramTools split <file.sqlite> [--into <folder>] [--dry-run]
                        offline: one database per chat out of an older file
                        holding several; merges into an existing one (whose
                        contents win) and renames the original to .split
-  tgx import <export folder>... [--db <folder>] [--dry-run]
+  TelegramTools import <export folder>... [--db <folder>] [--dry-run]
                        offline: copy those messages into the databases, marked
                        deleted and recovered (only into a database that has
                        finished a sync)
-  tgx search [<folder>] <text> [--limit N]
+  TelegramTools search [<folder>] <text> [--limit N]
                        offline: every message in the folder's databases whose
                        text contains <text>, any case — earlier versions and
                        deleted messages included, and flagged; N per chat
                        (default 50). Prints the matching text here, never to
                        the log
-  tgx unpack <file.sqlite> <out folder> [--no-html] [--no-json]
+  TelegramTools unpack <file.sqlite> <out folder> [--no-html] [--no-json]
                        offline: write a database back out as the Classic folder
                        a run would have made — one per topic for a forum,
                        deleted messages included, media from the database
@@ -726,7 +740,7 @@ tgx — Telegram Desktop-format exporter
               window — needed for older deletions and for files an earlier
               run skipped
 
-Credentials come from TelegramExporterData/settings.json, or from the
+Credentials come from TelegramToolsData/settings.json, or from the
 TG_API_ID and TG_API_HASH environment variables.";
 
 fn prompt(label: &str) -> Result<String> {
@@ -824,7 +838,7 @@ async fn login(settings: &Settings) -> Result<()> {
 async fn connected(settings: &Settings) -> Result<Session> {
     let session = Session::connect(settings).await?;
     if !session.is_authorized().await? {
-        return Err(anyhow!("not signed in — run `tgx login` first"));
+        return Err(anyhow!("not signed in — run `TelegramTools login` first"));
     }
     Ok(session)
 }
@@ -870,7 +884,7 @@ async fn export(settings: &Settings, want: &str) -> Result<()> {
 
     // Exact title first, substring second. The empty string is rejected in
     // `main` rather than here, because `"".contains` is true of every title:
-    // `tgx export ""` would have exported whichever chat the dialog list
+    // `export ""` would have exported whichever chat the dialog list
     // happened to return first, and then said it was exporting it — which is
     // not a usage error the user can see, it is the wrong chat done confidently.
     let needle = want.to_lowercase();

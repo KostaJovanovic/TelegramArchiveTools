@@ -190,7 +190,7 @@ pub struct Written {
 /// it.
 ///
 /// The same steps a single run takes, in the same order, so a refreshed report
-/// is byte for byte the one `TelegramAnalyser <folder>` would have written.
+/// is byte for byte the one `TelegramTools analyse <folder>` would have written.
 ///
 /// `handles` is `--handles`: every name becomes an `@handle` before anything
 /// is counted, digest included. See `tga_read::Export::handles_only`.
@@ -221,7 +221,14 @@ pub fn one(
         &notes,
         options,
     );
-    std::fs::write(&target.out, html)
+    // **Written beside, then renamed over.** A report is judged up to date by
+    // its modification time, so one cut short — the window closed mid-write,
+    // which does not wait for this thread — would otherwise read as current
+    // forever. A rename is all or nothing; a half-written `.part` is not a
+    // report and is never listed as one.
+    let part = target.out.with_extension("html.part");
+    std::fs::write(&part, html)
+        .and_then(|()| std::fs::rename(&part, &target.out))
         .map_err(|e| anyhow::anyhow!("{}: {e}", target.out.display()))?;
 
     let mut warning = None;

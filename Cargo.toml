@@ -8,11 +8,10 @@ members = [
     "crates/tgx-archive",
     "crates/tgx-tg",
     "crates/tgx-ui",
-    "crates/tgx-app",
     "crates/tgx-parity",
     # The analyser, merged in with its history (TELEGRAMTOOLS.md). It carried a
     # verbatim copy of `tgx-ui` while it lived in its own repository; that copy
-    # is gone, and `crates/tgx-ui` above is the one both windows build from.
+    # is gone, and `crates/tgx-ui` above is the one the window builds from.
     "crates/tga-read",
     "crates/tga-db",
     "crates/tga-docs",
@@ -20,7 +19,10 @@ members = [
     "crates/tga-stats",
     "crates/tga-metrics",
     "crates/tga-report",
-    "crates/tga-app",
+    "crates/tga-run",
+    # The one executable, TelegramTools.exe: both windows' views, and both
+    # command lines behind its argv.
+    "crates/tt-app",
 ]
 
 [workspace.package]
@@ -70,6 +72,12 @@ strip = true
 # Record the binary size so a sudden jump is visible, the way the
 # Git-Bash-vs-PowerShell OpenSSL discovery was (+2.5 MB from the wrong build
 # shell).
+#
+# **18.3 MB on 2026-10-12**, for `TelegramTools.exe`: the exporter's window
+# (12.4 MB), its command line, and the whole analyser (10.6 MB on its own) in
+# one file. The two shared egui, libsql and the fonts, which is why the sum is
+# not 23. There is no window-free build any more: the `tgx` CLI below went into
+# this exe. Everything from here down is the history under gpui.
 #
 # **20.3 MB on 2026-08-27**, and the number this comment asked for had never
 # actually been written down. It splits 14.9 MB `.text` / 4.6 MB `.rdata`, with

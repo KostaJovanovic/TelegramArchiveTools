@@ -1,17 +1,17 @@
-The release binaries live here: `save.bat build` copies them out of
+The release binary lives here: `save.bat build` copies it out of
 target\release\.
 
-    TelegramExporter.exe    the exporter's window
-    TelegramAnalyser.exe    the analyser: a window, or a command with arguments
+    TelegramTools.exe    the window with no arguments; `analyse ...` and the
+                         exporter's commands (login, chats, export, ...)
+                         from a terminal
 
-Until the two become one TelegramTools.exe (TELEGRAMTOOLS.md, phase 2), both
-come out of one `cargo build --release`, so a dist\ can never hold one of them
-from Tuesday and the other from Friday.
+It replaced TelegramExporter.exe and TelegramAnalyser.exe; `save.bat build`
+removes either if it finds one here.
 
-They sit in the repo rather than in target\ because target\ is a build
-directory -- `cargo clean` empties it -- and because the exporter keeps its
-state beside its executable. Running dist\TelegramExporter.exe therefore puts
-dist\TelegramExporterData\ and dist\Exports\ next to it, which is what makes
-the folder portable: copy dist\ anywhere and it works, credentials and all.
+It sits in the repo rather than in target\ because target\ is a build
+directory -- `cargo clean` empties it -- and because the app keeps its state
+beside its executable. Running dist\TelegramTools.exe therefore puts
+dist\TelegramToolsData\ and dist\Exports\ next to it, which is what makes the
+folder portable: copy dist\ anywhere and it works, credentials and all.
 
 Everything in here except this file is gitignored, for that last reason.

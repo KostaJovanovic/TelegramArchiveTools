@@ -51,6 +51,7 @@ impl Shell {
                 // exactly what could end up ordered behind the window.
                 self.login = None;
                 self.status = format!("Signed in: {name}");
+                self.account = Some(name);
             }
             Event::LoginStage(stage) => {
                 if let Some(d) = self.login.as_mut() {

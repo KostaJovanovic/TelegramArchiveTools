@@ -16,7 +16,7 @@ This is a self-contained work order. Read `CLAUDE.md` first; everything it says
 still holds. Do the steps in order, run `save.bat test` after each step, and do
 not start the next step until the suite and the three corpus legs are green at
 their baseline (json 4/4, html 4/4, media 830/836). Never edit anything under
-`reference/`. Never run a live export or read `TelegramExporterData/`: the
+`reference/`. Never run a live export or read `TelegramToolsData/`: the
 final live check is Kosta's to run, not yours.
 
 ## 1. Context
@@ -61,7 +61,7 @@ Decisions already taken (do not reopen them):
   forces a whole-history pass to mark older deletions.
 - **The database never holds a credential.** `Settings` serialises `api_id`,
   `api_hash` and `phone` first, and `Exports/` is not ACL-restricted the way
-  `TelegramExporterData/` is. The run row records a redacted subset, defined
+  `TelegramToolsData/` is. The run row records a redacted subset, defined
   once in `config.rs` (see Step 4), never `serde_json::to_string(settings)`.
 
 ## 2. The design

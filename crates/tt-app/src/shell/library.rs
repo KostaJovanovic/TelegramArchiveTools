@@ -1,43 +1,41 @@
-//! The window: a library of exports, and a report for each.
+//! The Library: every export under a folder, and a report for each.
+//!
+//! **This was the analyser's whole window**, `TelegramAnalyser.exe`. It is a
+//! view of TelegramTools now, and the folder it opens on is the one the
+//! exporter writes into — the exports this window made are the ones it reports
+//! on. Pointing it somewhere else is still a paste or a Choose away.
 //!
 //! **A worker event repaints the window; the window never polls for one.** The
 //! job hands back a `std::sync::mpsc::Receiver`, which can only be polled — so
-//! the worker also holds a clone of the egui context and calls
-//! `request_repaint()` on every message. Without that, nothing appears until
-//! some unrelated input causes a frame, which the user experiences as having to
-//! move the mouse to make the app work.
+//! the worker also holds a [`Wake`] and calls it on every message. It is built
+//! here from the egui context, because `tga-run` has no toolkit in it. Without
+//! it nothing appears until some unrelated input causes a frame, which the
+//! user experiences as having to move the mouse to make the app work.
 //!
-//! Everything this window *decides* is in [`crate::state`]; what is here is
-//! where things sit and what they look like. **What they look like is the
-//! exporter's**: the bar, the rows, the footer and the status line are laid out
-//! the way `TelegramExporter`'s chat list lays out its own, from the same
-//! `tgx-ui` pieces, so moving from one window to the other changes what the
-//! rows are and nothing about how to read them.
+//! Everything this view *decides* is in [`tga_run::state`]; what is here is
+//! where things sit and what they look like.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use eframe::egui::{self, Align, Layout, Sense, Ui};
+use tga_run::job::{self, Counted, Request, Wake};
+use tga_run::open;
+use tga_run::refresh::Source;
+use tga_run::state::{Mark, Pick, Show, Sort, State};
 use tgx_ui::components::{
     action, caps, edge_rule, eyebrow, field, figure, help, progress_bar, row, rule, text, tick_box,
-    tick_mark, title, uppercase, EmptyState, NavCell, GUTTER,
+    tick_mark, uppercase, EmptyState, NavCell, GUTTER,
 };
-use tgx_ui::tokens::{metrics, space, window};
+use tgx_ui::tokens::{space, window, Palette};
 
-use crate::job::{self, Counted, Request};
-use crate::open;
-use crate::refresh::Source;
-use crate::state::{Mark, Pick, Show, Sort, State};
-use crate::theme::{self, PALETTE};
-
-pub const TITLE: &str = "Telegram Export Analyser";
-
-/// Every row is this tall — the exporter's chat row, so a title over a caption
-/// sits the same in both windows.
+/// Every row is this tall — the chat list's, so a title over a caption sits
+/// the same in both views.
 const ROW_HEIGHT: f32 = 46.0;
 
-/// How wide the filter box is. **Fixed**, for the exporter's reason: a field
+/// How wide the filter box is. **Fixed**, for the chat list's reason: a field
 /// stretched across the window advertises room for a sentence, and what goes
 /// in it is a word.
 const FILTER_W: f32 = 260.0;
@@ -48,32 +46,50 @@ const COUNT_W: f32 = 80.0;
 /// The mark column: wide enough for `UP TO DATE`, the longest of the six.
 const MARK_W: f32 = 96.0;
 
-pub struct Shell {
-    state: State,
+#[derive(Default)]
+pub struct Library {
+    pub(super) state: State,
     /// The run in progress. `None` between runs.
     run: Option<job::Run>,
     /// Titles and counts arriving for the rows. `None` once the counter has
     /// finished and hung up.
     counts: Option<Receiver<Counted>>,
-    /// For `shot`: frames drawn, and the last one with work in flight.
-    frame_no: u32,
-    busy_until: u32,
+    /// Whether the folder has been pointed at anything yet. The first look at
+    /// the view does it, so a launch that never opens the Library never scans
+    /// a drive for it.
+    opened: bool,
 }
 
-impl Shell {
-    pub fn new(ctx: &egui::Context) -> Self {
-        theme::install(ctx);
-        let mut shell = Shell {
-            state: State::default(),
-            run: None,
-            counts: None,
-            frame_no: 0,
-            busy_until: 0,
-        };
-        if let Some(folder) = crate::shot::folder() {
-            shell.set_path(Path::new(&folder), ctx);
+/// What a worker calls after every send: a repaint of this window.
+fn wake(ctx: &egui::Context) -> Wake {
+    let ctx = ctx.clone();
+    Arc::new(move || ctx.request_repaint())
+}
+
+impl Library {
+    /// Point the view at its folder the first time it is shown.
+    ///
+    /// The exporter's destination, unless a photograph asked for another:
+    /// **a shot never opens the real one**, because the rows are chat titles
+    /// and a shot is something that gets pasted into an issue.
+    pub(super) fn open_once(&mut self, output_dir: &str, ctx: &egui::Context) {
+        if std::mem::replace(&mut self.opened, true) {
+            return;
         }
-        shell
+        let folder = if super::shot::path().is_some() {
+            super::shot::library()
+        } else {
+            Some(output_dir.to_string()).filter(|d| !d.trim().is_empty())
+        };
+        if let Some(folder) = folder {
+            self.set_path(Path::new(&folder), ctx);
+        }
+    }
+
+    /// Whether a worker still has something to say — for the screenshot,
+    /// which must not photograph a list whose figures are still blank.
+    pub(super) fn busy(&self) -> bool {
+        self.counts.is_some() || self.run.is_some()
     }
 
     /// Re-read the folder in the field, and send whatever is new off to be
@@ -92,7 +108,7 @@ impl Shell {
         if !todo.is_empty() {
             // Replacing the receiver drops the last one: a count still running
             // for a folder no longer on screen sends into nothing and stops.
-            self.counts = Some(job::count(todo, self.state.generation, ctx.clone()));
+            self.counts = Some(job::count(todo, self.state.generation, wake(ctx)));
         }
     }
 
@@ -106,10 +122,12 @@ impl Shell {
             embed_fonts: self.state.embed_fonts,
             handles_only: self.state.handles_only,
         };
-        self.run = Some(job::spawn(request, ctx.clone()));
+        self.run = Some(job::spawn(request, wake(ctx)));
     }
 
-    fn stop(&mut self) {
+    /// Stop after the report in hand. Also what quitting does — see
+    /// `Shell::on_exit`.
+    pub(super) fn stop(&mut self) {
         if let Some(run) = &self.run {
             run.stop();
             self.state.stopping = true;
@@ -119,9 +137,11 @@ impl Shell {
 
     /// Apply everything the workers have said since the last frame.
     ///
-    /// In a batch: a run emits one message per topic it reads, and a ten-topic
-    /// export would otherwise be ten frames nobody sees.
-    fn drain(&mut self) {
+    /// Every frame, whichever view is showing: a run carries on while someone
+    /// looks at the chat list, and its rows must be right when they come back.
+    /// In a batch, because a run emits one message per topic it reads, and a
+    /// ten-topic export would otherwise be ten frames nobody sees.
+    pub(super) fn drain(&mut self) {
         if let Some(rx) = &self.counts {
             let mut batch = Vec::new();
             let finished = loop {
@@ -161,12 +181,13 @@ impl Shell {
         }
     }
 
-    /// A folder — or a database — dropped anywhere on the window.
+    /// A folder — or a database — dropped anywhere on the window, while this
+    /// view is showing.
     ///
     /// The window is the target rather than the field, which is a small one.
     /// The first directory wins, or the first file that is a database: those
     /// are the two things an export can be.
-    fn dropped(&mut self, ctx: &egui::Context) {
+    pub(super) fn dropped(&mut self, ctx: &egui::Context) {
         if self.state.running {
             return;
         }
@@ -175,7 +196,7 @@ impl Shell {
                 .dropped_files
                 .iter()
                 .filter_map(|f| f.path.clone())
-                .filter(|p| p.is_dir() || tga_db::find(p).is_some())
+                .filter(|p| tga_run::can_open(p))
                 .collect()
         });
         if let Some(dir) = dirs.into_iter().next() {
@@ -191,11 +212,11 @@ impl Shell {
         }
     }
 
-    /// **One bar: what this is on the left, what to do on the right.** The
-    /// exporter's arrangement, with the path field in the middle where its
-    /// view tabs sit — the one thing this window is ever pointed at.
-    fn top_bar(&mut self, ui: &mut Ui, ctx: &egui::Context) {
-        let p = PALETTE;
+    /// The view's half of the top bar: the folder, and what to do with it.
+    ///
+    /// Right to left from the far end, so what is listed first lands furthest
+    /// right and the field takes whatever is left.
+    pub(super) fn bar(&mut self, ui: &mut Ui, ctx: &egui::Context, p: &Palette) {
         let running = self.state.running;
         let ticked = self.state.selected.len();
         let analyse = match (running, ticked) {
@@ -205,108 +226,151 @@ impl Shell {
         };
         let root = self.state.root.clone().filter(|r| r.is_dir());
 
-        // The row is given the bar's height, not `interact_size`'s, so the
-        // buttons centre in the bar and the rule lands at its foot. See the
-        // exporter's `chrome::top_bar`, which learned it first.
-        let body = egui::vec2(ui.available_width(), ui.available_height() - 1.0);
-        ui.allocate_ui_with_layout(body, Layout::left_to_right(Align::Center), |ui| {
-            row(ui, |ui| {
-                ui.label(title(TITLE, &p));
-                ui.add_space(space::BREAK);
-                // Right to left from the far end, so what is listed first lands
-                // furthest right and the field takes whatever is left.
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    // **The one red.** Everything else on the bar leads to it.
-                    if NavCell::tool(analyse)
-                        .enabled(self.state.ready())
-                        .primary(true)
-                        .show(ui, &p)
-                        .clicked()
-                    {
-                        self.start(ctx);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            // **The one red.** Everything else on the bar leads to it.
+            if NavCell::tool(analyse)
+                .enabled(self.state.ready())
+                .primary(true)
+                .show(ui, p)
+                .clicked()
+            {
+                self.start(ctx);
+            }
+            if NavCell::tool("Stop")
+                .enabled(running && !self.state.stopping)
+                .show(ui, p)
+                .clicked()
+            {
+                self.stop();
+            }
+            ui.add_space(space::STEP);
+            if NavCell::tool("Open folder")
+                .enabled(root.is_some())
+                .show(ui, p)
+                .clicked()
+            {
+                if let Some(dir) = &root {
+                    if let Err(e) = open::reveal(dir) {
+                        self.state.status = e;
                     }
-                    if NavCell::tool("Stop")
-                        .enabled(running && !self.state.stopping)
-                        .show(ui, &p)
-                        .clicked()
-                    {
-                        self.stop();
-                    }
-                    ui.add_space(space::STEP);
-                    if NavCell::tool("Open folder")
-                        .enabled(root.is_some())
-                        .show(ui, &p)
-                        .clicked()
-                    {
-                        if let Some(dir) = &root {
-                            if let Err(e) = open::reveal(dir) {
-                                self.state.status = e;
-                            }
-                        }
-                    }
-                    if NavCell::tool("Choose")
-                        .enabled(!running)
-                        .show(ui, &p)
-                        .clicked()
-                    {
-                        self.browse(ctx);
-                    }
-                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                        let width = ui.available_width();
-                        // Pasting a path out of Explorer is how this window is
-                        // actually used, so the field is a field and not a
-                        // label beside a Choose button.
-                        let edited = ui
-                            .add_enabled(
-                                !running,
-                                field(&mut self.state.path, &p)
-                                    .hint_text(r"C:\...\telegram export")
-                                    .desired_width(width),
-                            )
-                            .changed();
-                        if edited {
-                            self.rescan(ctx);
-                        }
-                    });
-                });
+                }
+            }
+            if NavCell::tool("Choose")
+                .enabled(!running)
+                .show(ui, p)
+                .clicked()
+            {
+                self.browse(ctx);
+            }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                let width = ui.available_width();
+                // Pasting a path out of Explorer is how this view is actually
+                // used, so the field is a field and not a label beside a
+                // Choose button.
+                let edited = ui
+                    .add_enabled(
+                        !running,
+                        field(&mut self.state.path, p)
+                            .hint_text(r"C:\...\telegram export")
+                            .desired_width(width),
+                    )
+                    .changed();
+                if edited {
+                    self.rescan(ctx);
+                }
             });
         });
-        edge_rule(ui, &p);
+    }
+
+    /// The body: the list between its filter row and its foot.
+    pub(super) fn panel(&mut self, ui: &mut Ui, p: &Palette) {
+        let bare = egui::Frame::NONE.fill(p.bg);
+        egui::TopBottomPanel::bottom("library-status")
+            .frame(bare)
+            .show_separator_line(false)
+            .show_inside(ui, |ui| self.status_line(ui, p));
+        if self.state.entries.is_empty() {
+            let empty = if self.state.folder().is_none() {
+                EmptyState::new(
+                    "Choose an export",
+                    Some(
+                        "A folder of result.json files, one of the exporter's databases, \
+                         or the folder it syncs them into. Paste a path above, press \
+                         Choose, or drop it on the window."
+                            .into(),
+                    ),
+                )
+            } else {
+                EmptyState::new(
+                    "Nothing to analyse here",
+                    Some(
+                        "No result.json under it, and no .sqlite in it or in the folders \
+                         directly inside it."
+                            .into(),
+                    ),
+                )
+            };
+            egui::CentralPanel::default()
+                .frame(bare)
+                .show_inside(ui, |ui| empty.show(ui, p, true));
+            return;
+        }
+        // Head and foot as panels, the list in what is left: a panel
+        // measures itself, so nothing here is a height measured by hand.
+        egui::TopBottomPanel::top("library-head")
+            .frame(bare)
+            .show_separator_line(false)
+            .show_inside(ui, |ui| {
+                ui.add_space(space::STEP);
+                self.filter_row(ui, p);
+                ui.add_space(space::STEP);
+                rule(ui, p);
+            });
+        egui::TopBottomPanel::bottom("library-foot")
+            .frame(bare)
+            .show_separator_line(false)
+            .show_inside(ui, |ui| {
+                rule(ui, p);
+                ui.add_space(space::STEP);
+                self.foot(ui, p);
+                ui.add_space(space::STEP);
+            });
+        egui::CentralPanel::default()
+            .frame(bare)
+            .show_inside(ui, |ui| self.list(ui, p));
     }
 
     /// Filter, show and sort — one row, gathered at the left.
-    fn filter_row(&mut self, ui: &mut Ui) {
-        let p = PALETTE;
+    fn filter_row(&mut self, ui: &mut Ui, p: &Palette) {
         row(ui, |ui| {
             ui.spacing_mut().item_spacing.x = space::STEP;
             ui.add(
-                field(&mut self.state.filter, &p)
+                field(&mut self.state.filter, p)
                     .hint_text("Filter exports…")
                     .desired_width(FILTER_W),
             );
-            ui.label(eyebrow("Show", &p));
-            egui::ComboBox::from_id_salt("show")
-                .selected_text(text(self.state.show.label(), &p))
+            ui.label(eyebrow("Show", p));
+            egui::ComboBox::from_id_salt("library-show")
+                .selected_text(text(self.state.show.label(), p))
                 .width(170.0)
                 .show_ui(ui, |ui| {
                     for option in Show::ALL {
-                        ui.selectable_value(&mut self.state.show, option, text(option.label(), &p));
+                        ui.selectable_value(&mut self.state.show, option, text(option.label(), p));
                     }
                 });
-            ui.label(eyebrow("Sort", &p));
-            egui::ComboBox::from_id_salt("sort")
-                .selected_text(text(self.state.sort.label(), &p))
+            ui.label(eyebrow("Sort", p));
+            egui::ComboBox::from_id_salt("library-sort")
+                .selected_text(text(self.state.sort.label(), p))
                 .width(190.0)
                 .show_ui(ui, |ui| {
                     for option in Sort::ALL {
-                        ui.selectable_value(&mut self.state.sort, option, text(option.label(), &p));
+                        ui.selectable_value(&mut self.state.sort, option, text(option.label(), p));
                     }
                 });
         });
     }
 
-    fn list(&mut self, ui: &mut Ui) {
-        let p = PALETTE;
+    fn list(&mut self, ui: &mut Ui, p: &Palette) {
         let visible = self.state.visible();
         if visible.is_empty() {
             EmptyState::new(
@@ -316,24 +380,24 @@ impl Shell {
                 ),
                 Some("Clear the filter, or show every export.".into()),
             )
-            .show(ui, &p, true);
+            .show(ui, p, true);
             return;
         }
         // Read once a frame and carried down, rather than one clock read per
         // row for an answer that cannot change between two of them.
         let now = SystemTime::now();
         egui::ScrollArea::vertical()
+            .id_salt("library-list")
             .auto_shrink([false, false])
             .show_rows(ui, ROW_HEIGHT, visible.len(), |ui, range| {
                 for i in range {
-                    self.export_row(ui, visible[i], now);
+                    self.export_row(ui, visible[i], now, p);
                 }
             });
     }
 
     /// One export.
-    fn export_row(&mut self, ui: &mut Ui, index: usize, now: SystemTime) {
-        let p = PALETTE;
+    fn export_row(&mut self, ui: &mut Ui, index: usize, now: SystemTime, p: &Palette) {
         let entry = self.state.entries[index].clone();
         let path = entry.target.path().to_path_buf();
         let ticked = self.state.selected.contains(&path);
@@ -352,7 +416,7 @@ impl Shell {
         inside(ui, rect, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             // Painted, not clickable: the row is the control.
-            tick_mark(ui, ticked, &p);
+            tick_mark(ui, ticked, p);
             ui.add_space(12.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 // The row's one number, laid out first so a long title cannot
@@ -371,12 +435,12 @@ impl Shell {
                         // A child ui reports what its contents used, not what
                         // it was offered; this is what makes the column fixed.
                         ui.set_min_size(egui::vec2(COUNT_W, ROW_HEIGHT));
-                        ui.label(figure(count, &p));
+                        ui.label(figure(count, p));
                     },
                 );
                 ui.add_space(space::STEP);
 
-                // **The accent is this run**, as in the exporter: the row being
+                // **The accent is this run**, as in the queue: the row being
                 // read now and nothing else. A row that needs a report is ink,
                 // one that does not is muted.
                 let mark = entry.mark();
@@ -407,7 +471,7 @@ impl Shell {
                 // Title over caption, one block.
                 ui.with_layout(Layout::top_down(Align::LEFT), |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.add(egui::Label::new(text(&entry.title, &p)).truncate());
+                    ui.add(egui::Label::new(text(&entry.title, p)).truncate());
                     ui.add(egui::Label::new(caps(&entry.caption(now), p.muted)).truncate());
                 });
             });
@@ -421,8 +485,7 @@ impl Shell {
     }
 
     /// The selection verbs, the run's options, and what is ticked.
-    fn foot(&mut self, ui: &mut Ui) {
-        let p = PALETTE;
+    fn foot(&mut self, ui: &mut Ui, p: &Palette) {
         let running = self.state.running;
         row(ui, |ui| {
             ui.spacing_mut().item_spacing.x = space::STEP;
@@ -431,7 +494,7 @@ impl Shell {
                 ("None", Pick::None),
                 ("Needs a report", Pick::Behind),
             ] {
-                // Flat, as the exporter's are: these refine a selection the
+                // Flat, as the chat list's are: these refine a selection the
                 // rows already show, and boxes here would outweigh the bar.
                 if action(ui, caps(label, p.fg), true).clicked() {
                     self.state.select(pick);
@@ -440,21 +503,21 @@ impl Shell {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 // Right to left, so each option is its mark, then its label,
                 // then its box — read left to right as box, label, mark.
-                // **Box and label are one control**, as in the exporter: the
-                // words you read are the thing you click.
+                // **Box and label are one control**: the words you read are the
+                // thing you click.
                 help(
                     ui,
                     "fonts",
                     "Geist is written into every report, so it looks right on a \
                      machine that does not have it. Off, each report is about \
                      300 KB smaller.",
-                    &p,
+                    p,
                 );
-                let fonts = action(ui, eyebrow("Embed fonts", &p), !running).union(tick_box(
+                let fonts = action(ui, eyebrow("Embed fonts", p), !running).union(tick_box(
                     ui,
                     self.state.embed_fonts,
                     !running,
-                    &p,
+                    p,
                 ));
                 if fonts.clicked() {
                     self.state.embed_fonts = !self.state.embed_fonts;
@@ -467,13 +530,13 @@ impl Shell {
                      export: every message as one line, with each attachment's \
                      text and date, which is what a model needs to map events \
                      onto the timeline.",
-                    &p,
+                    p,
                 );
-                let digest = action(ui, eyebrow("Write the digest", &p), !running).union(tick_box(
+                let digest = action(ui, eyebrow("Write the digest", p), !running).union(tick_box(
                     ui,
                     self.state.write_digest,
                     !running,
-                    &p,
+                    p,
                 ));
                 if digest.clicked() {
                     self.state.write_digest = !self.state.write_digest;
@@ -486,13 +549,13 @@ impl Shell {
                      For your contacts an export holds the name you saved them \
                      as, which nobody else should see. Somebody with no handle \
                      keeps the name in the export.",
-                    &p,
+                    p,
                 );
-                let handles = action(ui, eyebrow("Handles only", &p), !running).union(tick_box(
+                let handles = action(ui, eyebrow("Handles only", p), !running).union(tick_box(
                     ui,
                     self.state.handles_only,
                     !running,
-                    &p,
+                    p,
                 ));
                 if handles.clicked() {
                     self.state.handles_only = !self.state.handles_only;
@@ -501,18 +564,19 @@ impl Shell {
         });
         ui.add_space(space::TIGHT);
         row(ui, |ui| {
-            ui.label(eyebrow(&self.state.selection_label(), &p));
+            ui.label(eyebrow(&self.state.selection_label(), p));
         });
     }
 
-    fn status_bar(&mut self, ui: &mut Ui) {
-        let p = PALETTE;
+    /// The view's own status: what the analyser is doing, and how far through
+    /// the queue it is. The window's status bar belongs to the export.
+    fn status_line(&mut self, ui: &mut Ui, p: &Palette) {
         // The bar takes the rule's place while a run goes, at the same height
         // either way, so the status line does not jump when one starts.
         match self.state.fill() {
-            Some(fraction) => progress_bar(ui, Some(fraction), &p),
+            Some(fraction) => progress_bar(ui, Some(fraction), p),
             None => {
-                edge_rule(ui, &p);
+                edge_rule(ui, p);
                 ui.add_space(2.0);
             }
         }
@@ -524,10 +588,10 @@ impl Shell {
         };
         // The figure is the fixed part, so it is allocated first from the
         // right and the status is laid out forwards in what remains — the
-        // exporter's status bar, and the nesting is load-bearing there too.
+        // window's status bar, and the nesting is load-bearing there too.
         row(ui, |ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(eyebrow(&right, &p));
+                ui.label(eyebrow(&right, p));
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     ui.add(
                         egui::Label::new(
@@ -544,96 +608,10 @@ impl Shell {
     }
 }
 
-impl eframe::App for Shell {
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        PALETTE.bg.to_normalized_gamma_f32()
-    }
-
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.drain();
-        self.dropped(ctx);
-
-        let p = PALETTE;
-        let bare = egui::Frame::NONE.fill(p.bg);
-
-        egui::TopBottomPanel::top("bar")
-            .frame(bare)
-            .exact_height(metrics::NAV_HEIGHT)
-            .show_separator_line(false)
-            .show(ctx, |ui| self.top_bar(ui, ctx));
-
-        egui::TopBottomPanel::bottom("status")
-            .frame(bare)
-            .show_separator_line(false)
-            .show(ctx, |ui| self.status_bar(ui));
-
-        egui::CentralPanel::default().frame(bare).show(ctx, |ui| {
-            if self.state.entries.is_empty() {
-                let empty = if self.state.folder().is_none() {
-                    EmptyState::new(
-                        "Choose an export",
-                        Some(
-                            "A folder of result.json files, one of the exporter's databases, \
-                             or the folder it syncs them into. Paste a path above, press \
-                             Choose, or drop it on the window."
-                                .into(),
-                        ),
-                    )
-                } else {
-                    EmptyState::new(
-                        "Nothing to analyse here",
-                        Some(
-                            "No result.json under it, and no .sqlite in it or in the folders \
-                             directly inside it."
-                                .into(),
-                        ),
-                    )
-                };
-                empty.show(ui, &p, true);
-                return;
-            }
-            // Head and foot as panels, the list in what is left: a panel
-            // measures itself, so nothing here is a height measured by hand.
-            egui::TopBottomPanel::top("head")
-                .frame(bare)
-                .show_separator_line(false)
-                .show_inside(ui, |ui| {
-                    ui.add_space(space::STEP);
-                    self.filter_row(ui);
-                    ui.add_space(space::STEP);
-                    rule(ui, &p);
-                });
-            egui::TopBottomPanel::bottom("foot")
-                .frame(bare)
-                .show_separator_line(false)
-                .show_inside(ui, |ui| {
-                    rule(ui, &p);
-                    ui.add_space(space::STEP);
-                    self.foot(ui);
-                    ui.add_space(space::STEP);
-                });
-            egui::CentralPanel::default()
-                .frame(bare)
-                .show_inside(ui, |ui| self.list(ui));
-        });
-
-        // After everything has been drawn, so the frame egui hands back is the
-        // finished one — and only once the counts are in, or the picture is of
-        // a list with its figures still blank.
-        self.frame_no += 1;
-        if let Some(to) = crate::shot::path() {
-            if self.counts.is_some() || self.run.is_some() {
-                self.busy_until = self.frame_no;
-            }
-            crate::shot::tick(ctx, self.frame_no - self.busy_until, &to);
-        }
-    }
-}
-
 /// Lay a row's contents out inside the rect it was given, **vertically
 /// centred**, between the panel's gutters. A layout given the row rect centres
 /// in the row; `horizontal_centered` centres in a 30-point strip and leaves
-/// every row sitting high in its own box — the exporter found that one.
+/// every row sitting high in its own box — the chat list found that one.
 fn inside<R>(ui: &mut Ui, rect: egui::Rect, add: impl FnOnce(&mut Ui) -> R) -> R {
     let inner = egui::Rect::from_min_max(
         egui::pos2(rect.left() + GUTTER, rect.top()),
@@ -646,4 +624,50 @@ fn inside<R>(ui: &mut Ui, rect: egui::Rect, add: impl FnOnce(&mut Ui) -> R) -> R
         add,
     )
     .inner
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui::Color32;
+    use tgx_ui::tokens::Palette;
+
+    /// The report's own value for a token, as it writes it into the stylesheet.
+    fn from_report(name: &str) -> Color32 {
+        let text = tga_run::report_colour(name);
+        let rgb = u32::from_str_radix(text.trim_start_matches('#'), 16).expect("hex");
+        tgx_ui::tokens::hex(rgb)
+    }
+
+    #[test]
+    fn the_dark_window_and_the_report_name_the_same_colours() {
+        // The window's palette comes from `tgx-ui` and the report's from its
+        // own stylesheet. If the dark palette moves, the report written here
+        // and the window that wrote it stop being one product, and this is
+        // where that shows. Dark only: the report has one appearance.
+        let p = Palette::dark();
+        for (name, ours) in [
+            ("bg", p.bg),
+            ("fg", p.fg),
+            ("muted", p.muted),
+            ("hairline", p.hairline),
+            ("rule", p.rule),
+            ("surface", p.surface),
+            ("accent", p.accent),
+            ("accent_fg", p.accent_fg),
+        ] {
+            assert_eq!(
+                ours,
+                from_report(name),
+                "{name} has drifted from the report's stylesheet"
+            );
+        }
+    }
+
+    #[test]
+    fn a_launch_that_never_opens_the_library_scans_nothing() {
+        let library = super::Library::default();
+        assert!(!library.opened);
+        assert!(library.state.root.is_none());
+        assert!(!library.busy());
+    }
 }

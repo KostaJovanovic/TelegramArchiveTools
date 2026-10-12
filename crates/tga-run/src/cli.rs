@@ -1,29 +1,29 @@
-//! `TelegramAnalyser.exe <export folder> [options]` — the window's other half.
+//! `TelegramTools.exe analyse <export folder> [options]` — the report, from a
+//! command line.
 //!
 //! Point it at a finished export and it writes one `report.html` beside it;
 //! nothing here reaches the network.
 //!
-//! **This used to be a second executable, `tga.exe`.** One program that ships
-//! as two files is two things to copy, two to sign and two to keep in step, for
-//! a difference that is entirely in how it was launched. So the argv decides
-//! instead: arguments mean do the work and print, none means open the window.
-//! Every option below behaves exactly as it did when it had its own exe, which
-//! is what lets `save.bat baseline` keep comparing byte for byte across the
-//! change.
+//! **This was a second executable twice over** — `tga.exe`, then the
+//! analyser's own exe with argv deciding between window and command. It is a
+//! subcommand of TelegramTools now, and `args` here is what follows the word
+//! `analyse`. Every option below behaves exactly as it did when it had its own
+//! exe, which is what lets `save.bat baseline` keep comparing byte for byte
+//! across both changes.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-const USAGE: &str = "\
-Telegram Export Analyser
+pub const USAGE: &str = "\
+TelegramTools analyse -- a report on an export
 
-    TelegramAnalyser <export folder> [options]
-    TelegramAnalyser <telegram.sqlite> [options]
-    TelegramAnalyser <exporter output folder> --refresh [--force] [options]
-    TelegramAnalyser --from-stats <stats.json> --out <report.html> [options]
+    TelegramTools analyse <export folder> [options]
+    TelegramTools analyse <telegram.sqlite> [options]
+    TelegramTools analyse <exporter output folder> --refresh [--force] [options]
+    TelegramTools analyse --from-stats <stats.json> --out <report.html> [options]
 
-    With no arguments at all, the window opens instead.
+    `report` and `analyze` are the same command.
 
     An export is a folder of result.json files, or the exporter's database
     output -- a .sqlite, named directly or found in or one folder below the
@@ -64,10 +64,9 @@ Options
     --quiet           no per-file progress
 ";
 
-/// Run as a command. `args` is argv with the program name already dropped, and
-/// is never empty — an empty argv opens the window and never reaches here.
+/// Run as a command. `args` is what followed `analyse` on the command line.
 pub fn run(args: Vec<String>) -> Result<()> {
-    if args[0] == "--help" || args[0] == "-h" {
+    if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
         print!("{USAGE}");
         return Ok(());
     }

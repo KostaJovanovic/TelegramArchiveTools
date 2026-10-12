@@ -3,7 +3,7 @@
 //! **All state lives beside the executable**, never in AppData and never in the
 //! registry — with one exception: a binary running out of `target/` climbs back
 //! to the workspace root, because `cargo clean` would otherwise delete the
-//! session key and every export with it. `TelegramExporterData/` holds the session — which is a *bearer
+//! session key and every export with it. `TelegramToolsData/` holds the session — which is a *bearer
 //! credential*: anyone who can read it can act as the account — so the folder
 //! is ACL-restricted to the current user on creation, and the app says so in
 //! the log when that fails rather than leaving you to assume it worked.
@@ -53,8 +53,44 @@ fn workspace_above_target(dir: &std::path::Path) -> Option<PathBuf> {
     found
 }
 
+/// What the data folder is called.
+pub const DATA_DIR: &str = "TelegramToolsData";
+
+/// What it was called while this was TelegramExporter. See [`resolve_data_dir`].
+pub const OLD_DATA_DIR: &str = "TelegramExporterData";
+
 pub fn data_dir() -> PathBuf {
-    app_dir().join("TelegramExporterData")
+    // Resolved once per process: the rename below is a filesystem operation,
+    // and this is on the path of every settings read.
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| resolve_data_dir(&app_dir())).clone()
+}
+
+/// The data folder under `app`, **carried over from the old name** the first
+/// time TelegramTools runs where TelegramExporter did.
+///
+/// The folder holds the session key, so a rename that silently produced an
+/// empty new folder would sign the user out and leave their credential behind
+/// under a name nothing reads any more. Hence the order:
+///
+/// - the new folder exists: use it, whatever else is there;
+/// - only the old one exists: rename it, and use the new name;
+/// - the rename fails — the old exe still running with a file open in it, a
+///   read-only drive: **keep using the old folder** rather than start a new
+///   one. The next launch tries again.
+///
+/// A rename keeps the folder's ACL, and `ensure_data_dir` re-asserts it on its
+/// first call in any case.
+pub fn resolve_data_dir(app: &std::path::Path) -> PathBuf {
+    let new = app.join(DATA_DIR);
+    let old = app.join(OLD_DATA_DIR);
+    if new.exists() || !old.is_dir() {
+        return new;
+    }
+    match std::fs::rename(&old, &new) {
+        Ok(()) => new,
+        Err(_) => old,
+    }
 }
 
 pub fn settings_file() -> PathBuf {
@@ -401,7 +437,7 @@ impl Settings {
     /// different from the last one" has an answer a year later. But a chat's
     /// `.sqlite` lives in `Exports/`, which is the folder people copy
     /// to a drive and mail to somebody — and `Settings` starts with `api_id`,
-    /// `api_hash` and `phone`. `TelegramExporterData/` is ACL-restricted for
+    /// `api_hash` and `phone`. `TelegramToolsData/` is ACL-restricted for
     /// exactly this reason and `Exports/` is not, so serialising `self` whole
     /// would carry an API credential and the account's phone number out of the
     /// one directory that protects them.
@@ -914,9 +950,51 @@ mod tests {
 
     #[test]
     fn state_lives_beside_the_executable() {
-        // Never AppData, never the registry.
-        assert!(data_dir().ends_with("TelegramExporterData"));
+        // Never AppData, never the registry. The old name only while a rename
+        // could not happen — see `resolve_data_dir`.
+        let dir = data_dir();
+        assert!(dir.starts_with(app_dir()));
+        assert!(dir.ends_with(DATA_DIR) || dir.ends_with(OLD_DATA_DIR));
         assert!(session_file().starts_with(data_dir()));
         assert!(settings_file().starts_with(data_dir()));
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tgx-data-dir-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        dir
+    }
+
+    #[test]
+    fn the_old_data_folder_is_renamed_with_its_session_in_it() {
+        let app = scratch("rename");
+        std::fs::create_dir(app.join(OLD_DATA_DIR)).unwrap();
+        std::fs::write(app.join(OLD_DATA_DIR).join("session"), b"key").unwrap();
+
+        let dir = resolve_data_dir(&app);
+        assert_eq!(dir, app.join(DATA_DIR));
+        assert_eq!(std::fs::read(dir.join("session")).unwrap(), b"key");
+        assert!(!app.join(OLD_DATA_DIR).exists(), "renamed, not copied");
+        let _ = std::fs::remove_dir_all(&app);
+    }
+
+    #[test]
+    fn an_existing_new_folder_wins_and_the_old_one_is_left_alone() {
+        let app = scratch("both");
+        std::fs::create_dir(app.join(OLD_DATA_DIR)).unwrap();
+        std::fs::create_dir(app.join(DATA_DIR)).unwrap();
+        assert_eq!(resolve_data_dir(&app), app.join(DATA_DIR));
+        assert!(app.join(OLD_DATA_DIR).is_dir());
+        let _ = std::fs::remove_dir_all(&app);
+    }
+
+    #[test]
+    fn a_fresh_install_gets_the_new_name_and_nothing_is_created() {
+        let app = scratch("fresh");
+        assert_eq!(resolve_data_dir(&app), app.join(DATA_DIR));
+        // Creating it is `ensure_data_dir`'s job, with the ACL that goes with it.
+        assert!(!app.join(DATA_DIR).exists());
+        let _ = std::fs::remove_dir_all(&app);
     }
 }

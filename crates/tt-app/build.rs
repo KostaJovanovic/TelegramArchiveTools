@@ -1,8 +1,8 @@
-//! Embed the icon and the Windows version resource into `TelegramExporter.exe`.
+//! Embed the icon and the Windows version resource into `TelegramTools.exe`.
 //!
 //! Without this the Properties dialog shows an exe with no product name, no
 //! version and no copyright, and Explorer draws the generic binary glyph. The
-//! icon is `icon/TelegramExporter.ico`, drawn by `tools/make_icon.py` from the
+//! icon is `icon/TelegramTools.ico`, drawn by `tools/make_icon.py` from the
 //! design tokens — regenerate it there rather than editing the file.
 //!
 //! **The binary is unsigned, and stays unsigned here.** An Authenticode
@@ -29,19 +29,19 @@ fn main() {
 
 #[cfg(windows)]
 fn embed() {
-    println!("cargo:rerun-if-changed=icon/TelegramExporter.ico");
+    println!("cargo:rerun-if-changed=icon/TelegramTools.ico");
     println!("cargo:rerun-if-changed=build.rs");
 
     let mut resource = winresource::WindowsResource::new();
-    resource.set_icon("icon/TelegramExporter.ico");
+    resource.set_icon("icon/TelegramTools.ico");
     // `WindowsResource::new` already fills FileVersion and ProductVersion from
     // CARGO_PKG_VERSION, which is where the version has to come from: two
     // places to change a version number is one place to forget one. The rest
     // are Cargo defaults only by accident of the package name, so state them.
-    resource.set("ProductName", "Telegram Exporter");
-    resource.set("FileDescription", "Telegram Exporter");
+    resource.set("ProductName", "TelegramTools");
+    resource.set("FileDescription", "TelegramTools");
     resource.set("LegalCopyright", "Copyright (C) 2026 Kosta Jovanovic");
-    resource.set("OriginalFilename", "TelegramExporter.exe");
+    resource.set("OriginalFilename", "TelegramTools.exe");
 
     // Never fail the build over this. Compiling a resource needs `rc.exe` from
     // the Windows SDK (or the bundled `windres`), and a developer with a

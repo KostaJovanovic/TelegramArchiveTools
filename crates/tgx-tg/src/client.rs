@@ -4,7 +4,7 @@
 //! so there is no bot path here at all.
 //!
 //! The session file is a **bearer credential**: anyone who can read it can act
-//! as the account. It lives in `TelegramExporterData/` beside the executable,
+//! as the account. It lives in `TelegramToolsData/` beside the executable,
 //! ACL-restricted on creation — see [`crate::config`].
 
 use crate::config::{ensure_data_dir, session_file, Settings};

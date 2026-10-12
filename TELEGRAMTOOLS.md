@@ -464,3 +464,51 @@ every `report*.html` and `*.stats.json`. Phase 1 checks the merged
   `tga-app` reaches `tga-docs` and `tga-db`.
 - One `save.bat` and one `CLAUDE.md`. CI builds, size-checks and uploads both
   exes.
+
+### Phase 2 — 2026-10-12
+
+- **One binary, `TelegramTools.exe`** (`crates/tt-app`, was `tgx-app`). No
+  arguments open the window; `analyse`, `analyze` or `report` hands the rest of
+  argv to the analyser's command line unchanged; anything else is the exporter's
+  (`tgx.rs` moved in as `tt-app/src/cli.rs`, and builds its own tokio runtime
+  instead of owning `main`). The analyser's `AttachConsole` came with it. The
+  analyser's command runs before the log opens, so a report written from a
+  terminal does not rotate the window's last `tgx.log` away.
+- `tga-run` is the analyser's front end without a window: `cli`, `refresh`,
+  `job`, `state`, `open`. `job` used to hold a clone of the egui context to
+  repaint with; it holds a `Wake` callback now. `state` called
+  `tgx_ui::selection_label`, which would have put a toolkit back in, so the
+  footer's wording is written out there. `layering.rs` checks that `tga-run`
+  has no window in it, that only it reaches `tga-docs`/`tga-db`, and that
+  `tt-app` names only `tgx-ui`, `tgx-tg` and `tga-run`.
+- **A report is renamed into place.** The window does not wait for the
+  analyser's thread on quit (the analyser's own window did not either), and a
+  report is judged current by its modification time, so one cut short would
+  have read as up to date for good. `refresh::one` writes `report.html.part`
+  and renames it. Same bytes; the manifest still matches.
+- **The frame**: a left rail lists the views with their counts, the account at
+  its foot (a Sign in button when there is none); the top bar names the view
+  and carries that view's actions. The Library view is the analyser's window,
+  opened on the exporter's destination the first time it is shown, and its own
+  status line sits at its foot. **Not done as planned:** the Viewer is still
+  its own rail entry rather than under the Library. Folding it in means the
+  Library's rows opening a database in the Viewer, which is phase 3's merged
+  Library, not a move.
+- **`TelegramExporterData` → `TelegramToolsData`.** `config::resolve_data_dir`
+  renames the old folder when it finds it alone, and keeps using the old one if
+  the rename fails. The workspace root's own folder was renamed by the first
+  test run, session included.
+- **Gates.** `merge_check` through `TelegramTools.exe analyse`: all 49 lines
+  identical to the phase 0 recording. Size 18.3 MB (was 12.4 + 10.6). The
+  interaction tests in `shell/tests.rs` came over whole; one was rewritten for
+  five views and one added for the rail's account. Shots of every view are in
+  `target\shots\after\`. The `tga-docs` corpus still cannot run (drive not
+  mounted).
+- **Seen in the shots, left for phase 4:** the bar still offers `01 Sign in`
+  when the rail already says who is signed in, and the Library shows its own
+  status line above the window's, which still talks about the chat list.
+- New icon (`tools/make_icon.py`): the exporter's upper rule and the analyser's
+  baseline and bars, the red bar reaching from one to the other.
+- `save.bat build` stops and removes `TelegramExporter.exe` and
+  `TelegramAnalyser.exe` from `dist\`; `baseline`, `report` and `run` go
+  through `tt-app`. CI builds, size-checks and uploads the one exe.

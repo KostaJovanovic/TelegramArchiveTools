@@ -82,7 +82,7 @@ fn every_setting_is_read_by_something_that_exports() {
 
     let mut files = Vec::new();
     rust_files(&ws.join("crates/tgx-tg/src"), &mut files);
-    rust_files(&ws.join("crates/tgx-app/src"), &mut files);
+    rust_files(&ws.join("crates/tt-app/src"), &mut files);
     let haystack: String = files
         .iter()
         .filter(|p| {

@@ -3516,26 +3516,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tga-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "eframe",
- "rfd",
- "serde_json",
- "tga-db",
- "tga-docs",
- "tga-metrics",
- "tga-notes",
- "tga-read",
- "tga-report",
- "tga-stats",
- "tgx-ui",
- "winresource",
-]
-
-[[package]]
 name = "tga-db"
 version = "0.1.0"
 dependencies = [
@@ -3600,28 +3580,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "tga-run"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde_json",
+ "tga-db",
+ "tga-docs",
+ "tga-metrics",
+ "tga-notes",
+ "tga-read",
+ "tga-report",
+ "tga-stats",
+]
+
+[[package]]
 name = "tga-stats"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "tgx-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "eframe",
- "egui_extras",
- "image",
- "log",
- "rfd",
- "tgx-tg",
- "tgx-ui",
- "tokio",
- "winresource",
 ]
 
 [[package]]
@@ -3910,6 +3889,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+]
+
+[[package]]
+name = "tt-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "eframe",
+ "egui_extras",
+ "image",
+ "log",
+ "rfd",
+ "tga-run",
+ "tgx-tg",
+ "tgx-ui",
+ "tokio",
+ "winresource",
 ]
 
 [[package]]

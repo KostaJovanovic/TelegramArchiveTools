@@ -1,0 +1,34 @@
+[package]
+name = "tga-run"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Running the analyser: the command line, the library of exports, and the worker. No UI."
+
+# **The analyser's front end, without a window.** This was the half of
+# `tga-app` that had no toolkit in it: the argument parser, the plan of what
+# needs a report, the worker that writes them, and every rule the library
+# window applies. TelegramTools' one executable drives it from its own window
+# and its own argv, so it became a library — and `state.rs` was already written
+# to be testable with no toolkit, which is what made that a move rather than a
+# rewrite.
+#
+# The one crate allowed to reach `tga-docs` and `tga-db` (see `layering.rs`):
+# a PDF parser and the store belong to running an analysis, not to rendering one.
+[dependencies]
+tga-read = { path = "../tga-read" }
+tga-db = { path = "../tga-db" }
+tga-docs = { path = "../tga-docs" }
+tga-stats = { path = "../tga-stats" }
+tga-metrics = { path = "../tga-metrics" }
+tga-notes = { path = "../tga-notes" }
+tga-report = { path = "../tga-report" }
+
+anyhow = { workspace = true }
+
+# The digest formats an attachment's inferred date, which is a `NaiveDate`.
+chrono.workspace = true
+
+# The command half reads a recorded --stats dump straight back into a `Stats`.
+serde_json.workspace = true

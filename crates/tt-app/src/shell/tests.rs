@@ -877,16 +877,30 @@ fn hit(id: i64) -> tgx_tg::search::Hit {
 }
 
 #[test]
-fn the_viewer_is_a_fourth_view_with_its_own_tab() {
-    assert_eq!(View::ALL.len(), 4);
-    assert_eq!(View::ALL[3], View::Viewer);
+fn the_viewer_and_the_library_each_have_a_place_on_the_rail() {
+    assert_eq!(View::ALL.len(), 5);
+    assert!(View::ALL.contains(&View::Viewer));
+    assert!(View::ALL.contains(&View::Library));
+    // Settings last: it is consulted rarely, and the views above it are the
+    // work, in the order it is done.
+    assert_eq!(View::ALL[4], View::Settings);
     assert_eq!(View::Viewer.label(), "Viewer");
+    assert_eq!(View::Library.label(), "Library");
     let mut s = Shell::headless();
     s.show(View::Viewer);
     assert_eq!(s.body, View::Viewer);
     // And a run starting does not pull the user out of it.
     s.suggest(View::Queue);
     assert_eq!(s.body, View::Viewer);
+}
+
+#[test]
+fn the_rail_names_the_account_once_a_sign_in_answers() {
+    let mut s = Shell::headless();
+    assert_eq!(s.account, None);
+    s.apply(crate::bridge::Event::SignedIn("Ana".into()));
+    assert_eq!(s.account.as_deref(), Some("Ana"));
+    assert!(s.signed_in);
 }
 
 #[test]

@@ -13,8 +13,10 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
   network.
 
 They were two repositories until 2026-10-12; `TELEGRAMTOOLS.md` is the merge
-plan and its log, and says which phase is done. Until phase 2 they ship as two
-binaries, `TelegramExporter.exe` and `TelegramAnalyser.exe`.
+plan and its log, and says which phase is done. They ship as one binary,
+`TelegramTools.exe`: no arguments open the window, `analyse` runs the
+analyser's command line, and anything else is one of the exporter's commands
+(`login`, `chats`, `export`, …) — what used to be `tgx.exe`.
 
 `ROADMAP.md` holds the exporter's design record and what is still open.
 `docs/analyser/PLAN.md` is the analyser's: why each figure is computed the way
@@ -30,7 +32,7 @@ the relevant part before changing the area it covers.
 ```powershell
 save.bat                    # menu; also takes an action as an argument
 save.bat test               # fmt + clippy + every suite, same as CI
-save.bat build              # release build -> both exes in dist\
+save.bat build              # release build -> dist\TelegramTools.exe
 save.bat parity             # all four replay legs against corpus or drive
 save.bat corpus             # cut reference\ out of the reference export
 save.bat wire <export dir>  # diff a live export against the reference run
@@ -38,7 +40,7 @@ save.bat baseline           # the analyser's reports against the last recording
 save.bat baseline record    # re-record it, after reading the diff
 save.bat bless              # re-record the analyser's committed golden
 save.bat report <folder>    # write report.html beside an export
-save.bat run                # the analyser's window
+save.bat run                # the window, from source
 save.bat clean              # report target\ and empty it
 ```
 
@@ -51,19 +53,24 @@ cargo test -p tgx-tg --lib config::tests        # one module
 cargo test -p tgx-html --test preview_parity    # one integration suite
 cargo test -p tgx-tg the_last_target_wins       # one test by name substring
 cargo clippy --all-targets --all-features -- -D warnings
-cargo run -p tgx-app --bin TelegramExporter     # the window
-cargo run -p tgx-tg  --bin tgx -- login|chats|export "<title>"
-cargo run -p tgx-tg  --bin tgx -- export --db-only "<title>"   # sync the database
-cargo run -p tgx-parity -- archive reference                    # one leg on its own
+cargo run -p tt-app                              # the window
+cargo run -p tt-app -- login|chats|export "<title>"
+cargo run -p tt-app -- export --db "<title>"     # sync the database
+cargo run -p tgx-parity -- archive reference     # one leg on its own
 
 cargo test -p tga-report --test golden          # the analyser's golden; no corpus needed
 cargo test -p tga-db --test corpus -- --nocapture   # every database on L:
-cargo run -p tga-app --bin TelegramAnalyser -- <folder or .sqlite>
+cargo run -p tt-app -- analyse <folder or .sqlite>
         [--out P] [--chat ID|TITLE] [--digest] [--handles] [--no-fonts]
         [--stats P] [--notes P] [--stamp T]
-cargo run -p tga-app --bin TelegramAnalyser -- <output folder> --refresh [--force]
-cargo run -p tga-app --bin TelegramAnalyser -- --from-stats <s.json> --out <p>
+cargo run -p tt-app -- analyse <output folder> --refresh [--force]
+cargo run -p tt-app -- analyse --from-stats <s.json> --out <p>
 ```
+
+A release build is a GUI-subsystem exe, so **cmd.exe does not wait for it**:
+run an interactive command as `start /wait TelegramTools login`. PowerShell
+waits on its own. The output still reaches the terminal — `main` attaches to
+the parent's console.
 
 **Pass `-- --nocapture` to anything touching the analyser's corpus tests.**
 Their skips are `eprintln`s, and libtest discards stderr for a passing test, so
@@ -123,9 +130,8 @@ tgx-format   Desktop's JSON schema, key order, escaping, sizes. No I/O, network 
 tgx-html     the pages, written from serialised maps. MUST NOT depend on grammers-*.
 tgx-media    classification, folder layout, filenames, stripped thumbnails.
 tgx-archive  the database output: one <chat>.sqlite per chat. MUST NOT depend on grammers-* or tgx-tg.
-tgx-tg       grammers client, topics, engine, planning, download, enrichment (+ the `tgx` CLI).
+tgx-tg       grammers client, topics, engine, planning, download, enrichment.
 tgx-ui       the design system in egui: tokens, type scale, components, theme.
-tgx-app      the window. Depends only on tgx-ui + tgx-tg.
 tgx-parity   the oracle: lib + bin. Depends on format/html/media/archive, never on tgx-tg.
 
 tga-read     export folder -> model. Both layouts: ours (result.json per topic at
@@ -139,13 +145,18 @@ tga-stats    the shape of every figure, and the dump's format. Data only.
 tga-metrics  every figure, one pass. No I/O. Fills in a tga_stats::Stats.
 tga-report   the ramp, the SVG marks, the one HTML file. Reads a Stats.
              MUST NOT depend on tga-read or tga-metrics.
-tga-app      TelegramAnalyser.exe: arguments run the command, none open the window.
-             The only crate that reaches tga-docs and tga-db.
+tga-run      running an analysis: the `analyse` command line, the library of
+             exports, the worker. No toolkit. The only crate that reaches
+             tga-docs and tga-db.
+
+tt-app       TelegramTools.exe: the window, and both command lines behind its
+             argv. Depends only on tgx-ui + tgx-tg + tga-run.
 ```
 
 The analyser's rules sit in the same `layering.rs`: no `tga-*` crate reaches
-`grammers-*`, `tgx-tg` or `tgx-app`, and **no `tgx-*` crate reaches any
-`tga-*`**, so the exporter's oracle cannot move because a report changed.
+`grammers-*`, `tgx-tg` or `tt-app`, `tga-run` has no window in it, and **no
+`tgx-*` crate reaches any `tga-*`**, so the exporter's oracle cannot move
+because a report changed.
 
 A Telegram type in `tgx-html` would let Desktop's markup depend on wire shapes,
 and the harness could no longer replay recorded JSON through it. That is the
@@ -221,7 +232,7 @@ without `close()`
 leaves a file that is not truncated but **zero bytes**. Every path that can end
 an export goes through `Output::close`, with a `Drop` impl as backstop.
 
-**egui on the main thread, tokio on its own.** `tgx-app/src/bridge.rs` is the
+**egui on the main thread, tokio on its own.** `tt-app/src/bridge.rs` is the
 seam; shutdown drains, it does not stop.
 
 **A worker event repaints the window.** Otherwise a result sits in the channel
@@ -270,8 +281,12 @@ its own summary. The second writer always wins a race you did not know you had.
 ## The analyser
 
 Point it at a finished export, folder or database, and it writes one
-self-contained `report.html` beside it. Its window is a library: every export
-under a folder is a row, with what needs a report already ticked.
+self-contained `report.html` beside it. In the window it is the **Library**
+view (`tt-app/src/shell/library.rs`): every export under a folder is a row,
+with what needs a report already ticked. The folder it opens on is the
+exporter's destination. Its workers report on their own `mpsc` channels, not
+the bridge's, and wake the window through `tga_run::job::Wake` — a callback,
+so `tga-run` has no toolkit in it.
 
 **`tga-report` renders from a `tga_stats::Stats`, which is exactly what
 `--stats` dumps.** That is what lets a recorded dump replay through the writer
@@ -279,7 +294,7 @@ with no export on disk; the golden test and `--from-stats` both rest on it. The
 shape lives in `tga-stats` so the writer depends on neither the reader nor the
 metrics. `tga-notes` inherits the rule at one remove, so the
 `Export -> digest::Row` and `Doc -> Attachment` mappings live in the caller
-(`tga-app/src/cli.rs`), not in `tga-notes`.
+(`tga-run`), not in `tga-notes`.
 
 Every field of `Stats` has a `Default` and the struct is `#[serde(default)]`,
 so a dump with a branch missing renders an empty section. `dynamics` is an
@@ -412,11 +427,16 @@ because `cargo clean` would otherwise delete the session key and every export.
 `save.bat build` ships to `dist/`, so `dist/` can be copied anywhere and still
 work.
 
-`TelegramExporterData/` holds the `api_hash` and a Telegram **session key, which
+`TelegramToolsData/` holds the `api_hash` and a Telegram **session key, which
 is a bearer credential**: anyone who can read it can act as the account. It is
 gitignored and ACL-restricted on creation (a protection that does not exist on
 FAT32/exFAT). Do not run a live export or read stored credentials without the
 account holder saying so explicitly.
+
+It was `TelegramExporterData/`. `config::resolve_data_dir` renames the old
+folder on the first run that finds it alone, and **keeps using it if the
+rename fails** rather than starting an empty one — an empty folder would sign
+the user out and strand their credential under a name nothing reads.
 
 **`Exports/` is not protected, and the databases live there.**
 `<output_dir>/<chat>.sqlite` holds every message of that chat, every earlier
@@ -479,7 +499,7 @@ moves on a schedule.
 way.** `wgpu` drags in a shader compiler for a window that is a table, a
 transcript and a row of buttons; `default_fonts` would merge egui's own Ubuntu
 and Hack in as fallbacks, so a missing glyph would render in a typeface nobody
-chose. `tgx-ui` and `tgx-app` both declare it and must agree.
+chose. `tgx-ui` and `tt-app` both declare it and must agree.
 
 `libsql` is pinned **exactly** at `=0.9.30`, `default-features = false` with
 `features = ["core"]`. `grammers-session` already links that exact version for

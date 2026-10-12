@@ -19,14 +19,18 @@
 # so the picture was of a real account's chats, and taking one used the
 # session key. It now skips that probe and shows an invented account instead
 # (`shell::shot::chats`). The Viewer still reads real databases from the
-# destination, because that is local and what the view is for.
+# destination, because that is local and what the view is for. The Library
+# lists only the folder given as -Library, and nothing without one: its rows
+# are chat titles, and the destination's are real people's.
 
 [CmdletBinding()]
 param(
-    [ValidateSet('chats', 'settings', 'queue', 'viewer')]
+    [ValidateSet('chats', 'settings', 'queue', 'viewer', 'library')]
     [string]$View = 'chats',
     [string]$Out = "$env:TEMP\tgx-shot.png",
-    [string]$Exe = "dist\TelegramExporter.exe",
+    [string]$Exe = "dist\TelegramTools.exe",
+    # The folder the Library view lists, e.g. the parity corpus.
+    [string]$Library = '',
     # WxH, e.g. 900x620 for the floor. Empty keeps the default size.
     [string]$Size = '',
     # Long enough for a sign-in and a chat list; the app quits by itself as soon
@@ -43,6 +47,7 @@ Remove-Item $raw -Force -ErrorAction SilentlyContinue
 $env:TGX_SHOT = $raw
 $env:TGX_SHOT_VIEW = $View
 if ($Size) { $env:TGX_SHOT_SIZE = $Size }
+if ($Library) { $env:TGX_SHOT_LIBRARY = $Library }
 try {
     $p = Start-Process -FilePath $Exe -PassThru
     if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
@@ -51,10 +56,10 @@ try {
     }
 }
 finally {
-    Remove-Item Env:TGX_SHOT, Env:TGX_SHOT_VIEW, Env:TGX_SHOT_SIZE -ErrorAction SilentlyContinue
+    Remove-Item Env:TGX_SHOT, Env:TGX_SHOT_VIEW, Env:TGX_SHOT_SIZE, Env:TGX_SHOT_LIBRARY -ErrorAction SilentlyContinue
 }
 
-if (-not (Test-Path $raw)) { throw "no frame at $raw -- see TelegramExporterData\tgx.log" }
+if (-not (Test-Path $raw)) { throw "no frame at $raw -- see TelegramToolsData\tgx.log" }
 
 $bytes = [System.IO.File]::ReadAllBytes($raw)
 if ($bytes.Length -lt 12 -or [System.Text.Encoding]::ASCII.GetString($bytes, 0, 4) -ne 'TGXS') {

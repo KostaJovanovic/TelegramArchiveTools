@@ -287,7 +287,7 @@ impl Shell {
                     }
                 }
                 self.journal.push(
-                    "  Fixes are made from the command line: tgx doctor --fix, with no export \
+                    "  Fixes are made from the command line: TelegramTools doctor --fix, with no export \
                      running",
                 );
             }
