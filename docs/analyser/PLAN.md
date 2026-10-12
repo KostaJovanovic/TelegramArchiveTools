@@ -480,13 +480,14 @@ notes layouts. Those are facts about behaviour, not about provenance.
   `tga <folder> --digest` produces what a model reads, `analysis/EVENTS.md`
   tells it the shape, and `--from-stats ... --notes ...` re-renders in a second
   without touching the export.
-- **The language handshake — blocked on a decision.** Checked in TelegramTools
-  phase 3: the exporter does **not** ask which language an export is in, and
-  the report has no string lookup (`lang="en"` and every label are literals in
-  `tga-report`). So both halves would be new, and a language setting with no
-  second language to choose is a control that does nothing. It needs a decision
-  first: which languages, and who writes the report's strings in them. The
-  original note follows. The exporter asks the user which language the
+- **The language handshake — decided against, 2026-10-13: reports are
+  English.** Checked in TelegramTools phase 3: the exporter does **not** ask
+  which language an export is in, and the report has no string lookup
+  (`lang="en"` and every label are literals in `tga-report`). Both halves
+  would be new, and a language setting with no second language is a control
+  that does nothing. The account holder chose English only. Reopen it only
+  with named languages and someone to write the strings. The original note
+  follows, for the record. The exporter asks the user which language the
   export is in; the analyser should follow what the export says, which means the
   answer has to be recorded inside the export folder. It cannot go in
   `result.json` — that file is byte-exact with Telegram Desktop's own output —

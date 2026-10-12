@@ -212,7 +212,7 @@ already open in one repo or the other.
   what decides that.
 - **The language handshake** (analyser PLAN, "Still open"). The exporter
   writes the sidecar and the analyser reads it. Both halves are now one repo's
-  to do.
+  to do. *Decided against on 2026-10-13: reports are English (see the log).*
 - **Attachments inside a database** (analyser PLAN, "Still open"). Add
   `tga_docs::extract_bytes`, fed from `tgx-archive`'s blob read, which `tga-db`
   now goes through anyway.
@@ -595,9 +595,14 @@ every `report*.html` and `*.stats.json`. Phase 1 checks the merged
   and `DEFECTS.csv` stay the exporter half's; `docs/analyser/` the analyser's.
 - The scratch clone `_tt-import` is deleted; its last commit, `12ebea8`, is in
   master's history.
-- **Left to the account holder:** archiving the TelegramAnalyser repository on
-  GitHub, with a pointer here, and renaming this one to TelegramTools. Both
-  are public and outward-facing, so neither was done from here. The pointer
-  can be one line at the top of its README: *Merged into TelegramTools —
-  <url>. This repository is archived.*
-- **Open, needs a decision:** the language handshake (Phase 3).
+- **The account holder's, by their choice:** archiving the TelegramAnalyser
+  repository on GitHub with a pointer here, and renaming this one to
+  TelegramTools. Both are public, and the account holder chose to do both
+  themselves. The pointer can be one line at the top of its README: *Merged
+  into TelegramTools — <url>. This repository is archived.*
+- **The language handshake is closed: reports are English.** The account
+  holder's decision on 2026-10-13. Recorded in `docs/analyser/PLAN.md`; it
+  reopens only with named languages and someone to write the strings.
+
+**The plan is complete.** Every phase is done here. What remains is the two
+GitHub steps above, which the account holder is doing.
