@@ -54,10 +54,32 @@ pub struct Library {
     /// Titles and counts arriving for the rows. `None` once the counter has
     /// finished and hung up.
     counts: Option<Receiver<Counted>>,
-    /// Whether the folder has been pointed at anything yet. The first look at
-    /// the view does it, so a launch that never opens the Library never scans
-    /// a drive for it.
-    opened: bool,
+    /// The destination the Library last opened on, by itself. `None` until the
+    /// view is first shown, so a launch that never opens the Library never
+    /// scans a drive for it.
+    followed: Option<String>,
+    /// A row's Read, pressed this frame: the database and the chat in it. The
+    /// shell takes it and opens the Viewer — this view has no Viewer to open.
+    pub(super) read: Option<Read>,
+    /// Exports the exporter has finished, waiting for the analyser: the
+    /// database file or the export folder of each. See [`Library::report_later`].
+    waiting: Vec<PathBuf>,
+}
+
+/// What a click on one of a row's own actions asked for.
+enum RowAction {
+    Open(PathBuf),
+    Report(PathBuf),
+    Read(Read),
+    Reveal(PathBuf),
+}
+
+/// What a row's Read hands the shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Read {
+    pub path: PathBuf,
+    pub chat_id: i64,
+    pub title: String,
 }
 
 /// What a worker calls after every send: a repaint of this window.
@@ -67,16 +89,33 @@ fn wake(ctx: &egui::Context) -> Wake {
 }
 
 impl Library {
-    /// Point the view at its folder the first time it is shown.
+    /// Point the view at the destination: the first time it is shown, and
+    /// again whenever the destination changes in Settings — **unless the
+    /// folder was pointed somewhere else by hand**, which is a choice the next
+    /// edit to Settings must not undo.
     ///
-    /// The exporter's destination, unless a photograph asked for another:
-    /// **a shot never opens the real one**, because the rows are chat titles
-    /// and a shot is something that gets pasted into an issue.
-    pub(super) fn open_once(&mut self, output_dir: &str, ctx: &egui::Context) {
-        if std::mem::replace(&mut self.opened, true) {
+    /// A photograph never opens the real destination, because the rows are
+    /// chat titles and a shot is something that gets pasted into an issue; it
+    /// lists `TGX_SHOT_LIBRARY` or nothing.
+    pub(super) fn follow(&mut self, output_dir: &str, ctx: &egui::Context) {
+        // Not mid-run: the rows are the run's. The change is picked up on the
+        // first frame after it finishes.
+        if self.followed.as_deref() == Some(output_dir) || self.state.running {
+            return;
+        }
+        let first = self.followed.is_none();
+        let ours = self
+            .followed
+            .as_deref()
+            .is_some_and(|old| Path::new(old) == self.state.folder().unwrap_or_default());
+        self.followed = Some(output_dir.to_string());
+        if !(first || ours) {
             return;
         }
         let folder = if super::shot::path().is_some() {
+            if !first {
+                return;
+            }
             super::shot::library()
         } else {
             Some(output_dir.to_string()).filter(|d| !d.trim().is_empty())
@@ -113,7 +152,47 @@ impl Library {
     }
 
     fn start(&mut self, ctx: &egui::Context) {
-        let Some(targets) = self.state.start() else {
+        let targets = self.state.start();
+        self.spawn(targets, ctx);
+    }
+
+    /// One row's Make report: that row alone, whatever is ticked.
+    fn start_one(&mut self, path: &Path, ctx: &egui::Context) {
+        let targets = self.state.start_one(path);
+        self.spawn(targets, ctx);
+    }
+
+    /// "Report after export": a chat the exporter has just finished, to be
+    /// reported on as soon as the analyser is free. See
+    /// [`Library::report_waiting`].
+    pub(super) fn report_later(&mut self, export: PathBuf) {
+        if !self.waiting.contains(&export) {
+            self.waiting.push(export);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn waiting(&self) -> &[PathBuf] {
+        &self.waiting
+    }
+
+    /// Start a run on whatever exports finished while the analyser was busy —
+    /// all of them, one run. Called every frame; does nothing mid-run, so the
+    /// chats that finish during one are picked up by the next.
+    pub(super) fn report_waiting(&mut self, ctx: &egui::Context) {
+        if self.state.running || self.waiting.is_empty() {
+            return;
+        }
+        let targets: Vec<_> = std::mem::take(&mut self.waiting)
+            .iter()
+            .filter_map(|p| tga_run::refresh::target_for(p))
+            .collect();
+        let targets = self.state.start_these(targets);
+        self.spawn(targets, ctx);
+    }
+
+    fn spawn(&mut self, targets: Option<Vec<tga_run::refresh::Target>>, ctx: &egui::Context) {
+        let Some(targets) = targets else {
             return;
         };
         let request = Request {
@@ -412,7 +491,7 @@ impl Library {
                 .rect_filled(rect, egui::CornerRadius::ZERO, p.surface);
         }
 
-        let mut open = None;
+        let mut act = None;
         inside(ui, rect, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             // Painted, not clickable: the row is the control.
@@ -459,11 +538,42 @@ impl Library {
                 );
                 ui.add_space(space::STEP);
 
-                // Open sits on top of the row and takes its own click, so
-                // opening a report does not also tick the row.
-                if let Some(report) = entry.report() {
-                    if action(ui, caps("Open", p.fg), true).clicked() {
-                        open = Some(report.to_path_buf());
+                // **The row's three actions**, right to left so they read
+                // Read · report · Show in folder. Each sits on top of the row
+                // and takes its own click, so acting on a row does not also
+                // tick it.
+                if action(ui, caps("Show in folder", p.muted), true).clicked() {
+                    act = Some(RowAction::Reveal(entry.target.home()));
+                }
+                ui.add_space(space::STEP);
+                // Open when there is a current report to open; make one when
+                // there is not, or it is out of date. Off while any run goes:
+                // one analyser at a time.
+                match (mark, entry.report()) {
+                    (Mark::Current, Some(report)) => {
+                        if action(ui, caps("Open report", p.fg), true).clicked() {
+                            act = Some(RowAction::Open(report.to_path_buf()));
+                        }
+                    }
+                    _ => {
+                        let idle = !self.state.running;
+                        let ink = if idle { p.fg } else { p.muted };
+                        if action(ui, caps("Make report", ink), idle).clicked() {
+                            act = Some(RowAction::Report(path.clone()));
+                        }
+                    }
+                }
+                ui.add_space(space::STEP);
+                // Read is a database's alone — a folder export is Desktop's
+                // HTML, which a browser already reads — and needs the chat id,
+                // which arrives with the count.
+                if let Some(chat_id) = entry.chat_id {
+                    if action(ui, caps("Read", p.fg), true).clicked() {
+                        act = Some(RowAction::Read(Read {
+                            path: path.clone(),
+                            chat_id,
+                            title: entry.title.clone(),
+                        }));
                     }
                 }
                 ui.add_space(space::STEP);
@@ -477,10 +587,17 @@ impl Library {
             });
         });
 
-        if let Some(report) = open {
-            self.open_report(&report);
-        } else if response.clicked() {
-            self.state.toggle(&path);
+        match act {
+            Some(RowAction::Open(report)) => self.open_report(&report),
+            Some(RowAction::Report(path)) => self.start_one(&path, &ui.ctx().clone()),
+            Some(RowAction::Read(read)) => self.read = Some(read),
+            Some(RowAction::Reveal(dir)) => {
+                if let Err(e) = open::reveal(&dir) {
+                    self.state.status = e;
+                }
+            }
+            None if response.clicked() => self.state.toggle(&path),
+            None => {}
         }
     }
 
@@ -666,7 +783,7 @@ mod tests {
     #[test]
     fn a_launch_that_never_opens_the_library_scans_nothing() {
         let library = super::Library::default();
-        assert!(!library.opened);
+        assert!(library.followed.is_none());
         assert!(library.state.root.is_none());
         assert!(!library.busy());
     }

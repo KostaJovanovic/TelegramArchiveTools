@@ -223,6 +223,14 @@ pub struct Settings {
     /// Forum supergroups → one folder per topic.
     pub split_topics: bool,
 
+    /// When a chat finishes exporting, write its report beside it.
+    ///
+    /// The window queues the chat's export in the Library's analyser as soon
+    /// as the chat is done, so the reports are written while the next chat
+    /// downloads. Off by default: a report of a large chat takes seconds and a
+    /// megabyte, and an export is not always something wanted read.
+    pub report_after_export: bool,
+
     // Performance
     //
     // **There is no `chat_concurrency`.** This engine exports one chat at a
@@ -305,6 +313,7 @@ impl Default for Settings {
             member_roster: true,
             member_limit: 10_000,
             split_topics: true,
+            report_after_export: false,
             download_concurrency: 5,
             page_size: 1000,
             sort_mode: "recent".into(),

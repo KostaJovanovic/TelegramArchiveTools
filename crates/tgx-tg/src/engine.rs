@@ -66,6 +66,11 @@ pub struct ExportResult {
     /// which writes no folder at all. Everything that offers to open it has to
     /// cope with there being nothing to open.
     pub root: Option<PathBuf>,
+    /// The database this chat was synced into — `None` for a folder export.
+    /// Not always `<title>/<title>.sqlite`: a title clash puts the chat id in
+    /// the name (see [`ChatExporter::open_archive`]), so the path is reported
+    /// rather than worked out again by whoever wants the file.
+    pub database: Option<PathBuf>,
     pub messages: usize,
     pub topics: usize,
     pub empty_topics: usize,
@@ -606,12 +611,16 @@ impl<'a> ChatExporter<'a> {
     /// **Each database has a folder of its own**, `<chat>/<chat>.sqlite`, so
     /// the `-wal` and `-shm` files SQLite keeps beside it stay with it rather
     /// than scattering across `Exports/`.
-    async fn open_archive(&self, chat: &ChatInfo) -> Result<tgx_archive::Store, ExportError> {
+    async fn open_archive(
+        &self,
+        chat: &ChatInfo,
+    ) -> Result<(tgx_archive::Store, PathBuf), ExportError> {
         let dir = Path::new(&self.settings.output_dir);
         let base = tgx_media::topics::sanitize_component(&chat.title, "chat");
-        let store = tgx_archive::Store::open(&archive_path(dir, &base)?).await?;
+        let path = archive_path(dir, &base)?;
+        let store = tgx_archive::Store::open(&path).await?;
         if !store.holds_another_chat(chat.id).await? {
-            return Ok(store);
+            return Ok((store, path));
         }
         // Dropped before the second is opened: two live connections to two
         // files is not a problem, but leaving one open on a file this chat has
@@ -619,7 +628,7 @@ impl<'a> ChatExporter<'a> {
         // chat replaces it.
         drop(store);
         let distinct = archive_path(dir, &format!("{base} ({})", chat.id))?;
-        Ok(tgx_archive::Store::open(&distinct).await?)
+        Ok((tgx_archive::Store::open(&distinct).await?, distinct))
     }
 
     /// Export one chat into `root`.
@@ -675,7 +684,9 @@ impl<'a> ChatExporter<'a> {
         // is open at a time and the file the last chat wrote is released before
         // this one starts. See [`Self::open_archive`].
         self.store = if db {
-            Some(self.open_archive(chat).await?)
+            let (store, path) = self.open_archive(chat).await?;
+            result.database = Some(path);
+            Some(store)
         } else {
             None
         };

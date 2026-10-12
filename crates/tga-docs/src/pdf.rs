@@ -15,7 +15,6 @@
 //! the call is wrapped.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::Path;
 use std::sync::OnceLock;
 
 /// Stop caught PDF panics from printing.
@@ -50,14 +49,13 @@ fn quiet_parser_panics() {
     });
 }
 
-pub fn extract(path: &Path) -> Option<String> {
+pub fn extract(bytes: &[u8]) -> Option<String> {
     quiet_parser_panics();
-    let bytes = std::fs::read(path).ok()?;
-    // `AssertUnwindSafe` because `bytes` is a plain `Vec<u8>` that is moved in
-    // and never observed again on the unwind path -- there is no half-mutated
-    // state for a caught panic to leave behind.
+    // `AssertUnwindSafe` because `bytes` is only ever read, here and by the
+    // parser -- there is no half-mutated state for a caught panic to leave
+    // behind.
     let caught = catch_unwind(AssertUnwindSafe(|| {
-        pdf_extract::extract_text_from_mem(&bytes)
+        pdf_extract::extract_text_from_mem(bytes)
     }));
     match caught {
         Ok(Ok(text)) => Some(text),
@@ -75,17 +73,13 @@ mod tests {
 
     #[test]
     fn rubbish_is_none_rather_than_a_panic() {
-        let dir = std::env::temp_dir().join("tga-docs-pdf-test");
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join("truncated.pdf");
         // A header and nothing else, which is what a download cut short by a
         // dropped connection leaves on disk.
-        std::fs::write(&path, b"%PDF-1.4\n1 0 obj\n<< /Type /Cata").expect("write");
-        assert_eq!(extract(&path), None);
+        assert_eq!(extract(b"%PDF-1.4\n1 0 obj\n<< /Type /Cata"), None);
     }
 
     #[test]
-    fn a_missing_file_is_none() {
-        assert_eq!(extract(Path::new("no-such-file-anywhere.pdf")), None);
+    fn nothing_at_all_is_none() {
+        assert_eq!(extract(b""), None);
     }
 }

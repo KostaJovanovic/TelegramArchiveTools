@@ -1,7 +1,6 @@
 //! `.docx`: a zip holding `word/document.xml`, which holds the prose.
 
-use std::io::BufReader;
-use std::path::Path;
+use std::io::{BufReader, Cursor};
 
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -13,9 +12,8 @@ use quick_xml::Reader;
 /// KRGM minutes they hold page numbers and the template's letterhead, which is
 /// the same twelve words on every zapisnik and would be the most repeated text
 /// in the whole digest.
-pub fn extract(path: &Path) -> Option<String> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut archive = zip::ZipArchive::new(BufReader::new(file)).ok()?;
+pub fn extract(bytes: &[u8]) -> Option<String> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).ok()?;
     let entry = archive.by_name("word/document.xml").ok()?;
 
     let mut reader = Reader::from_reader(BufReader::new(entry));
@@ -90,21 +88,16 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    /// A one-entry zip holding the given `document.xml`, stored uncompressed.
-    fn docx(xml: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join("tga-docs-docx-test");
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join(format!("{:x}.docx", xml.len()));
-        let file = std::fs::File::create(&path).expect("create");
-        let mut zip = zip::ZipWriter::new(file);
+    /// The bytes of a one-entry zip holding the given `document.xml`.
+    fn docx(xml: &str) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         zip.start_file(
             "word/document.xml",
             zip::write::SimpleFileOptions::default(),
         )
         .expect("entry");
         zip.write_all(xml.as_bytes()).expect("write");
-        zip.finish().expect("finish");
-        path
+        zip.finish().expect("finish").into_inner()
     }
 
     #[test]
@@ -157,10 +150,6 @@ mod tests {
 
     #[test]
     fn a_file_that_is_not_a_zip_is_none_rather_than_a_panic() {
-        let dir = std::env::temp_dir().join("tga-docs-docx-test");
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join("truncated.docx");
-        std::fs::write(&path, b"PK\x03\x04 and then nothing").expect("write");
-        assert_eq!(extract(&path), None);
+        assert_eq!(extract(b"PK\x03\x04 and then nothing"), None);
     }
 }

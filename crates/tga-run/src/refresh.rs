@@ -94,20 +94,55 @@ pub fn plan(root: &Path) -> Vec<Target> {
         .collect()
 }
 
-/// Everything the window can analyse under `root`: its databases, or — when
-/// it holds none — the folder export it is.
+/// Everything the window can analyse under `root`, one row per export.
+///
+/// - its databases;
+/// - **the folder exports directly inside it**, when it is the exporter's
+///   destination: a Classic run writes one folder per chat beside the
+///   databases, and listing the destination as one export would read every
+///   chat in it as one;
+/// - or, when it holds neither, the folder export it is itself.
 ///
 /// Databases first, for the reason in `cli::run`: a folder that holds one may
 /// have no `result.json` in it at all.
 pub fn library(root: &Path) -> Vec<Target> {
-    let databases = plan(root);
-    if !databases.is_empty() {
-        return databases;
+    let mut out = plan(root);
+    if !is_export(root) {
+        let mut children: Vec<PathBuf> = std::fs::read_dir(root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir() && is_export(p) && tga_db::find(p).is_none())
+            .collect();
+        children.sort();
+        out.extend(children.into_iter().map(|dir| target(Source::Folder(dir))));
     }
-    if root.is_dir() && !tga_read::find_results(root, 3).is_empty() {
-        return vec![target(Source::Folder(root.to_path_buf()))];
+    if out.is_empty() && root.is_dir() && !tga_read::find_results(root, 3).is_empty() {
+        out.push(target(Source::Folder(root.to_path_buf())));
     }
-    Vec::new()
+    out
+}
+
+/// Whether `dir` is one export by itself, rather than a folder of them.
+///
+/// Telegram Desktop writes `export_results.html` at the root of every export,
+/// and a single chat's `result.json` sits there too; the exporter's forum
+/// export writes the same index page above its topic folders. A destination
+/// has neither: its exports are the folders inside it.
+pub fn is_export(dir: &Path) -> bool {
+    dir.join("result.json").is_file() || dir.join("export_results.html").is_file()
+}
+
+/// The one export at `path` — a database file or an export folder — as a
+/// target, or `None` if it is neither. What "report after export" hands the
+/// analyser for the chat that has just finished.
+pub fn target_for(path: &Path) -> Option<Target> {
+    if path.is_file() {
+        return tga_db::find(path).map(|db| target(Source::Database(db)));
+    }
+    (path.is_dir() && !tga_read::find_results(path, 3).is_empty())
+        .then(|| target(Source::Folder(path.to_path_buf())))
 }
 
 fn target(source: Source) -> Target {
@@ -234,7 +269,11 @@ pub fn one(
     let mut warning = None;
     if digest {
         let dir = folder.join("analysis");
-        let rows = crate::cli::digest_rows(&export, &people);
+        let stored = match &target.source {
+            Source::Database(db) => crate::cli::Stored::open(db, &export),
+            Source::Folder(_) => None,
+        };
+        let rows = crate::cli::digest_rows(&export, &people, stored.as_ref());
         if let Err(e) =
             tga_notes::write_digest(&rows, &dir).and_then(|_| tga_notes::write_brief(&dir))
         {
@@ -294,6 +333,141 @@ mod tests {
         assert!(done.messages > 0);
         assert!(base.join("report.html").is_file());
         assert!(!library(&base)[0].stale, "a fresh report is up to date");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_destination_lists_each_chat_folder_beside_its_databases() {
+        let base = std::env::temp_dir().join("tga-run-refresh-destination");
+        let _ = std::fs::remove_dir_all(&base);
+        let synthetic =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tga-report/tests/synthetic/result.json");
+        let now = SystemTime::now();
+        // A synced chat.
+        touch(&base.join("Synced").join("Synced.sqlite"), now);
+        // A Classic chat: result.json at its root.
+        std::fs::create_dir_all(base.join("Plain")).unwrap();
+        std::fs::copy(&synthetic, base.join("Plain").join("result.json")).unwrap();
+        // A Classic forum: the index page at its root, a topic folder below.
+        std::fs::create_dir_all(base.join("Forum").join("General")).unwrap();
+        touch(&base.join("Forum").join("export_results.html"), now);
+        std::fs::copy(&synthetic, base.join("Forum/General/result.json")).unwrap();
+        // Not an export at all.
+        std::fs::create_dir_all(base.join("Scratch")).unwrap();
+
+        let rows: Vec<Source> = library(&base).into_iter().map(|t| t.source).collect();
+        assert_eq!(
+            rows,
+            vec![
+                Source::Database(base.join("Synced").join("Synced.sqlite")),
+                Source::Folder(base.join("Forum")),
+                Source::Folder(base.join("Plain")),
+            ]
+        );
+        // Pointed at one of them, the forum is one export, not one per topic.
+        let forum: Vec<Source> = library(&base.join("Forum"))
+            .into_iter()
+            .map(|t| t.source)
+            .collect();
+        assert_eq!(forum, vec![Source::Folder(base.join("Forum"))]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_database_digest_reads_a_documents_text_out_of_the_database() {
+        // The case PLAN.md left open: a database has no folder for the file to
+        // be in, so the document's text has to come out of `blobs`.
+        let base = std::env::temp_dir().join("tga-run-refresh-stored-doc");
+        let _ = std::fs::remove_dir_all(&base);
+        let db = base.join("Dev").join("Dev.sqlite");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        const CHAT: i64 = 4242;
+        let message = |id: i64, text: &str, file: bool| {
+            let mut m = serde_json::json!({
+                "id": id, "type": "message", "date": "2026-07-16T10:00:00",
+                "date_unixtime": "1784196000", "from": "Ana", "from_id": "user1",
+                "text": text,
+            });
+            if file {
+                m["file"] = "files/zapisnik.txt".into();
+                m["file_name"] = "zapisnik 16.07.2026.txt".into();
+            }
+            m
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let store = tgx_archive::Store::open(&db).await.unwrap();
+                store
+                    .upsert_chat(CHAT, "Dev", "private_group", 0)
+                    .await
+                    .unwrap();
+                let head = serde_json::json!({});
+                store
+                    .upsert_topic(CHAT, 0, "Dev", head.as_object().unwrap(), 0)
+                    .await
+                    .unwrap();
+                for (id, text, file) in [(1, "dobar dan", false), (2, "evo zapisnika", true)] {
+                    let m = message(id, text, file);
+                    store
+                        .merge(CHAT, id, Some(0), m.as_object().unwrap(), 0)
+                        .await
+                        .unwrap();
+                }
+                store
+                    .put_blob(
+                        77,
+                        "document",
+                        "text/plain",
+                        Some("zapisnik 16.07.2026.txt"),
+                        "Prisutni: 14\nOdluka: usvojeno".as_bytes(),
+                        0,
+                    )
+                    .await
+                    .unwrap();
+                store
+                    .link_media(CHAT, 2, "file", 77, "document", "files/zapisnik.txt")
+                    .await
+                    .unwrap();
+            });
+
+        let target = target_for(&db).expect("a database");
+        one(
+            &target,
+            true,
+            false,
+            &tga_report::Options {
+                embed_fonts: false,
+                ..Default::default()
+            },
+            None,
+        )
+        .expect("analysed");
+        let digest =
+            std::fs::read_to_string(base.join("Dev").join("analysis").join("digest.jsonl"))
+                .expect("digest written");
+        assert!(
+            digest.contains("Odluka: usvojeno"),
+            "the stored document's text is in the digest: {digest}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_finished_export_is_found_by_its_own_path() {
+        let base = std::env::temp_dir().join("tga-run-refresh-target-for");
+        let _ = std::fs::remove_dir_all(&base);
+        let synthetic =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tga-report/tests/synthetic/result.json");
+        std::fs::create_dir_all(base.join("Plain")).unwrap();
+        std::fs::copy(&synthetic, base.join("Plain").join("result.json")).unwrap();
+        let folder = target_for(&base.join("Plain")).expect("a folder export");
+        assert_eq!(folder.source, Source::Folder(base.join("Plain")));
+        assert_eq!(folder.out, base.join("Plain").join("report.html"));
+        assert!(target_for(&base.join("Nowhere")).is_none());
+        std::fs::create_dir_all(base.join("Empty")).unwrap();
+        assert!(target_for(&base.join("Empty")).is_none());
         let _ = std::fs::remove_dir_all(&base);
     }
 

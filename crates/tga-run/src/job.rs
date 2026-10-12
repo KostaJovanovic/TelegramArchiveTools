@@ -178,6 +178,8 @@ pub struct Counted {
     /// The chat's real title, which the file's name only approximates: the
     /// exporter sanitises it for the filesystem.
     pub title: Option<String>,
+    /// That chat's id, so the window can open it in the Viewer.
+    pub chat_id: Option<i64>,
     pub messages: Option<usize>,
     /// How many chats the file holds. More than one only for a flat
     /// `telegram.sqlite` from before `tgx split`.
@@ -210,6 +212,7 @@ pub fn count(sources: Vec<Source>, generation: u64, wake: Wake) -> Receiver<Coun
                         generation,
                         path: db.clone(),
                         title: chats.first().map(|c| c.title.clone()),
+                        chat_id: chats.first().map(|c| c.id),
                         messages: chats.first().map(|c| c.messages),
                         chats: chats.len(),
                         error: None,
@@ -220,6 +223,7 @@ pub fn count(sources: Vec<Source>, generation: u64, wake: Wake) -> Receiver<Coun
                         generation,
                         path: db.clone(),
                         title: None,
+                        chat_id: None,
                         messages: None,
                         chats: 0,
                         error: Some(format!("{e:#}")),

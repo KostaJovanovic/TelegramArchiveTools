@@ -284,7 +284,10 @@ Point it at a finished export, folder or database, and it writes one
 self-contained `report.html` beside it. In the window it is the **Library**
 view (`tt-app/src/shell/library.rs`): every export under a folder is a row,
 with what needs a report already ticked. The folder it opens on is the
-exporter's destination. Its workers report on their own `mpsc` channels, not
+exporter's destination, and it lists the Classic folders there one per chat
+beside the databases. A row's **Read** is the only way into the Viewer, which
+is not on the rail. "Report after export" hands each finished chat to it
+(`Library::report_later`). Its workers report on their own `mpsc` channels, not
 the bridge's, and wake the window through `tga_run::job::Wake` — a callback,
 so `tga-run` has no toolkit in it.
 

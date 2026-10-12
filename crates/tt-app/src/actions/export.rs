@@ -354,6 +354,10 @@ pub async fn export(settings: Settings, pending: Pending, cancel: Cancel, tx: Ev
                     media_downloaded: result.media_downloaded,
                     media_failed: result.media_failed,
                     root: result.root.clone(),
+                    database: result
+                        .database
+                        .clone()
+                        .map(std::path::PathBuf::into_boxed_path),
                 });
                 report_result(&tx, &chat.title, &result, split);
             }

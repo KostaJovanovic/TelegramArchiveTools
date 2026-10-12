@@ -89,7 +89,23 @@ pub fn read(path: &Path, name: &str, posted: chrono::NaiveDate) -> Option<Doc> {
     if !is_document(name) {
         return None;
     }
-    let text = extract(path, name)?;
+    doc(extract(path, name)?, name, posted)
+}
+
+/// [`read`], for a document already in memory: one stored in a database's
+/// `blobs` table, which has no path to read it from.
+///
+/// The same answer for the same bytes — `read` is this with the file read
+/// first — so a chat reads the same whether it was exported as a folder or
+/// synced into a database.
+pub fn read_bytes(bytes: &[u8], name: &str, posted: chrono::NaiveDate) -> Option<Doc> {
+    if !is_document(name) {
+        return None;
+    }
+    doc(extract_bytes(bytes, name)?, name, posted)
+}
+
+fn doc(text: String, name: &str, posted: chrono::NaiveDate) -> Option<Doc> {
     let text = squeeze(&text);
     if text.trim().is_empty() {
         return None;
@@ -110,14 +126,25 @@ pub fn read(path: &Path, name: &str, posted: chrono::NaiveDate) -> Option<Doc> {
 /// attachment out of seven hundred is not worth failing the run over; the row
 /// simply keeps its filename and loses its text.
 pub fn extract(path: &Path, name: &str) -> Option<String> {
+    // The size is checked before anything is read, so a huge file is never
+    // loaded only to be refused.
     match std::fs::metadata(path) {
         Ok(meta) if meta.len() <= MAX_BYTES => {}
         _ => return None,
     }
+    extract_bytes(&std::fs::read(path).ok()?, name)
+}
+
+/// [`extract`], for a document already in memory. `name` decides the format,
+/// as it does there.
+pub fn extract_bytes(bytes: &[u8], name: &str) -> Option<String> {
+    if bytes.len() as u64 > MAX_BYTES {
+        return None;
+    }
     match extension(name).as_str() {
-        "txt" | "md" | "log" | "csv" => plain::extract(path),
-        "docx" => docx::extract(path),
-        "pdf" => pdf::extract(path),
+        "txt" | "md" | "log" | "csv" => plain::extract(bytes),
+        "docx" => docx::extract(bytes),
+        "pdf" => pdf::extract(bytes),
         _ => None,
     }
 }
@@ -176,5 +203,25 @@ mod tests {
     #[test]
     fn blank_runs_collapse_but_line_structure_survives() {
         assert_eq!(squeeze("a\n\n\n\n b \n\nc\n"), "a\n\nb\n\nc");
+    }
+
+    #[test]
+    fn a_document_reads_the_same_from_bytes_as_from_disk() {
+        let posted = chrono::NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+        let bytes = "Zapisnik sa sastanka\n\n\n16. jul 2026.".as_bytes();
+        let path = std::env::temp_dir().join("tga-docs-bytes-vs-disk.txt");
+        std::fs::write(&path, bytes).unwrap();
+        let disk = read(&path, "zapisnik.txt", posted).expect("from disk");
+        let memory = read_bytes(bytes, "zapisnik.txt", posted).expect("from bytes");
+        assert_eq!(disk.text, memory.text);
+        assert_eq!(disk.dates.best, memory.dates.best);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_document_are_none() {
+        let posted = chrono::NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+        assert!(read_bytes(b"\xFF\xD8\xFF", "photo.jpg", posted).is_none());
+        assert!(read_bytes(b"   \n ", "blank.txt", posted).is_none());
     }
 }

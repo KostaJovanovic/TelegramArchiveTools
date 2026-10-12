@@ -203,7 +203,7 @@ impl ViewerState {
         self.hit_at = None;
     }
 
-    fn is_open(&self, path: &std::path::Path, chat_id: i64) -> bool {
+    pub(super) fn is_open(&self, path: &std::path::Path, chat_id: i64) -> bool {
         self.open
             .as_ref()
             .is_some_and(|d| d.path == path && d.chat_id == chat_id)
@@ -274,37 +274,29 @@ impl Shell {
             });
     }
 
-    /// The database picker, the topic picker, Refresh and Export as Classic.
+    /// The way back, the chat's name, the topic picker, Refresh and Export as
+    /// Classic.
+    ///
+    /// **There is no database picker.** The Library lists what is on disk and
+    /// its Read opens one here; a second list of the same files on this screen
+    /// was the duplication the merge set out to remove.
     fn viewer_picker_row(&mut self, ui: &mut Ui) {
         let p = self.palette;
-        let mut chosen = None;
+        let mut back = false;
         let mut topic = None;
         let mut refresh = false;
         let mut unpack = false;
         row(ui, |ui| {
             ui.spacing_mut().item_spacing.x = space::STEP;
-            ui.label(eyebrow("Database", &p));
+            if action(ui, caps("\u{2190} Library", p.fg), true).clicked() {
+                back = true;
+            }
             let v = &self.viewer;
-            let current = match (&v.open, v.databases.is_empty(), v.listing) {
-                (Some(db), _, _) => db.title.clone(),
-                (None, true, true) => "Looking…".into(),
-                (None, true, false) => "None in the destination".into(),
-                (None, false, _) => "Choose a database".into(),
+            let current = match &v.open {
+                Some(db) => db.title.clone(),
+                None => "No chat open".into(),
             };
-            ui.add_enabled_ui(!v.databases.is_empty(), |ui| {
-                egui::ComboBox::from_id_salt("viewer-db")
-                    .selected_text(text(current, &p))
-                    .width(220.0)
-                    .truncate()
-                    .show_ui(ui, |ui| {
-                        for db in &v.databases {
-                            let on = v.is_open(&db.path, db.chat_id);
-                            if ui.selectable_label(on, text(&db.title, &p)).clicked() {
-                                chosen = Some(db.clone());
-                            }
-                        }
-                    });
-            });
+            ui.add(egui::Label::new(text(current, &p)).truncate());
             // **Only a forum has topics to pick between**, so only a forum
             // gets the picker; for any other chat it would offer one choice.
             if v.topics.len() > 1 {
@@ -344,8 +336,8 @@ impl Shell {
                 }
             });
         });
-        if let Some(db) = chosen {
-            self.viewer_open(db, None);
+        if back {
+            self.show(View::Library);
         }
         if let Some(t) = topic {
             self.viewer_set_topic(t);
@@ -540,20 +532,13 @@ impl Shell {
     /// Why the list is empty, when it is.
     fn viewer_empty(&self) -> Option<EmptyState> {
         let v = &self.viewer;
+        // Chats are opened from the Library now, so the way out of an empty
+        // Viewer is back there — not a picker this screen no longer has.
         if v.open.is_none() {
-            return Some(if v.listing {
-                EmptyState::new("Looking for databases…", None)
-            } else if v.databases.is_empty() {
-                EmptyState::new(
-                    "No databases in the destination",
-                    Some(
-                        "Database mode keeps one per chat there. Sync a chat, then press Refresh."
-                            .into(),
-                    ),
-                )
-            } else {
-                EmptyState::new("Choose a database", None)
-            });
+            return Some(EmptyState::new(
+                "No chat open",
+                Some("Open one with Read on its row in the Library.".into()),
+            ));
         }
         if v.loading {
             return Some(EmptyState::new("Reading the database…", None));

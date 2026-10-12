@@ -188,9 +188,50 @@ fn what_an_export_wrote_replaces_what_the_list_was_carrying() {
         media_downloaded: 830,
         media_failed: 6,
         root: Some(std::path::PathBuf::from("out")),
+        database: None,
     });
     assert_eq!(s.count_of(1), Some(6640), "a measured number wins");
     assert_eq!(s.queue.jobs()[0].state, JobState::Done);
+}
+
+fn done(chat_id: i64, root: Option<&str>, database: Option<&str>) -> Event {
+    Event::ChatDone {
+        messages_measured: false,
+        chat_id,
+        messages: 10,
+        expected: 0,
+        topics: None,
+        media_downloaded: 0,
+        media_failed: 0,
+        root: root.map(std::path::PathBuf::from),
+        database: database.map(|d| std::path::Path::new(d).into()),
+    }
+}
+
+#[test]
+fn a_finished_chat_waits_for_its_report_only_when_asked_to() {
+    let mut s = shell_with(vec![chat(1, "a", None), chat(2, "b", None)]);
+    s.queue.start([(1, "a".to_string()), (2, "b".to_string())]);
+    s.apply(done(1, Some("out/a"), None));
+    assert!(
+        s.library.waiting().is_empty(),
+        "the setting is off by default"
+    );
+
+    s.settings.report_after_export = true;
+    // The database is the export a sync keeps, so it wins over a folder.
+    s.apply(done(2, Some("out/b"), Some("out/b/b.sqlite")));
+    s.apply(done(1, Some("out/a"), None));
+    assert_eq!(
+        s.library.waiting(),
+        [
+            std::path::PathBuf::from("out/b/b.sqlite"),
+            std::path::PathBuf::from("out/a")
+        ]
+    );
+    // The same export twice in one run is reported once.
+    s.apply(done(1, Some("out/a"), None));
+    assert_eq!(s.library.waiting().len(), 2);
 }
 
 #[test]
@@ -357,6 +398,7 @@ fn a_chat_that_was_never_split_reports_no_topic_count() {
         media_downloaded: 12,
         media_failed: 0,
         root: Some(std::path::PathBuf::from("out")),
+        database: None,
     });
     assert_eq!(s.queue.jobs()[0].topics_text(), "\u{2014}");
 }
@@ -394,6 +436,7 @@ fn a_stopped_run_is_not_reported_as_a_success() {
         media_downloaded: 0,
         media_failed: 0,
         root: Some(std::path::PathBuf::from("out")),
+        database: None,
     });
     s.stop();
     s.apply(Event::Finished { stopped: true });
@@ -877,19 +920,39 @@ fn hit(id: i64) -> tgx_tg::search::Hit {
 }
 
 #[test]
-fn the_viewer_and_the_library_each_have_a_place_on_the_rail() {
-    assert_eq!(View::ALL.len(), 5);
-    assert!(View::ALL.contains(&View::Viewer));
+fn the_viewer_is_entered_from_the_library_and_lights_its_rail_entry() {
+    assert_eq!(View::ALL.len(), 4);
+    assert!(!View::ALL.contains(&View::Viewer));
     assert!(View::ALL.contains(&View::Library));
     // Settings last: it is consulted rarely, and the views above it are the
     // work, in the order it is done.
-    assert_eq!(View::ALL[4], View::Settings);
+    assert_eq!(View::ALL[3], View::Settings);
+    assert_eq!(View::Viewer.on_rail(), View::Library);
+    assert_eq!(View::Chats.on_rail(), View::Chats);
     assert_eq!(View::Viewer.label(), "Viewer");
     assert_eq!(View::Library.label(), "Library");
     let mut s = Shell::headless();
     s.show(View::Viewer);
     assert_eq!(s.body, View::Viewer);
     // And a run starting does not pull the user out of it.
+    s.suggest(View::Queue);
+    assert_eq!(s.body, View::Viewer);
+}
+
+#[test]
+fn a_library_rows_read_opens_that_chat_in_the_viewer_and_pins_it() {
+    let mut s = Shell::headless();
+    s.show(View::Library);
+    s.read(super::library::Read {
+        path: std::path::PathBuf::from(r"C:\nowhere\Dev\Dev.sqlite"),
+        chat_id: 7,
+        title: "Dev".into(),
+    });
+    assert_eq!(s.body, View::Viewer);
+    let open = s.viewer.open.as_ref().expect("opened");
+    assert_eq!((open.chat_id, open.title.as_str()), (7, "Dev"));
+    assert!(s.viewer.loading);
+    // Starting an export does not pull the reader out of it.
     s.suggest(View::Queue);
     assert_eq!(s.body, View::Viewer);
 }

@@ -32,3 +32,9 @@ chrono.workspace = true
 
 # The command half reads a recorded --stats dump straight back into a `Stats`.
 serde_json.workspace = true
+
+# A test builds a database with a document stored in it, through the
+# exporter's own `Store`, to prove the digest reads its text out of `blobs`.
+[dev-dependencies]
+tgx-archive = { path = "../tgx-archive" }
+tokio = { version = "1", features = ["rt"] }

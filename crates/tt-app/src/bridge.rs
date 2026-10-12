@@ -260,6 +260,10 @@ pub enum Event {
         /// The folder written, or `None` for a database-only run — which has no
         /// folder, so the queue's "open folder" affordance has nothing to open.
         root: Option<std::path::PathBuf>,
+        /// The database synced into, or `None` for a folder export. With
+        /// `root`, what "report after export" reports on. Boxed because every
+        /// `Event` is the size of its largest variant, and this one is it.
+        database: Option<Box<std::path::Path>>,
     },
     /// **A cancelled or failed export writes no count at all.** A truncated run
     /// must not leave its own length behind as the size of the chat.

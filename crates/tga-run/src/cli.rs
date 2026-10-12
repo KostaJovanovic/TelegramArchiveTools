@@ -276,7 +276,8 @@ pub fn run(args: Vec<String>) -> Result<()> {
 
     if digest {
         let target = folder.join("analysis");
-        let rows = digest_rows(&export, &people);
+        let stored = database.as_deref().and_then(|db| Stored::open(db, &export));
+        let rows = digest_rows(&export, &people, stored.as_ref());
         println!("  {}", tga_notes::write_digest(&rows, &target)?.display());
         println!("  {}", tga_notes::write_brief(&target)?.display());
     }
@@ -439,6 +440,7 @@ fn refresh_all(
 pub(crate) fn digest_rows(
     export: &tga_read::Export,
     people: &tga_metrics::People,
+    stored: Option<&Stored>,
 ) -> Vec<tga_notes::Row> {
     export
         .msgs
@@ -460,7 +462,7 @@ pub(crate) fn digest_rows(
             text: tga_notes::digest::squeeze(&msg.text),
             re: msg.reply_to,
             media: msg.media.clone(),
-            doc: attachment(export, msg),
+            doc: attachment(export, msg, stored),
             reactions: if msg.reactions.is_empty() {
                 None
             } else {
@@ -480,7 +482,11 @@ pub(crate) fn digest_rows(
 /// The cost is only paid on the `--digest` path. Reading seven hundred
 /// documents is not something a report should do -- it does not use them, and
 /// `--from-stats` renders one with no export on disk at all.
-fn attachment(export: &tga_read::Export, msg: &tga_read::Msg) -> Option<tga_notes::Attachment> {
+fn attachment(
+    export: &tga_read::Export,
+    msg: &tga_read::Msg,
+    stored: Option<&Stored>,
+) -> Option<tga_notes::Attachment> {
     if msg.file.is_empty() || !tga_docs::is_document(&msg.file_name) {
         return None;
     }
@@ -492,7 +498,18 @@ fn attachment(export: &tga_read::Export, msg: &tga_read::Msg) -> Option<tga_note
     // date are most of the value, and a scanned PDF -- a photograph of a page,
     // with no text layer -- is common enough that dropping it would quietly
     // hide a whole class of shared paperwork.
-    let doc = tga_docs::read(&path, &msg.file_name, posted);
+    //
+    // **On disk first, then the database's own copy.** A folder export has
+    // the file at `path` and never reaches the second branch. A database has
+    // no folder — `path` names where a folder export *would* have put it — so
+    // the bytes come out of its `blobs` table instead.
+    let doc = if path.is_file() {
+        tga_docs::read(&path, &msg.file_name, posted)
+    } else {
+        stored
+            .and_then(|s| s.bytes_of(msg.id))
+            .and_then(|bytes| tga_docs::read_bytes(&bytes, &msg.file_name, posted))
+    };
     let dates = doc
         .as_ref()
         .map(|d| d.dates.clone())
@@ -509,6 +526,42 @@ fn attachment(export: &tga_read::Export, msg: &tga_read::Msg) -> Option<tga_note
         text: doc.as_ref().map(|d| d.text.clone()).unwrap_or_default(),
         cut: doc.as_ref().is_some_and(|d| d.cut),
     })
+}
+
+/// A database export's files: which stored blob each message's document is.
+///
+/// Read whole when the digest is written — one row per message carrying
+/// media — and the bytes fetched one document at a time, only for messages
+/// whose file is a document this build can open.
+pub(crate) struct Stored {
+    db: PathBuf,
+    /// Message id to `(file_id, kind)`, the `file` role only: that is the one
+    /// a document is filed under; `photo` and `thumbnail` are pictures.
+    files: std::collections::HashMap<i64, (i64, String)>,
+}
+
+impl Stored {
+    /// The index for the chat an export read out of `db`, or `None` when
+    /// there is nothing to join — no chat id, or a database too old to have
+    /// the table. A digest without attachment text is what it wrote before.
+    pub(crate) fn open(db: &Path, export: &tga_read::Export) -> Option<Self> {
+        let chat_id = export.topics.iter().find_map(|t| t.chat_id)?;
+        let files = tga_db::media_index(db, chat_id)
+            .ok()?
+            .into_iter()
+            .filter(|((_, role), _)| role == "file")
+            .map(|((id, _), file)| (id, file))
+            .collect();
+        Some(Stored {
+            db: db.to_path_buf(),
+            files,
+        })
+    }
+
+    fn bytes_of(&self, message_id: i64) -> Option<Vec<u8>> {
+        let (file_id, kind) = self.files.get(&message_id)?;
+        tga_db::blob(&self.db, *file_id, kind).ok().flatten()
+    }
 }
 
 /// Write UTF-8 with `\n` line endings, as the Python's `newline="\n"` does.

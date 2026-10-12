@@ -28,7 +28,7 @@ impl Shell {
     /// not in is usually to find out whether it has anything in it.
     pub(super) fn rail(&mut self, ui: &mut Ui) {
         let p = self.palette;
-        let current = self.body;
+        let current = self.body.on_rail();
         let mut chosen = None;
 
         // The rail's own right edge, the full height — the hairline that says

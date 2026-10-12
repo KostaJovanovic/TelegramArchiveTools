@@ -507,6 +507,38 @@ every `report*.html` and `*.stats.json`. Phase 1 checks the merged
 - **Seen in the shots, left for phase 4:** the bar still offers `01 Sign in`
   when the rail already says who is signed in, and the Library shows its own
   status line above the window's, which still talks about the chat list.
+
+### Phase 3 — 2026-10-13
+
+- **The Library is the one listing of what is on disk.** It follows the
+  destination when Settings changes it, unless it was pointed elsewhere by
+  hand. A destination lists its databases **and its Classic folders, one row
+  per chat**: `refresh::library` used to read a folder holding no database as
+  one export, which on a Classic destination meant every chat as one. A folder
+  is one export when it has `result.json` or `export_results.html` at its
+  root, which Desktop writes at every export's root and the exporter writes
+  above a forum's topics.
+- Each row has **Read** (a database: opens it in the Viewer), **Make report**
+  or **Open report** (whichever is true — current or not), and **Show in
+  folder**. Make report is that row alone; the ticks are left as they were.
+- **The Viewer left the rail** and lost its database picker. It is entered by
+  Read and has a `← Library` link back; the rail lights Library while it shows.
+- **Report after export**, a setting under a new Reports section. Each chat is
+  handed to the Library as it finishes — its database if it has one, else its
+  folder — and the reports are written while the next chat downloads.
+  `ExportResult` now carries the database path, because a title clash puts the
+  chat id in the file's name and the window should not re-derive it.
+- **Attachments inside a database**: `tga_docs::read_bytes`/`extract_bytes`
+  beside the path versions, which now read the file and call them. The digest
+  reads a document from disk when it is there and from `blobs` otherwise
+  (`tga_run::cli::Stored`), so a folder export's digest is unchanged.
+- **The language handshake was not built.** Neither premise holds: the exporter
+  never asks which language an export is in, and the report has no string
+  lookup. A language setting with nothing to switch to would be a control that
+  does nothing. It needs a decision on which languages and who writes the
+  strings; recorded in `docs/analyser/PLAN.md`.
+- **Gates.** `merge_check` 49/49 identical (the three `L:` databases hold no
+  stored documents, so their digests did not move). Size 18.3 MB.
 - New icon (`tools/make_icon.py`): the exporter's upper rule and the analyser's
   baseline and bars, the red bar reaching from one to the other.
 - `save.bat build` stops and removes `TelegramExporter.exe` and

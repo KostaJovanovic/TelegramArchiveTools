@@ -38,6 +38,10 @@ pub struct Entry {
     pub messages: Option<usize>,
     /// Chats in the file. More than one only for a flat `telegram.sqlite`.
     pub chats: usize,
+    /// The chat a database holds — its largest, as for `title` — once the
+    /// file has been opened. What the window's Read needs to open the Viewer
+    /// on it. Always `None` for a folder export.
+    pub chat_id: Option<i64>,
     pub outcome: Outcome,
 }
 
@@ -291,6 +295,7 @@ impl State {
                         target,
                         messages: None,
                         chats: 1,
+                        chat_id: None,
                         outcome: Outcome::Idle,
                     }
                 }
@@ -327,15 +332,32 @@ impl State {
         }
         let behind = self.entries.iter().filter(|e| e.target.stale).count();
         let n = self.entries.len();
-        let kind = match (&self.entries[0].target.source, n) {
-            (Source::Folder(_), _) => "folder export",
-            (Source::Database(_), 1) => "database",
-            (Source::Database(_), _) => "databases",
+        // A destination holds both kinds: Classic folders beside synced
+        // databases. Each is named with its own count, databases first, the
+        // order the rows are listed in.
+        let databases = self
+            .entries
+            .iter()
+            .filter(|e| matches!(e.target.source, Source::Database(_)))
+            .count();
+        let folders = n - databases;
+        let plural = |count: usize, one: &str, many: &str| match count {
+            1 => format!("1 {one}"),
+            c => format!("{c} {many}"),
+        };
+        let what = match (databases, folders) {
+            (d, 0) => plural(d, "database", "databases"),
+            (0, f) => plural(f, "folder export", "folder exports"),
+            (d, f) => format!(
+                "{} and {}",
+                plural(d, "database", "databases"),
+                plural(f, "folder export", "folder exports")
+            ),
         };
         match behind {
-            0 => format!("{n} {kind}, every report up to date."),
-            b if b == n && n > 1 => format!("{n} {kind}, none reported on yet."),
-            b => format!("{n} {kind}, {b} need a report."),
+            0 => format!("{what}, every report up to date."),
+            b if b == n && n > 1 => format!("{what}, none reported on yet."),
+            b => format!("{what}, {b} need a report."),
         }
     }
 
@@ -461,6 +483,40 @@ impl State {
         Some(targets)
     }
 
+    /// Report on one row, whatever is ticked: a row's own Report action.
+    ///
+    /// The ticks are left as they were. They are a selection someone is
+    /// building, and pressing Report on one row is not a statement about the
+    /// others — except that this row, once written, is unticked like any other
+    /// by [`State::apply`].
+    pub fn start_one(&mut self, path: &Path) -> Option<Vec<Target>> {
+        let target = self.entry_mut(path)?.target.clone();
+        self.start_these(vec![target])
+    }
+
+    /// A run over these targets, listed rows or not: "report after export"
+    /// hands over the chats a run has just written, and the library may be
+    /// pointed somewhere else entirely. A target that is a row is marked
+    /// queued like any other; one that is not is simply reported on.
+    pub fn start_these(&mut self, targets: Vec<Target>) -> Option<Vec<Target>> {
+        if self.running || targets.is_empty() {
+            return None;
+        }
+        for t in &targets {
+            if let Some(e) = self.entry_mut(t.path()) {
+                e.outcome = Outcome::Queued;
+            }
+        }
+        self.running = true;
+        self.stopping = false;
+        self.done = 0;
+        self.of = targets.len();
+        self.written = 0;
+        self.failed.clear();
+        self.status = "Starting".into();
+        Some(targets)
+    }
+
     /// How full the bar is, or `None` when nothing is running.
     pub fn fill(&self) -> Option<f32> {
         self.running
@@ -532,6 +588,7 @@ impl State {
         if let Some(title) = counted.title {
             e.title = title;
         }
+        e.chat_id = counted.chat_id;
         e.messages = counted.messages;
         e.chats = counted.chats.max(1);
         if let Some(error) = counted.error {
@@ -634,6 +691,7 @@ mod tests {
             title: name.into(),
             messages,
             chats: 1,
+            chat_id: None,
             outcome: Outcome::Idle,
         }
     }
@@ -783,21 +841,52 @@ mod tests {
             generation: 1,
             path: PathBuf::from("Admini/Admini.sqlite"),
             title: Some("Admini x koordinatori".into()),
+            chat_id: Some(-1_007),
             messages: Some(5),
             chats: 1,
             error: None,
         });
         assert_eq!(state.entries[2].messages, None);
+        assert_eq!(state.entries[2].chat_id, None);
         state.apply_count(Counted {
             generation: 2,
             path: PathBuf::from("Admini/Admini.sqlite"),
             title: Some("Admini x koordinatori".into()),
+            chat_id: Some(-1_007),
             messages: Some(5),
             chats: 1,
             error: None,
         });
         assert_eq!(state.entries[2].messages, Some(5));
         assert_eq!(state.entries[2].title, "Admini x koordinatori");
+        assert_eq!(state.entries[2].chat_id, Some(-1_007));
+    }
+
+    #[test]
+    fn one_rows_report_leaves_the_other_ticks_alone() {
+        let mut state = library();
+        state.selected = state
+            .entries
+            .iter()
+            .map(|e| e.target.path().to_path_buf())
+            .collect();
+        let admini = PathBuf::from("Admini/Admini.sqlite");
+        let targets = state.start_one(&admini).expect("idle, and the row exists");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].path(), admini);
+        assert_eq!(state.of, 1);
+        assert_eq!(state.entries[2].outcome, Outcome::Queued);
+        assert_eq!(state.entries[0].outcome, Outcome::Idle);
+        assert_eq!(state.selected.len(), 3, "the selection is not the run");
+        // One at a time: a second press while it runs does nothing.
+        assert!(state.start_one(&admini).is_none());
+    }
+
+    #[test]
+    fn a_row_that_is_not_there_starts_nothing() {
+        let mut state = library();
+        assert!(state.start_one(Path::new("Gone/Gone.sqlite")).is_none());
+        assert!(!state.running);
     }
 
     #[test]

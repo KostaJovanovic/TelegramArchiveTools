@@ -409,11 +409,10 @@ pub fn blob(path: &Path, file_id: i64, kind: &str) -> Result<Option<Vec<u8>>> {
 /// 263 rows for a 7,077-message archive — so a map costs less than a query per
 /// message.
 ///
-/// Unused so far: reading an attachment out of `blobs` needs `tga-docs` to
-/// take bytes where it now takes a path. Here because it is the half that
-/// belongs to this crate, and because the key is `(file_id, kind)` — the
-/// shipped schema's, which is *not* the `(family, file_id)` the exporter's own
-/// `DATABASE.md` specifies.
+/// What the digest joins on to read a document out of `blobs` with
+/// `tga_docs::read_bytes` (`tga_run::cli::Stored`). The key is `(file_id,
+/// kind)` — the shipped schema's, which is *not* the `(family, file_id)` the
+/// exporter's own `DATABASE.md` specifies.
 pub fn media_index(path: &Path, chat_id: i64) -> Result<HashMap<(i64, String), (i64, String)>> {
     block(async {
         Ok(open(path)

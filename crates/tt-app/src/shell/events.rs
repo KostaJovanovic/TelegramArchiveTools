@@ -200,7 +200,18 @@ impl Shell {
                 media_downloaded,
                 media_failed,
                 root,
+                database,
             } => {
+                // **Report after export.** Handed over as each chat finishes,
+                // not when the run does, so the reports are written while the
+                // next chat downloads. The database when there is one — that
+                // is the export a sync keeps — else the folder.
+                if self.settings.report_after_export {
+                    let database = database.map(std::path::PathBuf::from);
+                    if let Some(export) = database.or_else(|| root.clone()) {
+                        self.library.report_later(export);
+                    }
+                }
                 self.queue.finished(
                     chat_id,
                     messages,

@@ -12,7 +12,7 @@ description = "An export that is a SQLite file rather than a folder."
 # table and hand it to the reader. A second parser would drift from the first,
 # and the two clocks and the thread rule are exactly what it would drift on.
 #
-# Only `tga-app` depends on this, the way only `tga-app` depends on `tga-docs`.
+# Only `tga-run` depends on this, the way only `tga-run` depends on `tga-docs`.
 [dependencies]
 tga-read = { path = "../tga-read" }
 serde_json = { workspace = true }

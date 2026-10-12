@@ -465,14 +465,11 @@ notes layouts. Those are facts about behaviour, not about provenance.
 
 ## Still open
 
-- **A database export loses its attachments.** `tga-docs` takes a `&Path` and
-  the bytes are a `blobs` row, so a `.docx` inside a `telegram.sqlite` gets a
-  name and an inferred date and no text. The halves exist —
-  `tga_db::media_index` maps a message to `(file_id, kind)` and `tga_db::blob`
-  returns the bytes — and what is missing is an `extract_bytes` beside
-  `tga_docs::extract`, plus a `file_id` on `Msg` to join them. Worth doing when
-  a database export is made with the media actually fetched; the one on disk
-  holds a single `.docx`.
+- ~~A database export loses its attachments.~~ Done in TelegramTools phase
+  3: `tga_docs::read_bytes` beside `read`, and the digest joins a message to
+  its stored file through `tga_db::media_index` (`tga_run::cli::Stored`). A
+  file on disk is still read from disk first, so a folder export's digest is
+  unchanged.
 - **`versions` and `runs` are read and then dropped.** The database keeps the
   payload before each edit and a record of every pass. Neither has anywhere to
   go in `Stats` and the report has no section for either, so `tga-db` exposes
@@ -483,7 +480,13 @@ notes layouts. Those are facts about behaviour, not about provenance.
   `tga <folder> --digest` produces what a model reads, `analysis/EVENTS.md`
   tells it the shape, and `--from-stats ... --notes ...` re-renders in a second
   without touching the export.
-- **The language handshake.** The exporter asks the user which language the
+- **The language handshake — blocked on a decision.** Checked in TelegramTools
+  phase 3: the exporter does **not** ask which language an export is in, and
+  the report has no string lookup (`lang="en"` and every label are literals in
+  `tga-report`). So both halves would be new, and a language setting with no
+  second language to choose is a control that does nothing. It needs a decision
+  first: which languages, and who writes the report's strings in them. The
+  original note follows. The exporter asks the user which language the
   export is in; the analyser should follow what the export says, which means the
   answer has to be recorded inside the export folder. It cannot go in
   `result.json` — that file is byte-exact with Telegram Desktop's own output —

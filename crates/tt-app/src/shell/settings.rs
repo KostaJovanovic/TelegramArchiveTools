@@ -104,6 +104,10 @@ const EXTRAS: [(&str, &str, &str); 6] = [
     ),
 ];
 
+const REPORT_AFTER_HELP: &str = "As each chat finishes, its report.html is written beside \
+     it — the folder, or the chat's database — while the next chat downloads. The \
+     Library shows them, and the report options there apply.";
+
 /// What the mode really chooses, which is more than a file format.
 const MODE_HELP: &str = "Classic reproduces Telegram Desktop's own export: a folder per chat, \
      browsable HTML and result.json, read from the beginning of the chat every \
@@ -140,6 +144,7 @@ impl Shell {
                     self.beyond_desktop_section(&mut cols[0]);
 
                     self.media_section(&mut cols[1]);
+                    self.reports_section(&mut cols[1]);
                     self.performance_section(&mut cols[1]);
                     self.appearance_section(&mut cols[1]);
                 });
@@ -450,6 +455,23 @@ impl Shell {
             |f| &mut f.member_limit,
         ) {
             self.commit_settings();
+        }
+    }
+
+    /// What the analyser does with an export. One setting for now; the
+    /// Library's run options join it in the redesign (TELEGRAMTOOLS.md §4.2).
+    fn reports_section(&mut self, ui: &mut Ui) {
+        let p = self.palette;
+        section(ui, "Reports", &p);
+        if self.check(
+            ui,
+            "report_after_export",
+            "Write a report after each export",
+            REPORT_AFTER_HELP,
+            self.settings.report_after_export,
+            true,
+        ) {
+            self.toggle_setting(|s| s.report_after_export = !s.report_after_export);
         }
     }
 

@@ -75,24 +75,29 @@ pub enum View {
     /// Read what the databases hold: one chat at a time, deleted and edited
     /// messages marked, every earlier version, a search.
     ///
-    /// **After the export views, because it is not part of making an
-    /// export** — those are the sequence, this is what the sequence leaves
-    /// behind. It needs no sign-in and no connection.
+    /// **Not on the rail: a place you go into from the Library**, by a row's
+    /// Read, with a way back. It was a fourth tab with a database picker of
+    /// its own, which made two listings of the same files. It needs no
+    /// sign-in and no connection.
     Viewer,
-    /// Every export under a folder, and a report for each: what was the
-    /// analyser's whole window. See [`library`].
+    /// Every export on disk, and a report for each: what was the analyser's
+    /// whole window, and now also the way into the Viewer. See [`library`].
     Library,
 }
 
 impl View {
-    /// In the order the rail lists them.
-    pub const ALL: [View; 5] = [
-        View::Chats,
-        View::Queue,
-        View::Viewer,
-        View::Library,
-        View::Settings,
-    ];
+    /// The rail, in order. The Viewer is reached through the Library.
+    pub const ALL: [View; 4] = [View::Chats, View::Queue, View::Library, View::Settings];
+
+    /// Which rail entry is lit while this view shows: the Viewer's is the
+    /// Library's, because that is where it was opened from and where its back
+    /// link goes.
+    pub fn on_rail(self) -> View {
+        match self {
+            View::Viewer => View::Library,
+            v => v,
+        }
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -518,6 +523,22 @@ impl Shell {
         self.body_pinned = true;
     }
 
+    /// A Library row's Read: open that chat in the Viewer and go there.
+    ///
+    /// Pinned like a rail click, because it is one — the user asked to be in
+    /// the Viewer, and a run starting must not take them out of it.
+    pub(super) fn read(&mut self, read: library::Read) {
+        let db = tgx_tg::viewer::Database {
+            chat_id: read.chat_id,
+            title: read.title,
+            path: read.path,
+        };
+        if !self.viewer.is_open(&db.path, db.chat_id) {
+            self.viewer_open(db, None);
+        }
+        self.show(View::Viewer);
+    }
+
     /// Show a view because something happened. Yields to a hand-made choice.
     ///
     /// The one caller is the start of an export: that is the moment the answer
@@ -732,8 +753,9 @@ impl eframe::App for Shell {
         // The analyser's workers report on their own channels, not the
         // bridge's; they wake the window the same way. See `library`.
         self.library.drain();
+        self.library.report_waiting(ctx);
         if self.body == View::Library {
-            self.library.open_once(&self.settings.output_dir, ctx);
+            self.library.follow(&self.settings.output_dir, ctx);
             self.library.dropped(ctx);
         }
         // egui draws nothing on an idle window, so the timer has to ask for the
@@ -799,6 +821,10 @@ impl eframe::App for Shell {
                 View::Viewer => self.viewer_panel(ui),
                 View::Library => self.library.panel(ui, &p),
             });
+        // A row's Read, pressed in the frame just drawn.
+        if let Some(read) = self.library.read.take() {
+            self.read(read);
+        }
 
         // Last, so it takes its clicks before anything under it does.
         self.login_panel(ctx);
