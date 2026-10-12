@@ -304,7 +304,7 @@ pub async fn unpack(
                 })
                 .collect()
         })
-        .map_err(|e| format!("Export as Classic failed: {e}"));
+        .map_err(|e| format!("Export as folder failed: {e}"));
     let _ = tx.send(Event::Unpacked(done));
 }
 

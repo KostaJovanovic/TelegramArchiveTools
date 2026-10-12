@@ -544,3 +544,45 @@ every `report*.html` and `*.stats.json`. Phase 1 checks the merged
 - `save.bat build` stops and removes `TelegramExporter.exe` and
   `TelegramAnalyser.exe` from `dist\`; `baseline`, `report` and `run` go
   through `tt-app`. CI builds, size-checks and uploads the one exe.
+
+### Phase 4 — 2026-10-13
+
+- **One commit, not one per screen.** The screens share the frame and the new
+  components, and each intermediate state would have been a window half in
+  one vocabulary and half in the other. Before: `target\shots\phase3\`;
+  after: `target\shots\phase4\` (chats, activity as `queue`, library on
+  `reference\`, settings at the default size and at the 900x620 floor).
+- **`tgx-ui`:** `badge` with three `Tone`s (quiet, ink, accent — accent only
+  for this run); `setting_row` (name, one muted line, control on the right,
+  laid out control-first so the line wraps instead of pushing it off);
+  `nav_item` (sentence case, count in the mono, a 2pt bar when selected,
+  32pt, the whole width the hit target); the tick box draws a tick instead of
+  a fill. A test for each. The module docs state the capitals rule.
+- **Frame.** The rail uses `nav_item`. The numbered `01/02/03` bar is gone:
+  one primary per view, top right — Chats *Export N chats* / *Add N to queue*
+  / *Resume* (or *Sign in* while nobody is), Activity *Stop*, Library *Make N
+  reports*. Sign in otherwise lives at the rail's foot. The view's name is a
+  sentence-case heading. The status bar is no longer uppercased, no longer
+  says "8 chats" after a reload, and carries the analyser's line (and its
+  bar) while the Library shows or a report run goes — the Library's own
+  status line is gone.
+- **Chats.** Reload and Count sit in the filter row; Update databases stays
+  in the foot with the selection verbs. On-disk and converted-group marks
+  are badges; captions, verbs and the selection total are sentence case.
+- **Activity** (was Queue). A Reports section above the exports lists this
+  session's report runs with badges, a bar and the analyser's status. Stop
+  stops both. Export states are badges, a failure is its own error in ink.
+- **Library.** Badges for the marks, sentence-case row actions; the foot is
+  selection only. *Embed fonts*, *Write the digest* and *Handles only* are
+  persisted settings now (`report_fonts`, `report_digest`,
+  `report_handles`), handed to the Library each frame.
+- **Settings.** Regrouped into Where exports go / What an export contains /
+  Media / Reports / Appearance / Advanced, each row a `setting_row`. Three
+  `[?]` remain: the format, Check the whole history, Profile pictures.
+- **Copy.** Classic→Folder in every visible string (the setting key is still
+  `export_db`); Re-read the whole history→Check the whole history; Queue→
+  Activity; Viewer→Read; Refresh→Reload; Changed→Out of date; Analysing→
+  Making report; Export as Classic→Export as folder. Sign-in errors get one
+  sentence of what to do before the error itself.
+- **Not done:** the light appearance was not photographed; `tga-report`'s CSS
+  was out of scope, as planned.

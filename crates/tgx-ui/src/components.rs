@@ -3,6 +3,13 @@
 //! Everything here paints the Swiss language: hairline rules instead of boxes,
 //! square corners, letterspaced uppercase micro-type, one red.
 //!
+//! **Capitals name a section and nothing else** (TELEGRAMTOOLS.md §4.3). A
+//! label of three words or fewer that heads a group — `MEDIA`, `WHERE EXPORTS
+//! GO` — is [`eyebrow`] or [`title`]. A state, a row action, a caption, a
+//! count, an option: sentence case, through [`text`], [`meta`], [`badge`] or
+//! [`figure`]. Capitals carrying data was the loudest mark in the design spent
+//! on every row, so it marked nothing.
+//!
 //! **Nothing here animates.** The design's `--dur-*` tokens exist for
 //! transitions, but the only thing that ever used one was the drifting grid
 //! backdrop, and that is gone by decision (see `ROADMAP.md`, Phase 6). The
@@ -68,7 +75,7 @@
 //! grouped nothing, which is a wireframe rather than a layout.
 
 use crate::fonts;
-use crate::tokens::{metrics, rhythm, window, Palette};
+use crate::tokens::{metrics, rhythm, space, window, Palette};
 use eframe::egui::{
     self, text::LayoutJob, Color32, CornerRadius, CursorIcon, Margin, Response, Sense, Stroke,
     TextFormat, Ui, Vec2,
@@ -396,7 +403,7 @@ pub fn uppercase(text: &str) -> String {
     text.to_uppercase()
 }
 
-/// A hairline square, filled when ticked.
+/// A hairline square, with a tick in it when ticked.
 ///
 /// Square corners — `metrics::RADIUS` is 0 and that is the design, not a
 /// default. It is applied rather than left implicit so that a future rounded
@@ -404,9 +411,9 @@ pub fn uppercase(text: &str) -> String {
 ///
 /// **Disabled is a muted border, never a missing one.** A control that is off
 /// and a control that is unavailable must not paint the same, or the only way
-/// to tell them apart is to click and watch nothing happen. Ticked-and-disabled
-/// fills with `muted` rather than `rule`: `rule` is the divider grey and a box
-/// filled with it reads as empty on both appearances.
+/// to tell them apart is to click and watch nothing happen. A ticked-and-
+/// disabled box draws its tick in `muted`, not `rule`: `rule` is the divider
+/// grey and a mark in it reads as no mark on both appearances.
 ///
 /// The box is a fixed 12px and never shrinks: in a row with a long title, a
 /// flexible tick vanishes before the title does.
@@ -450,24 +457,190 @@ pub fn tick_mark(ui: &mut Ui, ticked: bool, palette: &Palette) {
 }
 
 /// Shared, so an interactive tick and an inert one cannot drift apart.
+///
+/// **A ticked box has a tick in it.** It used to be a filled square, so ticked
+/// and unticked differed only in brightness — and beside a row that fills on
+/// hover, a filled box and a hovered row were the same grey. A check is a
+/// shape, which reads at any brightness and in either appearance. Painted as
+/// two segments rather than typed, for [`disclosure`]'s reason: `default_fonts`
+/// is off and there is no glyph to fall back to.
 fn paint_tick(ui: &Ui, rect: egui::Rect, ticked: bool, enabled: bool, hovered: bool, p: &Palette) {
     let ink = if enabled { p.fg } else { p.muted };
-    let border = match (enabled, hovered) {
-        (true, true) => p.fg,
-        (true, false) => p.hairline,
-        (false, _) => p.muted,
+    let border = match (enabled, hovered, ticked) {
+        (true, true, _) | (true, _, true) => p.fg,
+        (true, false, false) => p.hairline,
+        (false, _, _) => p.muted,
     };
     let painter = ui.painter();
-    if ticked {
-        painter.rect_filled(rect, radius(), ink);
-    }
     painter.rect_stroke(
         rect,
         radius(),
         Stroke::new(1.0_f32, border),
         egui::StrokeKind::Inside,
     );
+    if ticked {
+        let r = rect.shrink(rect.width() * 0.22);
+        let stroke = Stroke::new(1.6_f32, ink);
+        let knee = egui::pos2(r.left() + r.width() * 0.38, r.bottom() - r.height() * 0.08);
+        painter.line_segment([egui::pos2(r.left(), r.center().y), knee], stroke);
+        painter.line_segment(
+            [knee, egui::pos2(r.right(), r.top() + r.height() * 0.1)],
+            stroke,
+        );
+    }
 }
+
+/// How loud a [`badge`] is. Three meanings, not three sizes — see the module
+/// docs for the colour sentences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// Nothing to do: `Up to date`, `Queued`.
+    Quiet,
+    /// Something wants doing: `No report`, `Out of date`, `Failed`.
+    Ink,
+    /// **This run**, and nothing else: `Running`.
+    Accent,
+}
+
+/// A row's state, in a hairline box with **sentence-case** text.
+///
+/// It replaces state words set in tracked capitals (`NO REPORT`, `CHANGED`),
+/// which was capitals carrying data: the strongest typographic mark in the
+/// design, spent on every row, so it marked nothing. A box says "this is a
+/// state" and leaves the word itself to be read.
+pub fn badge(ui: &mut Ui, label: &str, tone: Tone, palette: &Palette) -> Response {
+    let (ink, edge) = match tone {
+        Tone::Quiet => (palette.muted, palette.rule),
+        Tone::Ink => (palette.fg, palette.hairline),
+        Tone::Accent => (palette.accent, palette.accent),
+    };
+    let text = egui::RichText::new(label)
+        .font(fonts::sans(window::LABEL))
+        .color(ink);
+    let galley = egui::WidgetText::from(text).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Body,
+    );
+    let pad = egui::vec2(6.0, 2.0);
+    let (rect, response) = ui.allocate_exact_size(galley.size() + pad * 2.0, Sense::hover());
+    let painter = ui.painter();
+    painter.rect_stroke(
+        rect,
+        radius(),
+        Stroke::new(1.0_f32, edge),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(rect.min + pad, galley, ink);
+    response
+}
+
+/// One setting: its name, **one line saying what it does, always visible**,
+/// and its control on the right.
+///
+/// This is what replaces most `[?]` marks. Hiding what a switch does behind a
+/// click made the panel quiet and made every switch a question; a sentence in
+/// `muted` under the name answers it without being asked, and is still quiet.
+/// A longer explanation, where a choice has consequences, is the caller's to
+/// add — and should be rare.
+///
+/// `control` is laid out first, from the right, so a long description wraps
+/// in what is left rather than pushing the control off the panel.
+pub fn setting_row<R>(
+    ui: &mut Ui,
+    label: &str,
+    description: &str,
+    palette: &Palette,
+    control: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    // Each row pays `TIGHT` beneath itself: a name over a description is two
+    // lines, and on `item_spacing` alone one setting's description ran into
+    // the next setting's name.
+    let out = setting_row_inner(ui, label, description, palette, control);
+    ui.add_space(space::TIGHT);
+    out
+}
+
+fn setting_row_inner<R>(
+    ui: &mut Ui,
+    label: &str,
+    description: &str,
+    palette: &Palette,
+    control: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    row(ui, |ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let out = control(ui);
+            ui.add_space(space::STEP);
+            ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.label(text(label, palette));
+                if !description.is_empty() {
+                    ui.add(egui::Label::new(meta(description, palette)).wrap());
+                }
+            });
+            out
+        })
+        .inner
+    })
+}
+
+/// One entry of the navigation rail: a word in sentence case, its count, and
+/// — when it is the view on screen — a bar on its leading edge.
+///
+/// **Sentence case because these are destinations, not labels of data.** On
+/// the old tab strip they were tracked capitals beside the action buttons, and
+/// the complaint was that the strip read as a second menu. A word in the
+/// reading face does not look like a button, and the bar is the tab strip's
+/// underline turned on its side.
+///
+/// The whole width is the hit target, and hover is `surface` — the one thing
+/// that colour means: a row under the pointer.
+pub fn nav_item(
+    ui: &mut Ui,
+    label: &str,
+    count: Option<usize>,
+    selected: bool,
+    palette: &Palette,
+) -> Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), NAV_ITEM), Sense::click());
+    let painter = ui.painter();
+    if response.hovered() && !selected {
+        painter.rect_filled(rect, CornerRadius::ZERO, palette.surface);
+    }
+    if selected {
+        let bar = egui::Rect::from_min_size(rect.min, egui::vec2(2.0, rect.height()));
+        painter.rect_filled(bar, CornerRadius::ZERO, palette.fg);
+    }
+    let ink = if selected { palette.fg } else { palette.muted };
+    let font = if selected {
+        fonts::medium(window::READING)
+    } else {
+        fonts::sans(window::READING)
+    };
+    painter.text(
+        egui::pos2(rect.left() + space::STEP, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        font,
+        ink,
+    );
+    if let Some(n) = count {
+        painter.text(
+            egui::pos2(rect.right() - space::STEP, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            thousands(n as i64),
+            fonts::mono(window::LABEL),
+            palette.muted,
+        );
+    }
+    response.on_hover_cursor(CursorIcon::PointingHand)
+}
+
+/// How tall a [`nav_item`] is: the one-line row height of §4.3, 32 points.
+const NAV_ITEM: f32 = 32.0;
 
 /// An exclusive choice, drawn as a strip of joined hairline cells.
 ///
@@ -1138,6 +1311,75 @@ mod tests {
             }
         }
         input
+    }
+
+    /// One frame of a themed context, for the pieces set in the design's own
+    /// faces — `__run_test_ui` installs none of them.
+    fn themed(ctx: &egui::Context, input: egui::RawInput, body: impl FnMut(&mut Ui)) {
+        let mut body = body;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| body(ui));
+        });
+    }
+
+    #[test]
+    fn a_nav_item_is_pressable_across_its_whole_width() {
+        // A rail entry whose only hit target was its word would be a rail with
+        // dead space beside every word, which is the tab strip's complaint
+        // back again.
+        let palette = Palette::dark();
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &palette);
+        let (rect, clicked) = (Cell::new(egui::Rect::NOTHING), Cell::new(false));
+        themed(&ctx, press(None), |ui| {
+            rect.set(nav_item(ui, "Chats", Some(12), false, &palette).rect);
+        });
+        assert_eq!(rect.get().height(), NAV_ITEM);
+        let far_right = egui::pos2(rect.get().right() - 2.0, rect.get().center().y);
+        themed(&ctx, press(Some(far_right)), |ui| {
+            if nav_item(ui, "Chats", Some(12), false, &palette).clicked() {
+                clicked.set(true);
+            }
+        });
+        assert!(clicked.get(), "the right edge of a rail entry did nothing");
+    }
+
+    #[test]
+    fn a_badge_is_as_wide_as_its_word_and_not_wider_than_its_padding() {
+        // A badge is a word in a box, not a column: two badges in one list
+        // should differ in width exactly as their words do.
+        let palette = Palette::light();
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &palette);
+        let (short, long) = (Cell::new(0.0), Cell::new(0.0));
+        themed(&ctx, press(None), |ui| {
+            ui.horizontal(|ui| {
+                short.set(badge(ui, "Queued", Tone::Quiet, &palette).rect.width());
+                long.set(badge(ui, "Out of date", Tone::Ink, &palette).rect.width());
+            });
+        });
+        assert!(short.get() > 12.0);
+        assert!(long.get() > short.get());
+    }
+
+    #[test]
+    fn a_setting_row_keeps_its_control_on_screen_under_a_long_description() {
+        // The control is laid out first, from the right, so the description
+        // wraps into what is left. Laid out the other way round, a sentence
+        // long enough pushed the switch past the panel's edge.
+        let palette = Palette::dark();
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &palette);
+        let (control, panel) = (Cell::new(egui::Rect::NOTHING), Cell::new(0.0));
+        let long = "Does something that takes a great many words to describe. ".repeat(12);
+        themed(&ctx, press(None), |ui| {
+            panel.set(ui.max_rect().right());
+            setting_row(ui, "A setting", &long, &palette, |ui| {
+                control.set(ui.button("On").rect);
+            });
+        });
+        assert!(control.get().right() <= panel.get());
+        assert!(control.get().width() > 0.0);
     }
 
     #[test]

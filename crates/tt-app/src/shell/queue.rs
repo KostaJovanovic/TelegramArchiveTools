@@ -5,13 +5,35 @@
 //! window, and everything here is layout and clicks.
 
 use super::*;
+use crate::queue::JobState;
 use eframe::egui::{Align, Layout, Sense, Ui};
 use egui_extras::{Column, TableBuilder};
+use tga_run::state::{Mark, Outcome};
 use tgx_ui::components::{
-    action, block, caps, dismiss, eyebrow, figure, progress_bar, row, rule, text, thousands, title,
-    EmptyState,
+    action, badge, block, dismiss, eyebrow, figure, meta, progress_bar, row, rule, text, thousands,
+    title, EmptyState, Tone,
 };
 use tgx_ui::tokens::{space, window};
+
+/// How loud an export row's state is: the accent for the one exporting,
+/// ink for one that wants a decision, quiet for the rest.
+fn job_tone(state: &JobState) -> Tone {
+    match state {
+        JobState::Exporting => Tone::Accent,
+        JobState::Paused | JobState::Failed(_) => Tone::Ink,
+        JobState::Queued | JobState::Done => Tone::Quiet,
+    }
+}
+
+/// The same for a Library row: shared with the Library, which paints the
+/// same marks.
+pub(super) fn mark_tone(mark: Mark) -> Tone {
+    match mark {
+        Mark::Running => Tone::Accent,
+        Mark::Failed | Mark::NoReport | Mark::Changed => Tone::Ink,
+        Mark::Queued | Mark::Current => Tone::Quiet,
+    }
+}
 
 /// Widths for the queue's count columns.
 ///
@@ -105,27 +127,28 @@ impl Shell {
 
     fn queue_panel(&mut self, ui: &mut Ui) {
         let p = self.palette;
+        self.report_runs(ui);
         ui.add_space(space::STEP);
         row(ui, |ui| {
-            ui.label(title("Queue", &p));
+            ui.label(title("Exports", &p));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = space::STEP;
                 // **Emptying the queue is the user's decision**, and this is
                 // the one place it is made — a Stop leaves the rows paused, and
                 // a run that ends leaves them as its report.
                 if !self.queue.is_empty() && !self.exporting {
-                    if action(ui, caps("Clear", p.fg), true).clicked() {
+                    if action(ui, text("Clear", &p), true).clicked() {
                         self.clear_queue();
                     }
                     if self.queue.is_paused()
-                        && action(ui, caps("Resume", p.fg), self.signed_in).clicked()
+                        && action(ui, text("Resume", &p), self.signed_in).clicked()
                     {
                         let picked = self.ticked_chats();
                         self.resume_queue(picked);
                     }
                 }
                 if !self.queue.is_empty() {
-                    ui.label(eyebrow(&format!("{} chats", self.queue.len()), &p));
+                    ui.label(figure(format!("{} chats", self.queue.len()), &p));
                 }
             });
         });
@@ -135,7 +158,7 @@ impl Shell {
         if self.queue.is_empty() {
             EmptyState::new(
                 "Nothing queued",
-                Some("Tick the chats you want under Chats, then press Start export.".into()),
+                Some("Tick the chats you want under Chats, then press Export.".into()),
             )
             // A short panel drops the hint and keeps the headline.
             .show(ui, &p, false);
@@ -167,10 +190,10 @@ impl Shell {
                 .column(Column::exact(MEDIA_W))
                 .column(Column::exact(REMOVE_W))
                 .header(HEADER_H, |mut header| {
-                    // Uppercase headers, letterspaced, because a column of
-                    // counts needs its label to read as a label. The last one
-                    // is blank: a heading over a column of × would be naming
-                    // the control rather than the data, and there is no data.
+                    // Column headers are one word each, so they keep the
+                    // section label's capitals: a column of counts needs its
+                    // label to read as a label. The last one is blank: a
+                    // heading over a column of × would name the control.
                     for label in ["Chat", "Status", "Messages", "Topics", "Media", ""] {
                         header.col(|ui| {
                             ui.label(eyebrow(label, &p));
@@ -188,13 +211,17 @@ impl Shell {
                         // and it means the same thing it means on the nav bar:
                         // *this run*. The state of a row that is not running is
                         // metadata like the counts beside it.
-                        r.col(|ui| {
-                            let state = if running {
-                                caps(job.state.label(), p.accent)
-                            } else {
-                                eyebrow(job.state.label(), &p)
-                            };
-                            ui.add(egui::Label::new(state).truncate());
+                        //
+                        // A failure is its own error, which can be long, so it
+                        // is text in ink and not a badge — a badge is a word.
+                        r.col(|ui| match &job.state {
+                            JobState::Failed(why) => {
+                                ui.add(egui::Label::new(text(why, &p)).truncate())
+                                    .on_hover_text(why);
+                            }
+                            state => {
+                                badge(ui, state.label(), job_tone(state), &p);
+                            }
                         });
                         // Counts that tick upward while the run goes, so Geist's
                         // proportional figures would move the column sideways on
@@ -245,6 +272,67 @@ impl Shell {
         if let Some(chat_id) = removed {
             self.remove_from_queue(chat_id);
         }
+    }
+
+    /// **The report runs, above the exports.** Activity is everything this
+    /// window is doing, and a report run used to be visible only from the
+    /// Library — so "Report after export" made reports nobody could watch
+    /// being made without leaving the export they were watching.
+    ///
+    /// Only what this session touched: a row the Library has never been
+    /// asked to report on is not activity. Absent entirely when there is none.
+    fn report_runs(&mut self, ui: &mut Ui) {
+        let p = self.palette;
+        let state = &self.library.state;
+        let rows: Vec<(String, Mark, String)> = state
+            .entries
+            .iter()
+            .filter(|e| e.outcome != Outcome::Idle)
+            .map(|e| {
+                let why = match &e.outcome {
+                    Outcome::Failed(why) => why.clone(),
+                    _ => String::new(),
+                };
+                (e.title.clone(), e.mark(), why)
+            })
+            .collect();
+        if rows.is_empty() && !state.running {
+            return;
+        }
+        let (fill, status, running) = (state.fill(), state.status.clone(), state.running);
+        ui.add_space(space::STEP);
+        row(ui, |ui| {
+            ui.label(title("Reports", &p));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(figure(format!("{} chats", rows.len()), &p));
+            });
+        });
+        ui.add_space(space::TIGHT);
+        rule(ui, &p);
+        ui.add_space(space::TIGHT);
+        block(ui, |ui| {
+            for (name, mark, why) in &rows {
+                ui.horizontal(|ui| {
+                    ui.set_min_height(QUEUE_ROW_H);
+                    badge(ui, mark.label(), mark_tone(*mark), &p);
+                    ui.add_space(space::TIGHT);
+                    ui.add(egui::Label::new(text(name, &p)).truncate());
+                    if !why.is_empty() {
+                        ui.add(egui::Label::new(meta(why, &p)).truncate());
+                    }
+                });
+            }
+            if running {
+                ui.add_space(space::TIGHT);
+                progress_bar(ui, fill, &p);
+                ui.add_space(space::TIGHT);
+                ui.label(meta(&status, &p));
+            } else if !status.is_empty() {
+                ui.label(meta(&status, &p));
+            }
+        });
+        ui.add_space(space::STEP);
+        rule(ui, &p);
     }
 
     /// Drop a chat from the run — **from all three, in this order**.
@@ -314,7 +402,7 @@ impl Shell {
         block(ui, |ui| {
             progress_bar(ui, fraction, &p);
             ui.add_space(space::TIGHT);
-            ui.label(eyebrow(&caption, &p));
+            ui.label(meta(&caption, &p));
         });
         ui.add_space(space::STEP);
     }
@@ -344,7 +432,7 @@ impl Shell {
                     // grown.
                     let label = if copied { "Copied" } else { "Copy all" };
                     let ink = if copied { p.muted } else { p.fg };
-                    if action(ui, caps(label, ink), true).clicked() {
+                    if action(ui, text(label, &p).color(ink), true).clicked() {
                         ui.ctx().copy_text(self.journal.to_text());
                         self.log_copied = true;
                         self.copied_warnings = false;
@@ -358,7 +446,7 @@ impl Shell {
                     let copied = self.log_copied && self.copied_warnings;
                     let label = if copied { "Copied" } else { "Copy warnings" };
                     let ink = if copied { p.muted } else { p.fg };
-                    if action(ui, caps(label, ink), true).clicked() {
+                    if action(ui, text(label, &p).color(ink), true).clicked() {
                         ui.ctx()
                             .copy_text(self.journal.warnings_text(WARNING_CONTEXT));
                         self.log_copied = true;
@@ -366,8 +454,8 @@ impl Shell {
                     }
                 }
                 if self.journal.dropped() > 0 {
-                    ui.label(eyebrow(
-                        &format!("{} earlier lines dropped", self.journal.dropped()),
+                    ui.label(meta(
+                        format!("{} earlier lines dropped", self.journal.dropped()),
                         &p,
                     ));
                 }
@@ -377,7 +465,7 @@ impl Shell {
                 if self.journal.warnings() > 0 {
                     let n = self.journal.warnings();
                     let word = if n == 1 { "warning" } else { "warnings" };
-                    ui.label(caps(&format!("{n} {word}"), p.accent));
+                    badge(ui, &format!("{n} {word}"), Tone::Accent, &p);
                 }
             });
         });

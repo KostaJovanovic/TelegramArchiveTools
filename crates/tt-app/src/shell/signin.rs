@@ -7,9 +7,7 @@
 use super::*;
 use crate::login::Field;
 use eframe::egui::{Align, Layout, Ui};
-use tgx_ui::components::{
-    action, block, button, eyebrow, field, figure, meta, row, rule, text, title,
-};
+use tgx_ui::components::{action, block, button, field, figure, meta, row, rule, text};
 use tgx_ui::tokens::{space, window};
 
 /// How wide the dialog is. Wide enough for an api_hash on one line.
@@ -47,7 +45,9 @@ impl Shell {
                 let verb = stage.action();
 
                 ui.add_space(space::STEP);
-                row(ui, |ui| ui.label(title(stage.title(), &p)));
+                // Sentence case in the reading face, like a view's name on
+                // the top bar: the dialog's title is a heading, not a label.
+                row(ui, |ui| ui.label(super::chrome::heading(stage.title(), &p)));
                 ui.add_space(space::TIGHT);
                 rule(ui, &p);
 
@@ -166,7 +166,7 @@ impl Shell {
             let kind = *kind;
             ui.add_space(space::STEP);
             block(ui, |ui| {
-                ui.label(eyebrow(kind.label(), &p));
+                ui.label(text(kind.label(), &p));
                 ui.add_space(space::TIGHT);
                 let Some(dialog) = self.login.as_mut() else {
                     return;
@@ -195,6 +195,14 @@ impl Shell {
             let copied = dialog.copied;
             ui.add_space(space::STEP);
             block(ui, |ui| {
+                // **What to do first, then the specifics** (TELEGRAMTOOLS.md
+                // §4.4). The error itself is kept whole — it names what
+                // failed — but on its own it says nothing about the next step.
+                ui.label(meta(
+                    "This step did not go through. Check what you typed, then press it again.",
+                    &p,
+                ));
+                ui.add_space(space::TIGHT);
                 // **Ink, not the accent**, for the same reason a log warning is:
                 // this is the only red thing the dialog would contain apart from
                 // the button that submits it, and two reds on one small screen

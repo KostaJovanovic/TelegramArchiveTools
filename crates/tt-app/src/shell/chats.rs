@@ -11,8 +11,8 @@ use crate::list::{Presence, SortMode};
 use chrono::{DateTime, Local};
 use eframe::egui::{Align, Layout, Sense, Ui};
 use tgx_ui::components::{
-    action, button, caps, count_text, disclosure, eyebrow, field, figure, forum_dot, row, rule,
-    selection_label, text, tick_box, tick_mark, GUTTER,
+    action, badge, button, caps, count_text, disclosure, field, figure, forum_dot, meta, row, rule,
+    selection_label, text, tick_box, tick_mark, Tone, GUTTER,
 };
 use tgx_ui::tokens::space;
 
@@ -75,8 +75,8 @@ impl Shell {
                 self.selection_row(ui, live);
                 ui.add_space(space::TIGHT);
                 row(ui, |ui| {
-                    ui.label(eyebrow(
-                        &selection_label(self.selected.len(), total, any_uncounted),
+                    ui.label(figure(
+                        selection_label(self.selected.len(), total, any_uncounted),
                         &p,
                     ));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -131,7 +131,7 @@ impl Shell {
                 self.set_filter(typed);
             }
 
-            ui.label(eyebrow("Sort", &p));
+            ui.label(meta("Sort", &p));
             egui::ComboBox::from_id_salt("sort")
                 .selected_text(text(before.label(), &p))
                 .width(180.0)
@@ -167,7 +167,7 @@ impl Shell {
             // nothing.
             let hit = tick_box(ui, self.view.grouped, true, &p).union(action(
                 ui,
-                eyebrow("Group by type", &p),
+                text("Group by type", &p),
                 true,
             ));
             if hit.clicked() {
@@ -175,6 +175,37 @@ impl Shell {
                 self.rebuild_rows();
                 self.commit_settings();
             }
+
+            // **Reload and Count sit beside the list they act on.** Reload was
+            // step 02 on the top bar, on every view, which made a list action
+            // look like part of the export sequence; Count was in the foot
+            // among the selection verbs, though it selects nothing.
+            let busy = self.exporting || self.counting;
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // The label states the action; the price is the tooltip — one
+                // request per chat, minutes on a large account.
+                let countable = !self.chats.is_empty() && !self.exporting;
+                let count = if self.counting {
+                    "Stop counting"
+                } else {
+                    "Count"
+                };
+                if button(ui, count, countable, false, &p)
+                    .on_hover_text(
+                        "Count the messages in every chat, so the list can sort by size. \
+                         One request per chat.",
+                    )
+                    .clicked()
+                {
+                    self.start_count();
+                }
+                if button(ui, "Reload", self.signed_in && !busy, false, &p)
+                    .on_hover_text("Reload chats from Telegram")
+                    .clicked()
+                {
+                    self.start_refresh();
+                }
+            });
         });
 
         if chosen != before {
@@ -186,7 +217,7 @@ impl Shell {
             if matches!(chosen, SortMode::Largest | SortMode::Smallest)
                 && self.chats.iter().all(|c| c.message_count.is_none())
             {
-                self.status = "No message counts yet — press Count messages".into();
+                self.status = "No message counts yet — press Count".into();
             }
             self.commit_settings();
         }
@@ -311,14 +342,15 @@ impl Shell {
                 // ticked.
                 let disk = self.view.disk.get(&chat.id).copied().unwrap_or_default();
                 if let Some(mark) = on_disk_mark(disk.database, disk.folder) {
-                    ui.label(caps(mark, p.muted));
+                    badge(ui, mark, Tone::Quiet, &p);
                     ui.add_space(space::STEP);
                 }
-                // **A converted group is marked in the accent**, on both
-                // halves: the pair usually share a title and hold different
-                // messages, and exporting one of them looks complete.
+                // **A converted group is marked in ink**, on both halves: the
+                // pair usually share a title and hold different messages, and
+                // exporting one of them looks complete. Not the accent, which
+                // is this run's.
                 if let Some(m) = &chat.migration {
-                    ui.label(caps(list::migration_mark(m), p.accent));
+                    badge(ui, list::migration_mark(m), Tone::Ink, &p);
                     ui.add_space(space::STEP);
                 }
                 // Title over caption, and the two are one block: no space
@@ -344,7 +376,7 @@ impl Shell {
                     if let Some(at) = disk.synced {
                         line.push_str(&format!("  synced {}", list::human_when(at, now)));
                     }
-                    ui.add(egui::Label::new(caps(&line, p.muted)).truncate());
+                    ui.add(egui::Label::new(meta(line, &p)).truncate());
                 });
             });
         });
@@ -373,7 +405,7 @@ impl Shell {
             .iter()
             .any(|s| s.name == name);
 
-        if action(ui, caps("Forget", p.fg), known).clicked() {
+        if action(ui, text("Forget", &p), known).clicked() {
             self.forget_selection(&name);
         }
         let mut recalled = None;
@@ -399,7 +431,7 @@ impl Shell {
             self.recall_selection(&n);
         }
         let can_save = !name.is_empty() && !self.selected.is_empty();
-        if action(ui, caps("Save", p.fg), can_save).clicked() {
+        if action(ui, text("Save", &p), can_save).clicked() {
             self.save_selection(&name);
         }
         ui.add(
@@ -478,7 +510,7 @@ impl Shell {
                 // refuses the click in the same call — the first pass chose a
                 // colour here and a `Sense` beside it, and the two could
                 // disagree.
-                if action(ui, caps(label, p.fg), live).clicked() {
+                if action(ui, text(*label, &p), live).clicked() {
                     // Asked once: `visible()` sorts the whole account, and
                     // every one of these four needs the same answer.
                     let visible: Vec<(i64, bool)> =
@@ -519,39 +551,23 @@ impl Shell {
                 }
             }
 
-            // **The label states the action; the price goes in the row under
-            // it.** "Count messages (enables sorting by size)" named a side
-            // effect rather than the action and said nothing about what it
-            // costs — one request per chat, minutes on a large account, and a
-            // rate-limit wait if Telegram decides so.
-            let countable = !self.chats.is_empty() && !self.exporting;
-            let label = if self.counting {
-                "Stop counting"
-            } else {
-                "Count messages"
-            };
-            // A button, not small print: it costs a request per chat and can
-            // take minutes, so it is a decision rather than a refinement.
-            // Secondary, because the one red belongs to Start export.
-            //
-            // **Update databases sits beside it, not on the top bar.** It was a
-            // third tool up there, and at the window's 900pt floor the bar
-            // then ran under its own tabs and hid Queue. It belongs here
-            // anyway: it is a way of choosing chats — the ones the destination
-            // already holds — and it needs this list, because a database
-            // records a chat's id and the list is where the rest of what a run
-            // needs comes from. Off during a run: that run has its mode
-            // already, and this one may have to change it.
+            // **Update databases sits here, not on the top bar.** It is a way
+            // of choosing chats — the ones the destination already holds — and
+            // it needs this list, because a database records a chat's id and
+            // the list is where the rest of what a run needs comes from. Off
+            // during a run: that run has its format already, and this one may
+            // have to change it. (Count went up to the filter row: it changes
+            // what the list shows, not which chats are chosen.)
             let updatable = self.signed_in
                 && self.loaded
                 && !self.exporting
                 && !self.counting
                 && !self.scanning;
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if button(ui, label, countable, false, &p).clicked() {
-                    self.start_count();
-                }
-                if button(ui, "Update databases", updatable, false, &p).clicked() {
+                if button(ui, "Update databases", updatable, false, &p)
+                    .on_hover_text("Sync every chat that already has a database here")
+                    .clicked()
+                {
                     self.start_update();
                 }
             });

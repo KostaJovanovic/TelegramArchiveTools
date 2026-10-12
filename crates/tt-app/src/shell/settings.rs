@@ -1,46 +1,43 @@
 //! The settings panel — the site's readout tables, made editable.
 //!
-//! Six sections: Destination, Output, Beyond Desktop down the left; Media,
-//! Performance, Appearance down the right. No group boxes: the design has no
-//! such thing. A section is a letterspaced heading with space above it, and a
-//! setting is one row — a control, its name, and a `[?]`.
+//! Six sections, grouped by the question each answers (TELEGRAMTOOLS.md
+//! §4.2): **Where exports go** and **What an export contains** down the left;
+//! **Media**, **Reports**, **Appearance** and **Advanced** down the right. No
+//! group boxes: a section is a letterspaced heading with space above it, and a
+//! setting is one [`setting_row`] — its name, one muted line saying what it
+//! does, and its control on the right.
 //!
-//! # What the last pass got wrong
+//! # What the last two passes got wrong
 //!
-//! **The explanations were on the page.** Eight paragraphs of small print
-//! interleaved with twenty-five switches, each hanging under the control it
-//! belonged to. Every sentence was worth having and all of them together made
-//! the panel unscannable: prose and controls alternating down a column, so
-//! neither could be read as a list. They are behind [`help`] now — one `[?]` per
-//! setting, in a column of its own down the right of each section, silent until
-//! it is pressed. That is also how *every* setting comes to have an explanation
-//! rather than the eight that happened to need defending.
+//! **The explanations were on the page, then behind a `[?]`.** First eight
+//! paragraphs of small print interleaved with twenty-five switches, which made
+//! the panel unscannable; then every sentence moved behind a mark of its own,
+//! which made it quiet and made every switch a question. A setting now carries
+//! one line, always visible — what it does, and what it costs when it costs
+//! something — and a `[?]` is left only where a choice has consequences one
+//! line cannot hold: the export's format, checking the whole history, and
+//! profile pictures.
 //!
 //! **Classic and Database were dimmed, not switched.** The mode was a pair of
 //! tick boxes that unticked each other, and the losing mode's controls stayed on
-//! screen greyed out — so the panel always showed both answers to a question
-//! with one answer, and half of what was visible was unavailable by
-//! construction. It is a [`segmented`] control now and the rows below it are
-//! *replaced*: the panel shows the mode you are in and nothing about the one you
-//! are not.
+//! screen greyed out. It is a [`segmented`] control, now named **Folder** and
+//! **Database** after what each leaves on disk, and the rows below it are
+//! *replaced*: the panel shows the format you are in and nothing about the one
+//! you are not.
 //!
-//! **The rhythm did the opposite of grouping.** Every row paid `space::TIGHT` on
-//! top of `item_spacing`, so a column of switches was as spread out as the gaps
-//! between sections were meant to be. Rows sit on `item_spacing` alone now and
-//! sections on `space::BREAK`, which is the four-to-one this file always claimed
-//! and never had.
+//! **The rhythm did the opposite of grouping.** Rows sit on `item_spacing`
+//! plus `space::TIGHT` and sections on `space::BREAK`, which is the
+//! four-to-one this file always claimed.
 //!
 //! **There is no "Chats at once".** This engine exports one chat at a time, and
 //! a control that is enabled and does nothing teaches that the interface is
-//! unreliable. The setting itself is gone too — keeping the field but offering
-//! no control left a switch that did nothing, which is the same lie one layer
-//! down. An old `settings.json` naming it still loads, because unknown keys are
-//! dropped per field.
+//! unreliable. An old `settings.json` naming it still loads, because unknown
+//! keys are dropped per field.
 
 use super::{Shell, THEMES};
-use eframe::egui::{self, Align, Layout, Ui};
+use eframe::egui::{self, Ui};
 use tgx_ui::components::{
-    action, block, button, eyebrow, field, help, meta, row, segmented, text, tick_box,
+    action, block, button, eyebrow, field, help, meta, row, segmented, setting_row, text, tick_box,
 };
 use tgx_ui::tokens::{space, Palette};
 
@@ -58,95 +55,63 @@ const MEDIA_LABELS: [(&str, &str); 7] = [
     ("files", "Files"),
 ];
 
-/// The extra requests, each with the sentence its `[?]` shows.
+/// The extra requests, each with the line under it.
 ///
 /// Each costs traffic, each is separately switchable, and each degrades to
-/// nothing on failure — which is why they are one section rather than scattered
-/// among the format options.
+/// nothing on failure.
 const EXTRAS: [(&str, &str, &str); 6] = [
     (
         "full_reactions",
         "Full reaction lists",
-        "Ask Telegram who reacted, not only how many did. One extra request per \
-         message that carries reactions, so it is the most expensive switch here \
-         on a busy chat.",
+        "Who reacted, not only how many. One request per message with reactions.",
     ),
     (
         "chat_metadata",
         "Chat details",
-        "Fetch the chat's own description, photo and settings and write them \
-         beside the messages. One request per chat.",
+        "The chat's description, photo and settings. One request per chat.",
     ),
     (
         "invite_links",
         "Invite links",
-        "Fetch the chat's invite links. Telegram only serves these to an account \
-         that can administer the chat; anywhere else it degrades to nothing.",
+        "Only served to an account that can administer the chat.",
     ),
     (
         "refresh_polls",
-        "Refresh poll results",
-        "Ask for each poll's results as they stand now, rather than the numbers \
-         that were current when the message was sent.",
+        "Current poll results",
+        "Each poll as it stands now, not as it stood when it was sent.",
     ),
     (
         "scheduled_messages",
         "Scheduled messages",
-        "Include messages queued to be sent later. Telegram Desktop's own export \
-         does not, so a chat exported with this on will not match Desktop's byte \
-         for byte.",
+        "Messages queued to send later. Desktop leaves them out.",
     ),
     (
         "member_roster",
         "Member list",
-        "Fetch who is in the chat and write participants.json. See the cap below \
-         — a roster that had to stop early says so in the run's log.",
+        "Who is in the chat, as participants.json. Capped below.",
     ),
 ];
-
-const REPORT_AFTER_HELP: &str = "As each chat finishes, its report.html is written beside \
-     it — the folder, or the chat's database — while the next chat downloads. The \
-     Library shows them, and the report options there apply.";
-
-/// What the mode really chooses, which is more than a file format.
-const MODE_HELP: &str = "Classic reproduces Telegram Desktop's own export: a folder per chat, \
-     browsable HTML and result.json, read from the beginning of the chat every \
-     run. Database gives each chat its own <chat>.sqlite that is added to — a \
-     re-run syncs what is new instead of exporting everything again, and it \
-     keeps messages that were later deleted on Telegram, along with every \
-     earlier version of an edited one. The two are exclusive on purpose: \
-     Classic re-reads the whole chat anyway, so running both would cost exactly \
-     what Classic costs and be incremental in name only.";
 
 impl Shell {
     pub(super) fn settings_panel(&mut self, ui: &mut Ui) {
         // No `SETTINGS` heading: the view bar above already says so, and a view
         // does not need to introduce itself.
         //
-        // **Two columns, because there is a window's width to use.** These were
-        // one 400pt strip sharing a side panel with the queue and the log, so
-        // twenty-five controls became a scrolling tube that showed four of them
-        // and cut the fifth in half.
-        //
-        // Left is what the export *is* — where it goes, what shape it takes,
-        // and what it asks Telegram for beyond what Desktop would. Right is the
-        // media, which is eleven controls on its own, plus the two dials.
-        // Balanced by height rather than by section count, because a column
-        // that runs off the bottom while the other stops halfway is the
-        // scrolling tube again in a wider frame.
+        // **Two columns, because there is a window's width to use.** Left is
+        // the export — where it goes and what is in it. Right is everything
+        // around it. Balanced by height rather than by section count.
         egui::ScrollArea::vertical()
             .id_salt("settings-body")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.columns(2, |cols| {
                     self.destination_section(&mut cols[0]);
-                    self.output_section(&mut cols[0]);
-                    self.beyond_desktop_section(&mut cols[0]);
+                    self.contents_section(&mut cols[0]);
 
                     self.media_section(&mut cols[1]);
                     self.reports_section(&mut cols[1]);
-                    self.performance_section(&mut cols[1]);
                     self.appearance_section(&mut cols[1]);
+                    self.advanced_section(&mut cols[1]);
                 });
                 ui.add_space(space::BREAK);
             });
@@ -159,135 +124,135 @@ impl Shell {
     /// because Browse writes back afterwards.
     fn destination_section(&mut self, ui: &mut Ui) {
         let p = self.palette;
-        section(ui, "Destination", &p);
-        row(ui, |ui| {
-            ui.label(text("Folder", &p));
-            help(ui, "output_dir", DESTINATION_HELP, &p);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                // A button, like the analyser's "Choose": the one way to get a
-                // path that certainly exists should not be small print.
-                if button(ui, "Browse", true, false, &p).clicked() {
-                    self.browse_for_output_dir();
-                }
-                let entry = ui.add(
-                    field(&mut self.form.output_dir, &p)
-                        .hint_text("Where exports go")
-                        .desired_width(ui.available_width()),
-                );
-                // Committing on losing focus rather than on every keystroke: a
-                // half-typed path is not a decision, and writing settings.json
-                // per character would save every prefix on the way.
-                if entry.lost_focus() {
-                    self.commit_settings();
-                }
-            });
-        });
+        section(ui, "Where exports go", &p);
+        let mut browse = false;
+        let mut commit = false;
         let full = self.settings.output_dir.clone();
+        // A button: the one way to get a path that certainly exists should
+        // not be small print. The field gets a line of its own under the
+        // name: beside it, at the window's floor, a path field left the
+        // name one letter wide.
+        setting_row(
+            ui,
+            "Folder",
+            "Each chat gets a folder here, or a database in a folder of its own.",
+            &p,
+            |ui| browse = button(ui, "Browse", true, false, &p).clicked(),
+        );
+        row(ui, |ui| {
+            let entry = ui.add(
+                field(&mut self.form.output_dir, &p)
+                    .hint_text("Where exports go")
+                    .desired_width(ui.available_width()),
+            );
+            // Committing on losing focus rather than on every keystroke: a
+            // half-typed path is not a decision.
+            commit = entry.lost_focus();
+            entry.on_hover_text(&full);
+        });
+        if commit {
+            self.commit_settings();
+        }
+        if browse {
+            self.browse_for_output_dir();
+        }
         row(ui, |ui| {
             ui.label(meta(
                 format!(
                     "Writing to {}",
-                    crate::settings_form::elided_start(&full, 44)
+                    crate::settings_form::elided_start(&full, 56)
                 ),
                 &p,
             ))
-            .on_hover_text(full);
-        });
-        // Read-only: what is found goes to the log. The fixes are the CLI's
-        // (`tgx doctor --fix`), because each moves or deletes files and a
-        // button that does that one click after reporting is a button pressed
-        // twice by accident.
-        row(ui, |ui| {
-            if button(ui, "Check folder", !self.checking, false, &p).clicked() {
-                self.check_folder();
-            }
-            help(ui, "check_folder", CHECK_HELP, &p);
-            if button(ui, "Find duplicate media", !self.deduping, false, &p).clicked() {
-                self.find_dupes();
-            }
-            help(ui, "find_dupes", DUPES_HELP, &p);
+            .on_hover_text(full.clone());
         });
     }
 
-    /// **Classic or Database — an exclusive choice, drawn as one, and it
-    /// changes what is on the page.**
-    ///
-    /// The mode is a [`segmented`] strip and the rows under it are the chosen
-    /// mode's alone. Two things that fixes: a tick box promises independence,
-    /// so a pair that unticked each other was a control lying about its own
-    /// kind; and a greyed row is a control offering something it will not do,
-    /// which over half a section is a panel that looks broken.
+    /// **Folder or Database — an exclusive choice, drawn as one, and it
+    /// changes what is on the page.** The rows under the strip are the chosen
+    /// format's alone; then what both formats ask Telegram for.
     ///
     /// Split forum topics stays below the switch because it is the one setting
-    /// both modes read — Classic makes a folder per topic, the database records
-    /// which topic a message came from.
-    fn output_section(&mut self, ui: &mut Ui) {
+    /// both formats read — a folder per topic, or the topic recorded per
+    /// message.
+    fn contents_section(&mut self, ui: &mut Ui) {
         let p = self.palette;
         let db = self.settings.export_db;
-        section(ui, "Output", &p);
+        section(ui, "What an export contains", &p);
 
         let mut chosen = None;
-        row(ui, |ui| {
-            chosen = segmented(ui, &["Classic", "Database"], usize::from(db), &p);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        setting_row(
+            ui,
+            "Format",
+            if db {
+                "One file per chat that each run adds to. Keeps deleted and edited messages."
+            } else {
+                "Telegram Desktop's own layout: HTML and result.json, re-read in full each run."
+            },
+            &p,
+            |ui| {
                 help(ui, "export_db", MODE_HELP, &p);
-            });
-        });
+                chosen = pair(ui, ["Folder", "Database"], usize::from(db), &p);
+            },
+        );
         if let Some(i) = chosen {
             self.toggle_setting(move |s| s.export_db = i == 1);
         }
-        ui.add_space(space::TIGHT);
 
         if db {
             if self.number_row(
                 ui,
-                "reread_window",
                 "Messages to re-read",
-                REREAD_HELP,
+                "How far back each sync looks again. 0 is new messages only.",
                 true,
                 |f| &mut f.reread_window,
             ) {
                 self.commit_settings();
             }
-            if self.check(
+            let mut flip = false;
+            setting_row(
                 ui,
-                "reread_all",
-                "Re-read the whole history",
-                REREAD_ALL_HELP,
-                self.settings.reread_all,
-                true,
-            ) {
+                "Check the whole history",
+                "Finds deletions and edits further back. Slow on a large chat.",
+                &p,
+                |ui| {
+                    help(ui, "reread_all", REREAD_ALL_HELP, &p);
+                    flip = tick_box(ui, self.settings.reread_all, true, &p).clicked();
+                },
+            );
+            if flip {
                 self.toggle_setting(|s| s.reread_all = !s.reread_all);
             }
             if self.number_row(
                 ui,
-                "sync_every_hours",
                 "Sync every (hours)",
-                SYNC_HELP,
+                "Updates every database here on a timer while the window is open. 0 is off.",
                 true,
                 |f| &mut f.sync_every,
             ) {
                 self.commit_settings();
                 self.arm_schedule(std::time::Instant::now());
             }
-            // Here and not under Beyond Desktop: only a database keeps them,
-            // so the choice is on screen only when there is one.
+            // Here and not under Media: only a database keeps them, so the
+            // choice is on screen only when there is one.
             let at = USERPICS
                 .iter()
                 .position(|k| *k == self.settings.profile_photos)
                 .unwrap_or(1);
             let mut picked = None;
-            row(ui, |ui| {
-                ui.spacing_mut().item_spacing.x = space::TIGHT;
-                ui.label(text("Profile pictures", &p));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            setting_row(
+                ui,
+                "Profile pictures",
+                "Kept in the database and shown when reading. Desktop has none.",
+                &p,
+                |ui| {
                     help(ui, "profile_photos", PHOTOS_HELP, &p);
                     // Drawn right to left, so the strip is given in reverse
                     // and the answer turned back round.
                     let cells = ["History", "Current", "Off"];
                     picked = segmented(ui, &cells, 2 - at, &p).map(|i| 2 - i);
-                });
-            });
+                },
+            );
             if let Some(i) = picked {
                 self.toggle_setting(move |s| s.profile_photos = USERPICS[i].into());
             }
@@ -296,40 +261,70 @@ impl Shell {
                 (
                     "export_html",
                     "HTML pages",
-                    HTML_HELP,
+                    "Desktop's browsable pages, line for line.",
                     self.settings.export_html,
                 ),
                 (
                     "export_json",
                     "result.json",
-                    JSON_HELP,
+                    "Every message as data, byte for byte as Desktop writes it.",
                     self.settings.export_json,
                 ),
             ] {
-                if self.check(ui, key, label, why, on, true) {
+                if switch_row(ui, label, why, on, true, &p) {
                     self.toggle_setting(move |s| match key {
                         "export_html" => s.export_html = !s.export_html,
                         _ => s.export_json = !s.export_json,
                     });
                 }
             }
-            if self.number_row(ui, "page_size", "Messages per page", PAGE_HELP, true, |f| {
-                &mut f.page_size
-            }) {
+            if self.number_row(
+                ui,
+                "Messages per page",
+                "Desktop's default is 1,000. Held between 50 and 20,000.",
+                true,
+                |f| &mut f.page_size,
+            ) {
                 self.commit_settings();
             }
         }
 
-        ui.add_space(space::TIGHT);
-        if self.check(
+        if switch_row(
             ui,
-            "split_topics",
             "Split forum topics",
-            SPLIT_HELP,
+            "A folder per topic — what Telegram Desktop cannot do.",
             self.settings.split_topics,
             true,
+            &p,
         ) {
             self.toggle_setting(|s| s.split_topics = !s.split_topics);
+        }
+        for (key, label, why) in EXTRAS {
+            let on = extra(&self.settings, key);
+            if switch_row(ui, label, why, on, true, &p) {
+                self.toggle_setting(move |s| set_extra(s, key, !extra(s, key)));
+            }
+        }
+        if self.number_row(
+            ui,
+            "Member list cap",
+            "Stop the member list after this many. 0 is no cap.",
+            self.settings.member_roster,
+            |f| &mut f.member_limit,
+        ) {
+            self.commit_settings();
+        }
+        // Not among the extras: they are requests, and this costs none — it
+        // changes which of two names already in hand gets written.
+        if switch_row(
+            ui,
+            "Contacts by @username",
+            "Not by the name you saved them under, which only you see.",
+            self.settings.own_names,
+            true,
+            &p,
+        ) {
+            self.toggle_setting(|s| s.own_names = !s.own_names);
         }
     }
 
@@ -337,13 +332,13 @@ impl Shell {
         let p = self.palette;
         let media_on = self.settings.download_media;
         section(ui, "Media", &p);
-        if self.check(
+        if switch_row(
             ui,
-            "download_media",
             "Download media",
-            MEDIA_HELP,
+            "Off, the export still records every file's name, size and type.",
             media_on,
             true,
+            &p,
         ) {
             self.toggle_setting(|s| s.download_media = !s.download_media);
         }
@@ -355,8 +350,7 @@ impl Shell {
         // the last two.
         let mut toggled: Option<&'static str> = None;
         // A block, not a row: `horizontal_wrapped` needs a vertical context to
-        // wrap *into*, and nesting one inside `row`'s own horizontal is asking
-        // a strip that cannot grow downwards to grow downwards.
+        // wrap *into*.
         block(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(space::STEP, 6.0);
@@ -365,18 +359,13 @@ impl Shell {
                     // **The wrap is asked for by hand.** A wrapping layout
                     // wraps *widgets*; the nested `horizontal` below is a
                     // child `Ui`, which is placed at the cursor whether it fits
-                    // or not. So the strip never wrapped: it ran off the right
-                    // edge, widened the whole column with it, and every field
-                    // laid out after it — the size limit, parallel downloads —
-                    // was pushed out of the window.
+                    // or not, so without this the strip ran off the right edge
+                    // and widened the whole column with it.
                     if ui.available_size_before_wrap().x < tick_width(ui, label, &p) {
                         ui.end_row();
                     }
                     // Nested, so the gap between a box and its own label is
                     // `TIGHT` while the gap between two categories is `STEP`.
-                    // One `item_spacing` cannot say both, and at a single value
-                    // the seven read either as fourteen controls or as one long
-                    // sentence.
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = space::TIGHT;
                         if tick(ui, label, on, media_on, &p) {
@@ -395,108 +384,74 @@ impl Shell {
                 }
             });
         }
-        // One `[?]` for the group, on a row of its own: seven marks in a
-        // wrapped strip would outnumber the controls they annotate.
         row(ui, |ui| {
-            ui.label(eyebrow("Categories", &p));
-            help(ui, "media_kinds", KINDS_HELP, &p);
+            ui.label(meta(
+                "A category left off is recorded as Desktop records one it skipped.",
+                &p,
+            ));
         });
-
         ui.add_space(space::TIGHT);
+
         if self.number_row(
             ui,
-            "size_limit_mb",
             "Size limit, MB",
-            SIZE_HELP,
+            "Larger files are recorded, not downloaded. 0 is no limit.",
             media_on,
             |f| &mut f.size_limit,
         ) {
             self.commit_settings();
         }
-        if self.check(
+        if switch_row(
             ui,
-            "link_previews",
-            "Save link-preview images",
-            PREVIEW_HELP,
+            "Link-preview images",
+            "Desktop does not save these; on, later photo numbers shift.",
             self.settings.link_previews,
             media_on,
+            &p,
         ) {
             self.toggle_setting(|s| s.link_previews = !s.link_previews);
         }
     }
 
-    fn beyond_desktop_section(&mut self, ui: &mut Ui) {
-        let p = self.palette;
-        section(ui, "Beyond Desktop", &p);
-        for (key, label, why) in EXTRAS {
-            let on = extra(&self.settings, key);
-            if self.check(ui, key, label, why, on, true) {
-                self.toggle_setting(move |s| set_extra(s, key, !extra(s, key)));
-            }
-        }
-        // Not in EXTRAS: that section is the requests, and this costs none —
-        // it changes which of two names already in hand gets written.
-        if self.check(
-            ui,
-            "own_names",
-            "Contacts' own names",
-            OWN_NAMES_HELP,
-            self.settings.own_names,
-            true,
-        ) {
-            self.toggle_setting(|s| s.own_names = !s.own_names);
-        }
-        if self.number_row(
-            ui,
-            "member_limit",
-            "Member list cap",
-            MEMBERS_HELP,
-            true,
-            |f| &mut f.member_limit,
-        ) {
-            self.commit_settings();
-        }
-    }
-
-    /// What the analyser does with an export. One setting for now; the
-    /// Library's run options join it in the redesign (TELEGRAMTOOLS.md §4.2).
+    /// What the analyser writes, and when. The three run options were the
+    /// Library's, for the session only; they are kept with the rest now.
     fn reports_section(&mut self, ui: &mut Ui) {
         let p = self.palette;
         section(ui, "Reports", &p);
-        if self.check(
-            ui,
-            "report_after_export",
-            "Write a report after each export",
-            REPORT_AFTER_HELP,
-            self.settings.report_after_export,
-            true,
-        ) {
-            self.toggle_setting(|s| s.report_after_export = !s.report_after_export);
-        }
-    }
-
-    fn performance_section(&mut self, ui: &mut Ui) {
-        let p = self.palette;
-        section(ui, "Performance", &p);
-        if self.number_row(
-            ui,
-            "download_concurrency",
-            "Parallel downloads",
-            DOWNLOADS_HELP,
-            true,
-            |f| &mut f.downloads,
-        ) {
-            self.commit_settings();
+        let rows: [(&str, &str, bool, Flip); 4] = [
+            (
+                "Report after each export",
+                "Written beside each chat while the next one downloads.",
+                self.settings.report_after_export,
+                |s| s.report_after_export = !s.report_after_export,
+            ),
+            (
+                "Write the digest",
+                "digest.jsonl and EVENTS.md beside the report, for a model to read.",
+                self.settings.report_digest,
+                |s| s.report_digest = !s.report_digest,
+            ),
+            (
+                "Embed fonts",
+                "Looks right on any machine. Off, each report is about 300 KB smaller.",
+                self.settings.report_fonts,
+                |s| s.report_fonts = !s.report_fonts,
+            ),
+            (
+                "People by @handle",
+                "Never by the name this account saved them under.",
+                self.settings.report_handles,
+                |s| s.report_handles = !s.report_handles,
+            ),
+        ];
+        for (label, why, on, flip) in rows {
+            if switch_row(ui, label, why, on, true, &p) {
+                self.toggle_setting(flip);
+            }
         }
     }
 
     /// **The appearance is a setting, and this is where settings live.**
-    ///
-    /// It was a chip on the nav bar that named the appearance it switched *to*,
-    /// which is a fine control and was in the wrong place: the bar's job is the
-    /// three steps of an export, and a sixth kind of mark on it was part of what
-    /// made the top of the window read as two menus. Here it is one more
-    /// exclusive choice, drawn with the same strip as Classic and Database.
     fn appearance_section(&mut self, ui: &mut Ui) {
         let p = self.palette;
         section(ui, "Appearance", &p);
@@ -505,95 +460,88 @@ impl Shell {
         // actually have produced.
         let at = usize::from(self.settings.theme != "light");
         let mut chosen = None;
-        row(ui, |ui| {
-            chosen = segmented(ui, &["Light", "Dark"], at, &p);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                help(ui, "theme", THEME_HELP, &p);
-            });
-        });
+        setting_row(
+            ui,
+            "Theme",
+            "Kept with the rest of the settings.",
+            &p,
+            |ui| {
+                chosen = pair(ui, ["Light", "Dark"], at, &p);
+            },
+        );
         if let Some(i) = chosen {
             self.set_theme(THEMES[i]);
         }
     }
 
-    /// One setting row: a tick box, its label, and the `[?]` that explains it.
-    ///
-    /// **The box and its label are one control.** `Response::union` is how egui
-    /// says that: one response, one click, whichever half the pointer landed on.
-    /// The first pass or-ed two independently sensed widgets together, which
-    /// left the gap between them dead and made the label choose its own disabled
-    /// colour and its own `Sense` — two decisions that could disagree with the
-    /// box beside them. `tick_box` still takes `enabled`, because it paints
-    /// itself and a control that is off must not look like one that is
-    /// unavailable.
-    ///
-    /// The `[?]` is right-aligned, so every section has one narrow column of
-    /// marks rather than a ragged edge that tracks the length of each label.
-    /// It stays live when the setting is disabled: the reason a control is
-    /// unavailable is exactly when someone wants to read about it.
-    fn check(
-        &self,
-        ui: &mut Ui,
-        key: &str,
-        label: &str,
-        why: &str,
-        on: bool,
-        enabled: bool,
-    ) -> bool {
+    /// The dial and the two folder checks: rarely touched, and each one a
+    /// reason to read its line first.
+    fn advanced_section(&mut self, ui: &mut Ui) {
         let p = self.palette;
-        let mut clicked = false;
-        row(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = space::TIGHT;
-            clicked = tick(ui, label, on, enabled, &p);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                help(ui, key, why, &p);
-            });
-        });
-        clicked
+        section(ui, "Advanced", &p);
+        if self.number_row(
+            ui,
+            "Parallel downloads",
+            "4 to 6 is the balance. Higher, Telegram rate-limits instead.",
+            true,
+            |f| &mut f.downloads,
+        ) {
+            self.commit_settings();
+        }
+        // Read-only: what is found goes to the log. The fixes are the CLI's
+        // (`doctor --fix`), because each moves or deletes files and a button
+        // that does that one click after reporting is a button pressed twice
+        // by accident.
+        let (checking, deduping) = (self.checking, self.deduping);
+        let mut check = false;
+        setting_row(
+            ui,
+            "Check the folder",
+            "Lists leftovers and duplicate databases in the log. Changes nothing.",
+            &p,
+            |ui| check = button(ui, "Check", !checking, false, &p).clicked(),
+        );
+        if check {
+            self.check_folder();
+        }
+        let mut dupes = false;
+        setting_row(
+            ui,
+            "Duplicate media",
+            "Lists files stored more than once, largest first. Deletes nothing.",
+            &p,
+            |ui| dupes = button(ui, "Find", !deduping, false, &p).clicked(),
+        );
+        if dupes {
+            self.find_dupes();
+        }
     }
 
-    /// A label with a narrow number field on the right, and a `[?]`. Returns
-    /// whether the field just lost focus, which is when the value is a decision.
+    /// A label with a narrow number field on the right. Returns whether the
+    /// field just lost focus, which is when the value is a decision.
     fn number_row(
         &mut self,
         ui: &mut Ui,
-        key: &str,
         label: &str,
         why: &str,
         enabled: bool,
         which: impl Fn(&mut crate::settings_form::SettingsForm) -> &mut String,
     ) -> bool {
         let p = self.palette;
-        let mut committed = false;
-        row(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = space::TIGHT;
-            // Ink, like a tick-box label. A numeric setting and a switch are the
-            // same kind of decision, and setting one of the two muted made half
-            // the panel's rows look unavailable.
-            ui.label(text(label, &p));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                help(ui, key, why, &p);
-                let entry = ui.add_enabled(
-                    enabled,
-                    field(which(&mut self.form), &p).desired_width(NUMBER_W),
-                );
-                committed = entry.lost_focus();
-            });
-        });
-        committed
+        let form = &mut self.form;
+        setting_row(ui, label, why, &p, |ui| {
+            ui.add_enabled(enabled, field(which(form), &p).desired_width(NUMBER_W))
+                .lost_focus()
+        })
     }
 
     /// Pick a destination folder.
     ///
     /// The path is free text and may be unwritable, disconnected or invalid, so
     /// a picker is not a nicety — it is the one way to get a path that exists.
-    ///
-    /// **Modal, and that is the change.** Under GPUI this was a future spawned
-    /// onto the foreground executor with a write-back closure, because the
-    /// prompt returned a `Task`. `rfd`'s blocking picker holds this thread until
-    /// the user answers, which for a native dialog they are already looking at
-    /// is what they expect — and it removes the window in which the fields
-    /// could be edited underneath a pending write-back.
+    /// `rfd`'s blocking picker holds this thread until the user answers, which
+    /// removes the window in which the fields could be edited underneath a
+    /// pending write-back.
     fn browse_for_output_dir(&mut self) {
         let Some(dir) = rfd::FileDialog::new()
             .set_title("Choose export folder")
@@ -613,16 +561,29 @@ impl Shell {
     }
 }
 
+/// What a switch does to the settings when pressed.
+type Flip = fn(&mut tgx_tg::config::Settings);
+
 /// How wide a number field is. Every value in this panel is at most five
 /// digits, and a field sized for a sentence invites one.
 const NUMBER_W: f32 = 80.0;
 
-/// A tick box and its label, as one control.
-///
-/// Free rather than a method because the media categories draw it inside a
-/// wrapping strip where there is no room for a row, a gutter or a `[?]` — and
-/// the alternative was a second assembly of a box and a label, which is exactly
-/// the duplication [`Shell::check`]'s doc warns about.
+/// A two-cell [`segmented`] strip inside a [`setting_row`]'s control, which
+/// is laid out right to left: the cells are given reversed and the answer
+/// turned back round, so they still read left to right.
+fn pair(ui: &mut Ui, cells: [&str; 2], at: usize, p: &Palette) -> Option<usize> {
+    segmented(ui, &[cells[1], cells[0]], 1 - at, p).map(|i| 1 - i)
+}
+
+/// One switch: [`setting_row`] with a tick box for its control.
+fn switch_row(ui: &mut Ui, label: &str, why: &str, on: bool, enabled: bool, p: &Palette) -> bool {
+    setting_row(ui, label, why, p, |ui| {
+        tick_box(ui, on, enabled, p).clicked()
+    })
+}
+
+/// A tick box and its label, as one control — for the media categories,
+/// which sit seven to a wrapped strip with no room for a row each.
 fn tick(ui: &mut Ui, label: &str, on: bool, enabled: bool, p: &Palette) -> bool {
     tick_box(ui, on, enabled, p)
         .union(action(ui, text(label, p), enabled))
@@ -646,12 +607,10 @@ fn tick_width(ui: &Ui, label: &str, p: &Palette) -> f32 {
 
 /// A section heading. **Space above it, and no line under it.**
 ///
-/// There were rules down this panel, one per section, and they were the loudest
-/// thing in a column of quiet grey labels — so the panel read as a stack of
-/// boxes rather than as a list of decisions. `BREAK` above the heading does the
-/// same work: a gap four times the size of the one between two rows is not
-/// ambiguous about where a group starts, and now that the rows themselves sit on
-/// `item_spacing` alone the ratio is what it always claimed to be.
+/// `BREAK` above the heading does the work a rule used to: a gap four times
+/// the size of the one between two rows is not ambiguous about where a group
+/// starts. Capitals, because this is the one thing capitals are for — a
+/// section label of three words or fewer.
 fn section(ui: &mut Ui, heading: &str, p: &Palette) {
     ui.add_space(space::BREAK);
     row(ui, |ui| ui.label(eyebrow(heading, p)));
@@ -682,50 +641,24 @@ fn set_extra(s: &mut tgx_tg::config::Settings, key: &str, on: bool) {
     }
 }
 
-// -- what every `[?]` says -------------------------------------------------
+// -- the three `[?]` left --------------------------------------------------
 //
-// Constants rather than literals at the call site, so a sentence can be read
-// and revised as prose without a control's layout wrapped around it — and so
-// `every_setting_offers_an_explanation` can find them.
+// Where a choice has consequences one line cannot hold.
 
-const DESTINATION_HELP: &str =
-    "Where exports go. Classic writes one folder per chat here; Database writes \
-     one <chat>.sqlite per chat, each in a folder of its own. What is typed is used as-is and may \
-     not exist, so Browse is the one way to be certain of the path.";
-
-const HTML_HELP: &str = "Desktop's browsable messages1.html and the pages after it, reproduced \
-     line for line. Switch both this and result.json off and a Classic run has \
-     nothing to write, which it refuses rather than doing quietly.";
-
-const JSON_HELP: &str =
-    "Desktop's result.json: every message as structured data, in Desktop's own \
-     key order, escaping and indentation. This is the file other tools read.";
-
-const PAGE_HELP: &str = "How many messages go on one HTML page before the next one starts. \
-     Desktop's own default is 1,000. Anything outside 50 to 20,000 is clamped, \
-     and the field is rewritten so you can see what was stored.";
-
-const REREAD_HELP: &str = "A sync always fetches what is new. This is how far back into what it \
-     already holds it looks as well — far enough to notice an edit, a deletion, \
-     a changed reaction count, or a file an earlier run could not fetch. 500 is \
-     the default; 0 means new messages only. Up to 10,000.";
+/// What the format really chooses, which is more than a file format.
+const MODE_HELP: &str = "Folder reproduces Telegram Desktop's own export: a folder per chat, \
+     browsable HTML and result.json, read from the beginning of the chat every \
+     run. Database gives each chat its own <chat>.sqlite that is added to — a \
+     re-run syncs what is new instead of exporting everything again, and it \
+     keeps messages that were later deleted on Telegram, along with every \
+     earlier version of an edited one. The two are exclusive on purpose: \
+     Folder re-reads the whole chat anyway, so running both would cost exactly \
+     what Folder costs and be incremental in name only.";
 
 const REREAD_ALL_HELP: &str =
     "Read the whole chat again instead of the newest few hundred. Slow, and \
-     the only way to catch an edit or a deletion older than the window above — \
-     or to pick up media after raising the size limit.";
-
-const CHECK_HELP: &str = "Look through the folder for trouble: a database a sync would not find \
-     under its name, two databases for one chat, a file holding several chats, leftovers of a run \
-     that did not finish. Nothing is changed; what is found is listed in the log.";
-
-const DUPES_HELP: &str = "List the photos, videos and files stored more than once in the folder — \
-     the same bytes in two databases, or in a database and a Classic export. Nothing is deleted: \
-     which copy to keep is yours to decide. The largest waste is listed first, in the log.";
-
-const SYNC_HELP: &str = "While this window stays open, press Update databases by itself every \
-     this many hours: every chat with a database in the destination is synced. 0 turns it off. \
-     A run already going is never interrupted; the next one waits for it.";
+     the only way to catch an edit or a deletion older than the re-read window \
+     — or to pick up media after raising the size limit.";
 
 /// The [`tgx_tg::config::Settings::profile_photos`] values, in the order the
 /// strip shows them left to right.
@@ -736,55 +669,12 @@ const USERPICS: [&str; 3] = [
 ];
 
 const PHOTOS_HELP: &str = "Keep the profile picture of everyone in the chat — its members and \
-     anyone who posted — in the chat's database, and show them in the viewer. Current keeps the \
+     anyone who posted — in the chat's database, and show them when reading. Current keeps the \
      picture each person wears now: one small download per person, and none on a sync that finds \
      it unchanged; a new one is added and the old one kept. History keeps every picture they \
      still have up, which costs one more request per person whose picture changed. Desktop's own \
-     export has no pictures, so a Classic folder never gets them. Someone who hides their \
+     export has no pictures, so a folder export never gets them. Someone who hides their \
      picture from you is skipped.";
-
-const SPLIT_HELP: &str =
-    "A forum supergroup becomes one folder per topic instead of one folder for \
-     all of them. This is the thing Telegram Desktop cannot do. In Database mode \
-     there are no folders, so each message records the topic it came from \
-     instead.";
-
-const MEDIA_HELP: &str = "Fetch the photos, videos and files the messages point at. With this off \
-     the export still records every filename, size and type — there is simply \
-     nothing behind them.";
-
-const KINDS_HELP: &str = "Which categories are fetched. A category switched off is still recorded \
-     in the export exactly as Desktop records one it skipped, so the message \
-     keeps its filename and size and only the bytes are missing.";
-
-const SIZE_HELP: &str = "Files larger than this are recorded and not downloaded. 0 is no limit. \
-     Raising it later only reaches messages a run actually re-reads — in \
-     Database mode that is the window above, or the whole history.";
-
-const PREVIEW_HELP: &str =
-    "Telegram Desktop does not save these. Turning it on shifts every later \
-     photo_N in the folder, so an export made with it on will not compare byte \
-     for byte against one made with it off.";
-
-const OWN_NAMES_HELP: &str =
-    "Telegram sends your address-book name for anyone you have saved, and never \
-     sends theirs. With this on a saved contact is written as their @username \
-     instead — or keeps your name for them if they have no username.";
-
-const MEMBERS_HELP: &str =
-    "Stop the member list after this many. 0 is no cap. A public channel can \
-     have millions of members and Telegram stops serving the listing long before \
-     that, so a roster can end early either way — when it does, the run says so \
-     rather than presenting a short list as a complete one.";
-
-const DOWNLOADS_HELP: &str =
-    "How many files are fetched at once. 1 to 16, and 4 to 6 is the balance. \
-     Higher is not faster: Telegram starts rate-limiting the account instead, \
-     and the run spends the time waiting.";
-
-const THEME_HELP: &str =
-    "Light or dark. Stored with the rest of the settings, so the window opens \
-     the way you left it.";
 
 #[cfg(test)]
 mod tests {
@@ -830,42 +720,24 @@ mod tests {
     }
 
     #[test]
-    fn every_explanation_says_something_and_no_two_say_the_same_thing() {
-        // The `[?]` is the whole reason the inline hints could go, so an empty
-        // or duplicated one is a setting whose explanation was quietly lost —
-        // and a duplicate is the shape a copy-paste takes here, the same defect
-        // `every_extra_reads_and_writes_its_own_field` guards one row up.
-        let mut all: Vec<&str> = EXTRAS.iter().map(|(_, _, why)| *why).collect();
-        all.extend([
-            MODE_HELP,
-            DESTINATION_HELP,
-            HTML_HELP,
-            JSON_HELP,
-            PAGE_HELP,
-            REREAD_HELP,
-            REREAD_ALL_HELP,
-            SYNC_HELP,
-            PHOTOS_HELP,
-            CHECK_HELP,
-            DUPES_HELP,
-            SPLIT_HELP,
-            MEDIA_HELP,
-            KINDS_HELP,
-            SIZE_HELP,
-            PREVIEW_HELP,
-            OWN_NAMES_HELP,
-            MEMBERS_HELP,
-            DOWNLOADS_HELP,
-            THEME_HELP,
-        ]);
-        for why in &all {
-            assert!(why.len() > 40, "too short to explain anything: {why}");
+    fn every_line_under_a_setting_is_one_sentence_and_no_two_are_the_same() {
+        // The line under a setting is what replaced the `[?]`, so it has to
+        // be there, be short enough to stay one line in a column, and not be
+        // a copy of its neighbour — the shape a copy-paste takes here.
+        let lines: Vec<&str> = EXTRAS.iter().map(|(_, _, why)| *why).collect();
+        for why in &lines {
+            assert!(why.len() > 20, "too short to say anything: {why}");
+            assert!(why.len() <= 80, "more than a line: {why}");
             assert!(why.trim_end().ends_with('.'), "not a sentence: {why}");
         }
-        let mut unique: Vec<&str> = all.clone();
+        let mut unique = lines.clone();
         unique.sort_unstable();
         unique.dedup();
-        assert_eq!(unique.len(), all.len(), "two settings share an explanation");
+        assert_eq!(unique.len(), lines.len(), "two settings share a line");
+        // And the three that kept a `[?]` say more than a line could.
+        for long in [MODE_HELP, REREAD_ALL_HELP, PHOTOS_HELP] {
+            assert!(long.len() > 120, "a [?] that fits on a line: {long}");
+        }
     }
 
     #[test]

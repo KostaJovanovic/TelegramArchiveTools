@@ -70,11 +70,11 @@ pub enum Mark {
 impl Mark {
     pub fn label(self) -> &'static str {
         match self {
-            Mark::Running => "Analysing",
+            Mark::Running => "Making report",
             Mark::Queued => "Queued",
             Mark::Failed => "Failed",
             Mark::NoReport => "No report",
-            Mark::Changed => "Changed",
+            Mark::Changed => "Out of date",
             Mark::Current => "Up to date",
         }
     }

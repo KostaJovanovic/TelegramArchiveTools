@@ -99,12 +99,16 @@ impl View {
         }
     }
 
+    /// The word on the rail and the top bar (TELEGRAMTOOLS.md §4.4). The
+    /// enum keeps its old names; what a person reads is Activity, because the
+    /// view now holds report runs as well as the export queue, and the reader
+    /// is a verb on a Library row rather than a place of its own.
     pub fn label(self) -> &'static str {
         match self {
             View::Chats => "Chats",
             View::Settings => "Settings",
-            View::Queue => "Queue",
-            View::Viewer => "Viewer",
+            View::Queue => "Activity",
+            View::Viewer => "Read",
             View::Library => "Library",
         }
     }
@@ -686,7 +690,7 @@ mod shot {
         match std::env::var("TGX_SHOT_VIEW").ok()?.as_str() {
             "chats" => Some(View::Chats),
             "settings" => Some(View::Settings),
-            "queue" => Some(View::Queue),
+            "queue" | "activity" => Some(View::Queue),
             "viewer" => Some(View::Viewer),
             "library" => Some(View::Library),
             _ => None,
@@ -753,6 +757,14 @@ impl eframe::App for Shell {
         // The analyser's workers report on their own channels, not the
         // bridge's; they wake the window the same way. See `library`.
         self.library.drain();
+        // What a report contains is a setting; the run reads it off the
+        // Library's state when it starts, so it is handed over before any
+        // start this frame can happen.
+        self.library.options(
+            self.settings.report_digest,
+            self.settings.report_fonts,
+            self.settings.report_handles,
+        );
         self.library.report_waiting(ctx);
         if self.body == View::Library {
             self.library.follow(&self.settings.output_dir, ctx);

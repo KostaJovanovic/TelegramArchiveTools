@@ -162,8 +162,9 @@ impl Shell {
         // are read here rather than trusted to have been committed already.
         self.commit_settings();
         if !self.settings.writes_anything() {
-            self.journal
-                .warn("Nothing to write: pick HTML or JSON under Classic, or choose Database.");
+            self.journal.warn(
+                "Nothing to write. Tick HTML pages or result.json in Settings, or choose Database.",
+            );
             self.status = "No output format selected".into();
             return;
         }
@@ -413,7 +414,7 @@ impl Shell {
         // or a Database run with its own copy of the settings, and adding to
         // a Classic one would export these chats as folders.
         if self.exporting && !self.settings.export_db {
-            self.status = "A Classic run is going — update the databases after it ends".into();
+            self.status = "A folder export is running — update the databases after it ends".into();
             self.journal.warn(self.status.clone());
             return;
         }
@@ -466,8 +467,9 @@ impl Shell {
         }
         self.commit_settings();
         if !self.settings.writes_anything() {
-            self.journal
-                .warn("Nothing to write: pick HTML or JSON under Classic, or choose Database.");
+            self.journal.warn(
+                "Nothing to write. Tick HTML pages or result.json in Settings, or choose Database.",
+            );
             self.status = "No output format selected".into();
             return;
         }
@@ -507,8 +509,8 @@ impl Shell {
         }
         self.queue.clear();
         self.pending.clear();
-        self.status = "Queue cleared".into();
-        self.journal.push("Queue cleared");
+        self.status = "Export list cleared".into();
+        self.journal.push("Export list cleared");
         self.log_copied = false;
     }
 

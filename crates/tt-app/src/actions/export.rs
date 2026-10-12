@@ -451,7 +451,7 @@ fn report_result(tx: &Events, title: &str, result: &tgx_tg::engine::ExportResult
             if result.root.is_some() {
                 "see missing_media.txt"
             } else {
-                "each one is named in tgx.log, and \"Re-read the whole history\" \
+                "each one is named in tgx.log, and \"Check the whole history\" \
                  asks for them again"
             }
         )));

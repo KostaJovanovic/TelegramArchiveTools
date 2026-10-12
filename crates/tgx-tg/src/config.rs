@@ -230,6 +230,18 @@ pub struct Settings {
     /// downloads. Off by default: a report of a large chat takes seconds and a
     /// megabyte, and an export is not always something wanted read.
     pub report_after_export: bool,
+    /// The analyser's `--digest`: `analysis/digest.jsonl` and `EVENTS.md`
+    /// beside each report. These three were run options on the Library's
+    /// foot, held for the session only, beside the selection verbs; they are
+    /// settings because they decide what a report contains, not which
+    /// exports get one.
+    pub report_digest: bool,
+    /// Geist written into each report. The analyser's `--no-fonts` inverted.
+    pub report_fonts: bool,
+    /// The analyser's `--handles`: people by @handle, never by the name
+    /// this account saved them under. Off, so the window and a bare command
+    /// line write the same report.
+    pub report_handles: bool,
 
     // Performance
     //
@@ -314,6 +326,9 @@ impl Default for Settings {
             member_limit: 10_000,
             split_topics: true,
             report_after_export: false,
+            report_digest: true,
+            report_fonts: true,
+            report_handles: false,
             download_concurrency: 5,
             page_size: 1000,
             sort_mode: "recent".into(),

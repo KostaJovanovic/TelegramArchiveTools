@@ -695,7 +695,7 @@ fn export_as_classic_reports_where_it_wrote_and_comes_back() {
     assert!(!s.viewer.unpacking, "the button comes back");
     assert_eq!(s.status, "Wrote Dev to X: 3 messages");
     s.viewer.unpacking = true;
-    s.apply(Event::Unpacked(Err("Export as Classic failed: x".into())));
+    s.apply(Event::Unpacked(Err("Export as folder failed: x".into())));
     assert!(!s.viewer.unpacking);
     assert_eq!(s.journal.warnings(), 1);
 }
@@ -920,6 +920,19 @@ fn hit(id: i64) -> tgx_tg::search::Hit {
 }
 
 #[test]
+fn the_export_button_says_how_many_and_what_pressing_it_will_do() {
+    use chrome::export_label;
+    assert_eq!(export_label(0, false, false), "Export");
+    assert_eq!(export_label(1, false, false), "Export 1 chat");
+    assert_eq!(export_label(412, false, false), "Export 412 chats");
+    // Mid-run the same slot adds to the run in flight, and after a Stop it
+    // carries on whatever was paused, ticks or none.
+    assert_eq!(export_label(3, true, false), "Add 3 to queue");
+    assert_eq!(export_label(0, false, true), "Resume");
+    assert_eq!(export_label(5, false, true), "Resume");
+}
+
+#[test]
 fn the_viewer_is_entered_from_the_library_and_lights_its_rail_entry() {
     assert_eq!(View::ALL.len(), 4);
     assert!(!View::ALL.contains(&View::Viewer));
@@ -929,8 +942,9 @@ fn the_viewer_is_entered_from_the_library_and_lights_its_rail_entry() {
     assert_eq!(View::ALL[3], View::Settings);
     assert_eq!(View::Viewer.on_rail(), View::Library);
     assert_eq!(View::Chats.on_rail(), View::Chats);
-    assert_eq!(View::Viewer.label(), "Viewer");
+    assert_eq!(View::Viewer.label(), "Read");
     assert_eq!(View::Library.label(), "Library");
+    assert_eq!(View::Queue.label(), "Activity");
     let mut s = Shell::headless();
     s.show(View::Viewer);
     assert_eq!(s.body, View::Viewer);

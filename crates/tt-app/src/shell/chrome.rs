@@ -5,8 +5,37 @@
 
 use super::*;
 use eframe::egui::{Layout, Ui};
-use tgx_ui::components::{action, caps, edge_rule, eyebrow, row, rule, title, NavCell};
-use tgx_ui::tokens::{space, window};
+use tgx_ui::components::{button, edge_rule, figure, meta, nav_item, row, rule, text, title};
+use tgx_ui::tokens::{space, window, Palette};
+
+/// A view's name on the top bar: the reading face, medium, in ink — a
+/// heading in sentence case rather than one more line of tracked capitals.
+pub(super) fn heading(label: &str, p: &Palette) -> egui::RichText {
+    egui::RichText::new(label)
+        .font(tgx_ui::fonts::medium(window::READING))
+        .color(p.fg)
+}
+
+/// What Chats' primary says, given the ticks and the run.
+///
+/// The number is in the label because it is the decision: "Export" over
+/// four hundred ticked chats and over one are different buttons to press.
+pub(super) fn export_label(ticked: usize, exporting: bool, paused: bool) -> String {
+    let chats = |n: usize| if n == 1 { "chat" } else { "chats" };
+    if exporting {
+        if ticked == 0 {
+            "Add to queue".into()
+        } else {
+            format!("Add {ticked} to queue")
+        }
+    } else if paused {
+        "Resume".into()
+    } else if ticked == 0 {
+        "Export".into()
+    } else {
+        format!("Export {ticked} {}", chats(ticked))
+    }
+}
 
 /// How wide the rail is: room for `LIBRARY  12` in tracked capitals and the
 /// account's name under it, and not a point more — every point here comes out
@@ -43,9 +72,10 @@ impl Shell {
         ui.add_space(space::BREAK);
         row(ui, |ui| ui.label(title(crate::TITLE, &p)));
         ui.add_space(space::BREAK);
+        // Edge to edge: the hover fill and the bar are the rail's, not a
+        // gutter's, so the entries are not put through `row`.
+        let width = ui.available_width() - 1.0;
         for view in View::ALL {
-            let selected = view == current;
-            let ink = if selected { p.fg } else { p.muted };
             let count = match view {
                 View::Chats if !self.chats.is_empty() => Some(self.chats.len()),
                 View::Queue if !self.queue.is_empty() => Some(self.queue.len()),
@@ -54,22 +84,14 @@ impl Shell {
                 }
                 _ => None,
             };
-            let mut label = view.label().to_string();
-            if let Some(n) = count {
-                label.push_str(&format!("  {n}"));
-            }
-            let hit = row(ui, |ui| action(ui, caps(&label, ink), true));
-            if selected {
-                ui.painter().vline(
-                    edge.left() + space::TIGHT,
-                    hit.rect.y_range(),
-                    egui::Stroke::new(2.0_f32, p.fg),
-                );
-            }
+            let hit = ui
+                .allocate_ui(egui::vec2(width, 0.0), |ui| {
+                    nav_item(ui, view.label(), count, view == current, &p)
+                })
+                .inner;
             if hit.clicked() {
                 chosen = Some(view);
             }
-            ui.add_space(space::TIGHT);
         }
 
         // The account, at the foot: who the exports are of, and the way in
@@ -79,21 +101,16 @@ impl Shell {
             let busy = self.exporting || self.counting;
             match self.account.clone() {
                 Some(name) => {
-                    row(ui, |ui| {
-                        ui.add(egui::Label::new(tgx_ui::components::text(name, &p)).truncate())
-                    });
-                    row(ui, |ui| ui.label(eyebrow("Signed in", &p)));
+                    row(ui, |ui| ui.add(egui::Label::new(text(name, &p)).truncate()));
+                    row(ui, |ui| ui.label(meta("Signed in as", &p)));
                 }
                 None => {
                     let enabled = !busy && self.login.is_none();
-                    if row(ui, |ui| {
-                        NavCell::tool("Sign in").enabled(enabled).show(ui, &p)
-                    })
-                    .clicked()
-                    {
+                    if row(ui, |ui| button(ui, "Sign in", enabled, false, &p)).clicked() {
                         self.start_sign_in();
                     }
-                    row(ui, |ui| ui.label(eyebrow("Not signed in", &p)));
+                    ui.add_space(space::TIGHT);
+                    row(ui, |ui| ui.label(meta("Not signed in", &p)));
                 }
             }
             ui.add_space(space::TIGHT);
@@ -113,66 +130,23 @@ impl Shell {
     /// have gone to the rail; what is left here is the view's name and its
     /// actions, so the bar changes with the view.
     ///
-    /// **The export sequence keeps its numbers.** `01`–`03` across Sign in,
-    /// Refresh and Start export is the one thing on this bar that tells a
-    /// first-time user there is an order. Stop and Open folder are tools:
-    /// unnumbered, and last. The Library has its own actions, and none of the
-    /// export's.
+    /// **One primary action per view, top right** (TELEGRAMTOOLS.md §4.2).
+    /// Chats has Export, Activity has Stop, the Library has Make report;
+    /// Settings and the reader have none.
+    ///
+    /// **The numbered steps are gone.** `01 Sign in / 02 Refresh / 03 Start
+    /// export` told a first-time user there was an order, but it put an
+    /// account action, a list action and the run on one strip, on every view,
+    /// beside a rail that already showed the account. Sign in lives at the
+    /// rail's foot — and is Chats' primary while nobody is signed in, because
+    /// then it is the only thing Chats can do. Reload went beside the list it
+    /// reloads.
     ///
     /// **The appearance chip moved into Settings.** It was a sixth kind of mark
     /// on a bar that was already carrying too many, and it is a stored setting
     /// with a home — see `settings::appearance_section`.
     pub(super) fn top_bar(&mut self, ui: &mut Ui, ctx: &Context) {
         let p = self.palette;
-        if self.body == View::Library {
-            let body = egui::vec2(ui.available_width(), ui.available_height() - 1.0);
-            ui.allocate_ui_with_layout(body, Layout::left_to_right(egui::Align::Center), |ui| {
-                row(ui, |ui| {
-                    ui.label(caps(View::Library.label(), p.fg));
-                    ui.add_space(space::BREAK);
-                    self.library.bar(ui, ctx, &p);
-                });
-            });
-            edge_rule(ui, &p);
-            return;
-        }
-        let busy = self.exporting || self.counting;
-
-        // **Start export becomes Add to queue while a run is going**, because
-        // that is what pressing it does now: the ticked chats join the run in
-        // flight rather than replacing it. Same slot, same number, so the
-        // control does not move under the pointer — only its promise changes,
-        // and it changes to the true one.
-        //
-        // **And Resume queue after a Stop**, which carries on the paused rows
-        // — so it needs no ticks of its own; any that are set join the end.
-        let paused = !self.exporting && self.queue.is_paused();
-        let start = if self.exporting {
-            "Add to queue"
-        } else if paused {
-            "Resume queue"
-        } else {
-            "Start export"
-        };
-        let steps = [
-            // Disabled while the dialog is up: a second click would spawn a
-            // second `Session::connect` behind the one already running, and
-            // `open_login` would raise the existing dialog while the extra
-            // connection carried on in the background.
-            NavCell::step(1, "Sign in").enabled(!busy && self.login.is_none()),
-            NavCell::step(2, "Refresh").enabled(self.signed_in && !busy),
-            // **The one red in the window.** This is the button the application
-            // exists for; everything else on the bar leads to it or cleans up
-            // after it. See `components::button`.
-            NavCell::step(3, start)
-                .enabled(self.signed_in && (paused || !self.selected.is_empty()) && !self.counting)
-                .primary(true),
-        ];
-        let tools = [
-            NavCell::tool("Stop").enabled(busy),
-            NavCell::tool("Open folder"),
-        ];
-
         // **The row is given the bar's height, not `interact_size`'s.** The
         // panel is `NAV_HEIGHT` tall, but `Ui::horizontal` allocates a strip one
         // `interact_size.y` high and centres within *that* — so the buttons sat
@@ -183,52 +157,87 @@ impl Shell {
         let body = egui::vec2(ui.available_width(), ui.available_height() - 1.0);
         ui.allocate_ui_with_layout(body, Layout::left_to_right(egui::Align::Center), |ui| {
             row(ui, |ui| {
-                ui.label(caps(self.body.label(), p.fg));
-
-                // Laid out right-to-left from the far end, so the tools finish
-                // the line and the sequence keeps the middle. Pushed in reverse
-                // for that reason: what is listed first lands furthest right.
-                ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                    for (i, cell) in tools.iter().enumerate().rev() {
-                        if cell.show(ui, &p).clicked() {
-                            match i {
-                                0 => self.stop(),
-                                // Reported, not discarded. A silent spawn
-                                // failure is what let `explorer.exe` be looked
-                                // for in System32 — where it is not — for as
-                                // long as nobody happened to watch the button do
-                                // nothing.
-                                1 => {
-                                    if let Err(e) = crate::actions::open_output_folder(
-                                        &self.settings.output_dir,
-                                    ) {
-                                        self.journal.warn(e);
-                                        self.log_copied = false;
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    ui.add_space(space::STEP);
-                    for (i, cell) in steps.iter().enumerate().rev() {
-                        if cell.show(ui, &p).clicked() {
-                            match i {
-                                0 => self.start_sign_in(),
-                                1 => self.start_refresh(),
-                                2 if paused => {
-                                    let picked = self.ticked_chats();
-                                    self.resume_queue(picked);
-                                }
-                                2 => self.start_export(),
-                                _ => {}
-                            }
-                        }
-                    }
-                });
+                ui.label(heading(self.body.label(), &p));
+                ui.add_space(space::BREAK);
+                match self.body {
+                    View::Library => self.library.bar(ui, ctx, &p),
+                    View::Chats => self.chats_actions(ui),
+                    View::Queue => self.activity_actions(ui),
+                    View::Settings | View::Viewer => {}
+                }
             });
         });
         edge_rule(ui, &p);
+    }
+
+    /// Chats: Stop while something runs, then the one red.
+    fn chats_actions(&mut self, ui: &mut Ui) {
+        let p = self.palette;
+        let busy = self.exporting || self.counting;
+        ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+            if !self.signed_in {
+                // Disabled while the dialog is up: a second click would spawn a
+                // second `Session::connect` behind the one already running.
+                let enabled = !busy && self.login.is_none();
+                if button(ui, "Sign in", enabled, true, &p).clicked() {
+                    self.start_sign_in();
+                }
+                return;
+            }
+            // **Export becomes Add to queue while a run is going**, because that
+            // is what pressing it does now: the ticked chats join the run in
+            // flight. Same slot, so the control does not move under the pointer
+            // — only its promise changes, and it changes to the true one.
+            //
+            // **And Resume after a Stop**, which carries on the paused rows —
+            // so it needs no ticks of its own; any that are set join the end.
+            let paused = !self.exporting && self.queue.is_paused();
+            let label = export_label(self.selected.len(), self.exporting, paused);
+            let enabled = (paused || !self.selected.is_empty()) && !self.counting;
+            // **The one red in the window.** This is the button the
+            // application exists for. See `components::button`.
+            if button(ui, &label, enabled, true, &p).clicked() {
+                if paused {
+                    let picked = self.ticked_chats();
+                    self.resume_queue(picked);
+                } else {
+                    self.start_export();
+                }
+            }
+            if busy && button(ui, "Stop", true, false, &p).clicked() {
+                self.stop();
+            }
+        });
+    }
+
+    /// Activity: Stop is the primary, Open folder the tool beside it.
+    ///
+    /// **Stop stops everything this view shows** — the export and the report
+    /// run both, since both are on it. The report run stops after the report
+    /// in hand, as the Library's own Stop does.
+    fn activity_actions(&mut self, ui: &mut Ui) {
+        let p = self.palette;
+        let exporting = self.exporting || self.counting;
+        let reporting = self.library.state.running && !self.library.state.stopping;
+        ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+            if button(ui, "Stop", exporting || reporting, true, &p).clicked() {
+                if exporting {
+                    self.stop();
+                }
+                if reporting {
+                    self.library.stop();
+                }
+            }
+            // Reported, not discarded. A silent spawn failure is what let
+            // `explorer.exe` be looked for in System32 — where it is not — for
+            // as long as nobody happened to watch the button do nothing.
+            if button(ui, "Open folder", true, false, &p).clicked() {
+                if let Err(e) = crate::actions::open_output_folder(&self.settings.output_dir) {
+                    self.journal.warn(e);
+                    self.log_copied = false;
+                }
+            }
+        });
     }
 
     /// Swap the appearance.
@@ -252,20 +261,36 @@ impl Shell {
     pub(super) fn status_bar(&mut self, ui: &mut Ui) {
         let p = self.palette;
         // Counting reports in chats and an export in messages, and the export
-        // owns the line whenever it is running.
-        let right = if self.exporting {
-            self.queue
+        // owns the line whenever it is running. **The analyser speaks here
+        // too** — while the Library is on screen, or while a report run goes
+        // and nothing of the exporter's does. It had a status line of its own
+        // stacked above this one.
+        let reporting = !self.exporting
+            && self.count_progress.is_none()
+            && (self.body == View::Library || self.library.fill().is_some());
+        let (status, right) = if reporting {
+            self.library.status()
+        } else if self.exporting {
+            let right = self
+                .queue
                 .fraction()
                 .map(|f| format!("{:.0}%", f * 100.0))
-                .unwrap_or_default()
+                .unwrap_or_default();
+            (self.status.clone(), right)
         } else {
-            match self.count_progress {
+            let right = match self.count_progress {
                 Some((done, total)) => format!("{done} of {total}"),
                 None => String::new(),
-            }
+            };
+            (self.status.clone(), right)
         };
 
-        edge_rule(ui, &p);
+        // A report run's bar takes the rule's place, at the same height
+        // either way, so the line under it does not jump when one starts.
+        match self.library.fill().filter(|_| reporting) {
+            Some(fraction) => tgx_ui::components::progress_bar(ui, Some(fraction), &p),
+            None => edge_rule(ui, &p),
+        }
         ui.add_space(space::TIGHT);
         // **The nested left-to-right is load-bearing, and taking it out was a
         // regression.** The figure is the fixed part, so it is allocated first
@@ -276,18 +301,16 @@ impl Shell {
         // on the left.
         row(ui, |ui| {
             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                // The right-hand figure is ours and short, so it can be tracked.
-                ui.label(eyebrow(&right, &p));
+                ui.label(figure(&right, &p));
                 ui.with_layout(Layout::left_to_right(egui::Align::Center), |ui| {
-                    // **In the mono, not letterspaced.** `eyebrow` goes through
-                    // `components::tracked`, whose own doc says not to put a
-                    // string of unknown length through it, and this line carries
-                    // chat titles and raw RPC errors. The mono also keeps a line
-                    // that changes several times a second from changing width
-                    // under every character.
+                    // **In the mono, and as written.** It was uppercased, which
+                    // is capitals carrying data — and this line carries chat
+                    // titles and raw RPC errors, whose case is part of what
+                    // they say. The mono keeps a line that changes several
+                    // times a second from changing width under every character.
                     ui.add(
                         egui::Label::new(
-                            egui::RichText::new(tgx_ui::components::uppercase(&self.status))
+                            egui::RichText::new(&status)
                                 .font(tgx_ui::fonts::mono(window::LABEL))
                                 .color(p.muted),
                         )

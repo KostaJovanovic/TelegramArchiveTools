@@ -68,7 +68,6 @@ impl Shell {
             }
             Event::Chats(mut chats) => {
                 self.loaded = true;
-                let n = chats.len();
                 // **A refresh must not throw away the counts.** The dialog
                 // list carries no message totals — `dialogs.rs` hard-codes
                 // `None` — so replacing the list wholesale silently undid a
@@ -91,7 +90,10 @@ impl Shell {
                     self.chats.iter().map(|c| c.id).collect();
                 self.selected.retain(|id| live.contains(id));
                 self.rebuild_rows();
-                self.status = format!("{n} chats");
+                // **Cleared, not "{n} chats".** The rail carries the count
+                // beside Chats; saying it again in the status bar was the same
+                // fact twice, and the bar is for work that is running.
+                self.status.clear();
                 self.scan_destination();
             }
 

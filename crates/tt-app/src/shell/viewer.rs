@@ -23,8 +23,8 @@ use std::collections::{HashMap, HashSet};
 use tgx_tg::search::Found;
 use tgx_tg::viewer::{Database, Detail, Loaded, Media, Row, Topic};
 use tgx_ui::components::{
-    action, block, button, caps, eyebrow, field, figure, meta, row, rule, segmented, text,
-    thousands, tick_box, EmptyState, GUTTER,
+    action, badge, block, button, eyebrow, field, figure, meta, row, rule, segmented, text,
+    thousands, tick_box, EmptyState, Tone, GUTTER,
 };
 use tgx_ui::tokens::space;
 
@@ -245,7 +245,7 @@ impl Shell {
             .show_inside(ui, |ui| {
                 rule(ui, &p);
                 ui.add_space(space::TIGHT);
-                row(ui, |ui| ui.label(eyebrow(&self.viewer_summary(), &p)));
+                row(ui, |ui| ui.label(figure(self.viewer_summary(), &p)));
                 ui.add_space(space::TIGHT);
             });
 
@@ -288,7 +288,7 @@ impl Shell {
         let mut unpack = false;
         row(ui, |ui| {
             ui.spacing_mut().item_spacing.x = space::STEP;
-            if action(ui, caps("\u{2190} Library", p.fg), true).clicked() {
+            if action(ui, text("\u{2190} Library", &p), true).clicked() {
                 back = true;
             }
             let v = &self.viewer;
@@ -300,7 +300,7 @@ impl Shell {
             // **Only a forum has topics to pick between**, so only a forum
             // gets the picker; for any other chat it would offer one choice.
             if v.topics.len() > 1 {
-                ui.label(eyebrow("Topic", &p));
+                ui.label(meta("Topic", &p));
                 let current = match v.topic {
                     None => "All topics".to_string(),
                     Some(id) => v.topic_names.get(&id).cloned().unwrap_or_default(),
@@ -326,12 +326,15 @@ impl Shell {
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let can_unpack = v.open.is_some() && !v.unpacking;
-                if button(ui, "Export as Classic…", can_unpack, false, &p).clicked() {
+                if button(ui, "Export as folder…", can_unpack, false, &p)
+                    .on_hover_text("Write this database out as Telegram Desktop's folders")
+                    .clicked()
+                {
                     unpack = true;
                 }
                 // Re-reads the folder *and* the chat on screen: the reason to
                 // press it is usually that a sync has just written to both.
-                if button(ui, "Refresh", !v.listing, false, &p).clicked() {
+                if button(ui, "Reload", !v.listing, false, &p).clicked() {
                     refresh = true;
                 }
             });
@@ -375,14 +378,14 @@ impl Shell {
             return;
         };
         let Some(out) = rfd::FileDialog::new()
-            .set_title("Export as Classic into…")
+            .set_title("Export as folder into…")
             .set_directory(&self.settings.output_dir)
             .pick_folder()
         else {
             return;
         };
         self.viewer.unpacking = true;
-        self.status = format!("Writing {} out as a Classic folder…", db.title);
+        self.status = format!("Writing {} out as a folder export…", db.title);
         let tx = self.bridge.sender();
         let settings = self.settings.clone();
         self.bridge
@@ -440,15 +443,15 @@ impl Shell {
             }
             let can_search = !self.viewer.query.trim().is_empty()
                 && (self.viewer.everywhere || self.viewer.open.is_some());
-            if action(ui, caps("Search", p.fg), can_search).clicked() {
+            if action(ui, text("Search", &p), can_search).clicked() {
                 go = true;
             }
             ui.add_space(space::TIGHT);
             let stepping = !self.viewer.hits.is_empty() && !self.viewer.showing_found;
-            if action(ui, caps("Prev", p.fg), stepping).clicked() {
+            if action(ui, text("Previous", &p), stepping).clicked() {
                 step = -1;
             }
-            if action(ui, caps("Next", p.fg), stepping).clicked() {
+            if action(ui, text("Next", &p), stepping).clicked() {
                 step = 1;
             }
             if !self.viewer.hits.is_empty() {
@@ -459,7 +462,7 @@ impl Shell {
             // Box and label are one control, as everywhere else in the window.
             let hit = tick_box(ui, self.viewer.everywhere, true, &p).union(action(
                 ui,
-                eyebrow("All databases", &p),
+                text("All databases", &p),
                 true,
             ));
             if hit.clicked() {
@@ -467,8 +470,8 @@ impl Shell {
             }
             if let Some(found) = &self.viewer.found {
                 if !self.viewer.showing_found {
-                    let label = format!("Results  {}", found.total());
-                    if action(ui, caps(&label, p.fg), true).clicked() {
+                    let label = format!("Results ({})", found.total());
+                    if action(ui, text(label, &p), true).clicked() {
                         back_to_found = true;
                     }
                 }
@@ -834,10 +837,10 @@ impl Shell {
                         });
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if hit.deleted {
-                                ui.label(caps("deleted", p.accent));
+                                badge(ui, "Deleted", Tone::Ink, &p);
                             }
                             if hit.in_earlier_version {
-                                ui.label(caps("earlier version", p.muted));
+                                badge(ui, "Earlier version", Tone::Quiet, &p);
                             }
                             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                                 ui.add(
@@ -877,13 +880,10 @@ impl Shell {
                 ui.add_space(space::STEP);
                 block(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = space::TIGHT;
-                    ui.label(eyebrow(&format!("Message {}", d.id), &p));
+                    ui.label(figure(format!("Message {}", d.id), &p));
                     ui.label(meta(format!("{}  ·  {}", d.date, d.from), &p));
                     if let Some(at) = &d.deleted {
-                        ui.label(caps(
-                            &format!("Deleted on Telegram — noticed {at}"),
-                            p.accent,
-                        ));
+                        ui.label(text(format!("Deleted on Telegram — noticed {at}"), &p));
                     }
                     if let Some(at) = &d.edited {
                         ui.label(meta(format!("Edited {at}"), &p));
@@ -895,7 +895,7 @@ impl Shell {
                         // A link only when the message it answers is here to
                         // jump to; otherwise just the number.
                         let here = self.viewer.index.contains_key(&to);
-                        if action(ui, caps(&format!("Reply to {to}"), p.fg), here).clicked() {
+                        if action(ui, text(format!("Reply to {to}"), &p), here).clicked() {
                             jump = Some(to);
                         }
                     }

@@ -26,10 +26,9 @@ use tga_run::open;
 use tga_run::refresh::Source;
 use tga_run::state::{Mark, Pick, Show, Sort, State};
 use tgx_ui::components::{
-    action, caps, edge_rule, eyebrow, field, figure, help, progress_bar, row, rule, text, tick_box,
-    tick_mark, uppercase, EmptyState, NavCell, GUTTER,
+    action, badge, button, field, figure, meta, row, rule, text, tick_mark, EmptyState, GUTTER,
 };
-use tgx_ui::tokens::{space, window, Palette};
+use tgx_ui::tokens::{space, Palette};
 
 /// Every row is this tall — the chat list's, so a title over a caption sits
 /// the same in both views.
@@ -160,6 +159,15 @@ impl Library {
     fn start_one(&mut self, path: &Path, ctx: &egui::Context) {
         let targets = self.state.start_one(path);
         self.spawn(targets, ctx);
+    }
+
+    /// What every report contains — Settings › Reports. Held on the state
+    /// because that is what `spawn` builds the request from, and what the
+    /// analyser's own tests drive.
+    pub(super) fn options(&mut self, digest: bool, fonts: bool, handles: bool) {
+        self.state.write_digest = digest;
+        self.state.embed_fonts = fonts;
+        self.state.handles_only = handles;
     }
 
     /// "Report after export": a chat the exporter has just finished, to be
@@ -297,48 +305,26 @@ impl Library {
     /// right and the field takes whatever is left.
     pub(super) fn bar(&mut self, ui: &mut Ui, ctx: &egui::Context, p: &Palette) {
         let running = self.state.running;
-        let ticked = self.state.selected.len();
-        let analyse = match (running, ticked) {
-            (true, _) => "Analysing".to_string(),
-            (false, 0) => "Analyse".to_string(),
-            (false, n) => format!("Analyse {n}"),
-        };
+        let label = report_label(self.state.selected.len(), running);
         let root = self.state.root.clone().filter(|r| r.is_dir());
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             // **The one red.** Everything else on the bar leads to it.
-            if NavCell::tool(analyse)
-                .enabled(self.state.ready())
-                .primary(true)
-                .show(ui, p)
-                .clicked()
-            {
+            if button(ui, &label, self.state.ready(), true, p).clicked() {
                 self.start(ctx);
             }
-            if NavCell::tool("Stop")
-                .enabled(running && !self.state.stopping)
-                .show(ui, p)
-                .clicked()
-            {
+            if running && button(ui, "Stop", !self.state.stopping, false, p).clicked() {
                 self.stop();
             }
             ui.add_space(space::STEP);
-            if NavCell::tool("Open folder")
-                .enabled(root.is_some())
-                .show(ui, p)
-                .clicked()
-            {
+            if button(ui, "Open folder", root.is_some(), false, p).clicked() {
                 if let Some(dir) = &root {
                     if let Err(e) = open::reveal(dir) {
                         self.state.status = e;
                     }
                 }
             }
-            if NavCell::tool("Choose")
-                .enabled(!running)
-                .show(ui, p)
-                .clicked()
-            {
+            if button(ui, "Choose", !running, false, p).clicked() {
                 self.browse(ctx);
             }
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
@@ -364,10 +350,6 @@ impl Library {
     /// The body: the list between its filter row and its foot.
     pub(super) fn panel(&mut self, ui: &mut Ui, p: &Palette) {
         let bare = egui::Frame::NONE.fill(p.bg);
-        egui::TopBottomPanel::bottom("library-status")
-            .frame(bare)
-            .show_separator_line(false)
-            .show_inside(ui, |ui| self.status_line(ui, p));
         if self.state.entries.is_empty() {
             let empty = if self.state.folder().is_none() {
                 EmptyState::new(
@@ -381,7 +363,7 @@ impl Library {
                 )
             } else {
                 EmptyState::new(
-                    "Nothing to analyse here",
+                    "No exports here",
                     Some(
                         "No result.json under it, and no .sqlite in it or in the folders \
                          directly inside it."
@@ -428,7 +410,7 @@ impl Library {
                     .hint_text("Filter exports…")
                     .desired_width(FILTER_W),
             );
-            ui.label(eyebrow("Show", p));
+            ui.label(meta("Show", p));
             egui::ComboBox::from_id_salt("library-show")
                 .selected_text(text(self.state.show.label(), p))
                 .width(170.0)
@@ -437,7 +419,7 @@ impl Library {
                         ui.selectable_value(&mut self.state.show, option, text(option.label(), p));
                     }
                 });
-            ui.label(eyebrow("Sort", p));
+            ui.label(meta("Sort", p));
             egui::ComboBox::from_id_salt("library-sort")
                 .selected_text(text(self.state.sort.label(), p))
                 .width(190.0)
@@ -519,21 +501,17 @@ impl Library {
                 );
                 ui.add_space(space::STEP);
 
-                // **The accent is this run**, as in the queue: the row being
+                // **The accent is this run**, as in Activity: the row being
                 // read now and nothing else. A row that needs a report is ink,
-                // one that does not is muted.
+                // one that does not is quiet. A badge, not capitals: the
+                // state is a word to read, in a box that says it is a state.
                 let mark = entry.mark();
-                let ink = match mark {
-                    Mark::Running => p.accent,
-                    Mark::Failed | Mark::NoReport | Mark::Changed => p.fg,
-                    Mark::Queued | Mark::Current => p.muted,
-                };
                 ui.allocate_ui_with_layout(
                     egui::vec2(MARK_W, ROW_HEIGHT),
                     Layout::left_to_right(Align::Center),
                     |ui| {
                         ui.set_min_size(egui::vec2(MARK_W, ROW_HEIGHT));
-                        ui.label(caps(mark.label(), ink));
+                        badge(ui, mark.label(), super::queue::mark_tone(mark), p);
                     },
                 );
                 ui.add_space(space::STEP);
@@ -541,8 +519,8 @@ impl Library {
                 // **The row's three actions**, right to left so they read
                 // Read · report · Show in folder. Each sits on top of the row
                 // and takes its own click, so acting on a row does not also
-                // tick it.
-                if action(ui, caps("Show in folder", p.muted), true).clicked() {
+                // tick it. Sentence case: they are verbs, not labels.
+                if action(ui, meta("Show in folder", p), true).clicked() {
                     act = Some(RowAction::Reveal(entry.target.home()));
                 }
                 ui.add_space(space::STEP);
@@ -551,14 +529,13 @@ impl Library {
                 // one analyser at a time.
                 match (mark, entry.report()) {
                     (Mark::Current, Some(report)) => {
-                        if action(ui, caps("Open report", p.fg), true).clicked() {
+                        if action(ui, text("Open report", p), true).clicked() {
                             act = Some(RowAction::Open(report.to_path_buf()));
                         }
                     }
                     _ => {
                         let idle = !self.state.running;
-                        let ink = if idle { p.fg } else { p.muted };
-                        if action(ui, caps("Make report", ink), idle).clicked() {
+                        if action(ui, text("Make report", p), idle).clicked() {
                             act = Some(RowAction::Report(path.clone()));
                         }
                     }
@@ -568,7 +545,7 @@ impl Library {
                 // HTML, which a browser already reads — and needs the chat id,
                 // which arrives with the count.
                 if let Some(chat_id) = entry.chat_id {
-                    if action(ui, caps("Read", p.fg), true).clicked() {
+                    if action(ui, text("Read", p), true).clicked() {
                         act = Some(RowAction::Read(Read {
                             path: path.clone(),
                             chat_id,
@@ -582,7 +559,7 @@ impl Library {
                 ui.with_layout(Layout::top_down(Align::LEFT), |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     ui.add(egui::Label::new(text(&entry.title, p)).truncate());
-                    ui.add(egui::Label::new(caps(&entry.caption(now), p.muted)).truncate());
+                    ui.add(egui::Label::new(meta(entry.caption(now), p)).truncate());
                 });
             });
         });
@@ -601,9 +578,13 @@ impl Library {
         }
     }
 
-    /// The selection verbs, the run's options, and what is ticked.
+    /// The selection verbs and what is ticked — **and nothing else.**
+    ///
+    /// Embed fonts, Write the digest and Handles only sat here too, held for
+    /// the session, so the foot mixed "which exports" with "what a report
+    /// contains" and the second was forgotten at every launch. They are
+    /// Settings › Reports now.
     fn foot(&mut self, ui: &mut Ui, p: &Palette) {
-        let running = self.state.running;
         row(ui, |ui| {
             ui.spacing_mut().item_spacing.x = space::STEP;
             for (label, pick) in [
@@ -613,115 +594,44 @@ impl Library {
             ] {
                 // Flat, as the chat list's are: these refine a selection the
                 // rows already show, and boxes here would outweigh the bar.
-                if action(ui, caps(label, p.fg), true).clicked() {
+                if action(ui, text(label, p), true).clicked() {
                     self.state.select(pick);
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                // Right to left, so each option is its mark, then its label,
-                // then its box — read left to right as box, label, mark.
-                // **Box and label are one control**: the words you read are the
-                // thing you click.
-                help(
-                    ui,
-                    "fonts",
-                    "Geist is written into every report, so it looks right on a \
-                     machine that does not have it. Off, each report is about \
-                     300 KB smaller.",
-                    p,
-                );
-                let fonts = action(ui, eyebrow("Embed fonts", p), !running).union(tick_box(
-                    ui,
-                    self.state.embed_fonts,
-                    !running,
-                    p,
-                ));
-                if fonts.clicked() {
-                    self.state.embed_fonts = !self.state.embed_fonts;
-                }
-                ui.add_space(space::STEP);
-                help(
-                    ui,
-                    "digest",
-                    "Also writes analysis/digest.jsonl and EVENTS.md beside each \
-                     export: every message as one line, with each attachment's \
-                     text and date, which is what a model needs to map events \
-                     onto the timeline.",
-                    p,
-                );
-                let digest = action(ui, eyebrow("Write the digest", p), !running).union(tick_box(
-                    ui,
-                    self.state.write_digest,
-                    !running,
-                    p,
-                ));
-                if digest.clicked() {
-                    self.state.write_digest = !self.state.write_digest;
-                }
-                ui.add_space(space::STEP);
-                help(
-                    ui,
-                    "handles",
-                    "Shows everyone with an @handle by it instead of by name. \
-                     For your contacts an export holds the name you saved them \
-                     as, which nobody else should see. Somebody with no handle \
-                     keeps the name in the export.",
-                    p,
-                );
-                let handles = action(ui, eyebrow("Handles only", p), !running).union(tick_box(
-                    ui,
-                    self.state.handles_only,
-                    !running,
-                    p,
-                ));
-                if handles.clicked() {
-                    self.state.handles_only = !self.state.handles_only;
-                }
+                ui.label(figure(self.state.selection_label(), p));
             });
-        });
-        ui.add_space(space::TIGHT);
-        row(ui, |ui| {
-            ui.label(eyebrow(&self.state.selection_label(), p));
         });
     }
 
-    /// The view's own status: what the analyser is doing, and how far through
-    /// the queue it is. The window's status bar belongs to the export.
-    fn status_line(&mut self, ui: &mut Ui, p: &Palette) {
-        // The bar takes the rule's place while a run goes, at the same height
-        // either way, so the status line does not jump when one starts.
-        match self.state.fill() {
-            Some(fraction) => progress_bar(ui, Some(fraction), p),
-            None => {
-                edge_rule(ui, p);
-                ui.add_space(2.0);
-            }
-        }
-        ui.add_space(space::TIGHT);
+    /// The analyser's line for the window's status bar, while the Library
+    /// shows: what it is doing, and how far through the run.
+    ///
+    /// It had a status line of its own, above the window's — two status
+    /// lines, one over the other, the upper one in capitals. One bar, with
+    /// whoever is speaking in it.
+    pub(super) fn status(&self) -> (String, String) {
         let right = if self.state.running {
             format!("{} of {}", self.state.done, self.state.of)
         } else {
             String::new()
         };
-        // The figure is the fixed part, so it is allocated first from the
-        // right and the status is laid out forwards in what remains — the
-        // window's status bar, and the nesting is load-bearing there too.
-        row(ui, |ui| {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(eyebrow(&right, p));
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(uppercase(&self.state.status))
-                                .font(tgx_ui::fonts::mono(window::LABEL))
-                                .color(p.muted),
-                        )
-                        .truncate(),
-                    );
-                });
-            });
-        });
-        ui.add_space(space::TIGHT);
+        (self.state.status.clone(), right)
+    }
+
+    /// The run's fill, for the bar's rule. `None` between runs.
+    pub(super) fn fill(&self) -> Option<f32> {
+        self.state.fill()
+    }
+}
+
+/// What the Library's primary says.
+pub(super) fn report_label(ticked: usize, running: bool) -> String {
+    match (running, ticked) {
+        (true, _) => "Making reports".into(),
+        (false, 0) => "Make report".into(),
+        (false, 1) => "Make 1 report".into(),
+        (false, n) => format!("Make {n} reports"),
     }
 }
 
