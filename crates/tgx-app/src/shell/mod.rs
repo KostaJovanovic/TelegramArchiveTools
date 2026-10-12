@@ -384,6 +384,17 @@ impl Shell {
         // not open onto a failure it could have predicted. Testing for the
         // session *file* rather than reading it: whether a credential exists
         // is not the credential.
+        //
+        // **Not under `TGX_SHOT`.** A photograph of the window is not
+        // permission to use the account: the probe connects with the stored
+        // session key, which CLAUDE.md says is not done without the account
+        // holder asking. The list is fed a made-up account instead — see
+        // [`shot::chats`] — so the Chats view still has rows to photograph.
+        if shot::path().is_some() {
+            self.signed_in = true;
+            self.apply(crate::bridge::Event::Chats(shot::chats()));
+            return;
+        }
         if self.settings.api_id != 0
             && !self.settings.api_hash.is_empty()
             && tgx_tg::config::session_file().exists()
@@ -579,6 +590,44 @@ mod shot {
             .ok()
             .filter(|s| !s.is_empty() && path().is_some())
             .map(|s| s.to_lowercase())
+    }
+
+    /// The account a photograph shows: invented, every kind and state the
+    /// list paints, and nobody's real chats — a shot is something that gets
+    /// pasted into an issue.
+    pub(super) fn chats() -> Vec<ChatInfo> {
+        use tgx_tg::client::ChatKind::*;
+        let now = chrono::Local::now().timestamp();
+        let hour = 3600;
+        [
+            ("Design review", Supergroup, true, Some(48_210), 2 * hour),
+            ("Field notes", Supergroup, true, Some(8_206), 5 * hour),
+            ("Book club", Group, false, Some(1_342), 26 * hour),
+            (
+                "Release announcements",
+                Channel,
+                false,
+                Some(612),
+                3 * 24 * hour,
+            ),
+            ("Ana Petrović", Private, false, Some(3_904), 40 * 60),
+            ("Marko", Private, false, None, 9 * 24 * hour),
+            ("Weather bot", Bot, false, Some(88), 30 * 24 * hour),
+            ("Old planning group", Group, false, None, 200 * 24 * hour),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (title, kind, is_forum, count, ago))| ChatInfo {
+            id: 1_000 + i as i64,
+            title: title.into(),
+            kind,
+            last_activity: now - ago,
+            is_forum,
+            public: false,
+            message_count: count,
+            migration: None,
+        })
+        .collect()
     }
 
     pub(super) fn view() -> Option<View> {

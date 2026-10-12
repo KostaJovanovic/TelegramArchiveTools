@@ -14,9 +14,12 @@
 #
 #   tools\shot.ps1 -View chats -Out shots\chats.png
 #
-# The app connects to Telegram on startup exactly as it does when launched by
-# hand -- it signs in with the stored session if there is one, so the chat list
-# in the picture is a real account's. It does not export anything.
+# Under TGX_SHOT the app does not connect to Telegram at all. It used to sign in
+# with the stored session on startup exactly as it does when launched by hand,
+# so the picture was of a real account's chats, and taking one used the
+# session key. It now skips that probe and shows an invented account instead
+# (`shell::shot::chats`). The Viewer still reads real databases from the
+# destination, because that is local and what the view is for.
 
 [CmdletBinding()]
 param(
