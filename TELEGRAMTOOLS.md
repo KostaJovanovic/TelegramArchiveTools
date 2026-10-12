@@ -586,3 +586,18 @@ every `report*.html` and `*.stats.json`. Phase 1 checks the merged
   sentence of what to do before the error itself.
 - **Not done:** the light appearance was not photographed; `tga-report`'s CSS
   was out of scope, as planned.
+
+### Phase 5 — 2026-10-13
+
+- `README.md` is TelegramTools': the rail's four places, the Folder/Database
+  choice, reports and the digest, the one exe's commands (`login`, `chats`,
+  `export`, `analyse`) and `start /wait` from cmd. `ROADMAP.md`, `AUDIT.md`
+  and `DEFECTS.csv` stay the exporter half's; `docs/analyser/` the analyser's.
+- The scratch clone `_tt-import` is deleted; its last commit, `12ebea8`, is in
+  master's history.
+- **Left to the account holder:** archiving the TelegramAnalyser repository on
+  GitHub, with a pointer here, and renaming this one to TelegramTools. Both
+  are public and outward-facing, so neither was done from here. The pointer
+  can be one line at the top of its README: *Merged into TelegramTools —
+  <url>. This repository is archived.*
+- **Open, needs a decision:** the language handshake (Phase 3).
