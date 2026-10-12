@@ -1056,9 +1056,17 @@ impl<'a> ChatExporter<'a> {
                     self.settings.reread_window
                 )));
             } else if db {
-                progress(Progress::Log(
-                    "database: reading the whole history, so every deletion is noticed".into(),
-                ));
+                // Say *why*: the two causes look identical in the log otherwise,
+                // and a "Re-read the whole history" left ticked reads as the
+                // window being ignored.
+                progress(Progress::Log(format!(
+                    "database: reading the whole history ({}), so every deletion is noticed",
+                    if stored_all == 0 {
+                        "nothing archived yet"
+                    } else {
+                        "\"Re-read the whole history\" is on"
+                    }
+                )));
             }
             let record = serde_json::to_string(&self.settings.without_credentials())
                 .unwrap_or_else(|_| "{}".into());
