@@ -44,6 +44,10 @@ Options
                       timeline
     --no-fonts        do not embed the fonts; smaller file, needs Geist
                       installed to look right
+    --handles         show people by @handle rather than by name. For your
+                      contacts an export holds the name *you* saved them as;
+                      the handle is the one they chose. Somebody with no
+                      handle keeps the name in the export.
     --stats PATH      write every computed figure as JSON
     --from-stats PATH re-render from a recorded --stats dump instead of
                       reading an export. No folder is needed and none is
@@ -87,6 +91,7 @@ pub fn run(args: Vec<String>) -> Result<()> {
     let mut chat: Option<String> = None;
     let mut refresh = false;
     let mut force = false;
+    let mut handles = false;
 
     let mut rest = args[flags_from..].iter();
     while let Some(flag) = rest.next() {
@@ -120,6 +125,7 @@ pub fn run(args: Vec<String>) -> Result<()> {
             "--quiet" => quiet = true,
             "--refresh" => refresh = true,
             "--force" => force = true,
+            "--handles" => handles = true,
             other => bail!("Unknown option: {other}\n\n{USAGE}"),
         }
     }
@@ -148,7 +154,7 @@ pub fn run(args: Vec<String>) -> Result<()> {
         let Some(folder) = folder else {
             bail!("--refresh needs the folder the exporter writes its databases into");
         };
-        return refresh_all(&folder, force, digest, quiet, &options);
+        return refresh_all(&folder, force, digest, handles, quiet, &options);
     }
 
     // The notes come from wherever they were named, or from beside the export.
@@ -168,6 +174,11 @@ pub fn run(args: Vec<String>) -> Result<()> {
 
     // -- re-render from a recorded dump, with no export on disk -------------
     if let Some(dump) = &from_stats {
+        // A dump already holds whatever names it was recorded with; there is
+        // nothing left to swap a handle in from.
+        if handles {
+            bail!("--handles applies when reading an export; a --from-stats dump keeps the names it was recorded with");
+        }
         if stats_out.is_some() || digest {
             bail!(
                 "--from-stats has no export to read, so --stats and --digest have nothing to write"
@@ -243,12 +254,15 @@ pub fn run(args: Vec<String>) -> Result<()> {
             println!("  read {done}/{total}  {name}");
         }
     };
-    let export = match &database {
+    let mut export = match &database {
         Some(db) => read_database(db, chat.as_deref(), quiet, &mut progress)?,
         None => tga_read::load(&folder, Some(&mut progress))?,
     };
     if export.msgs.is_empty() {
         bail!("That export has no messages in it.");
+    }
+    if handles {
+        export.handles_only();
     }
 
     let (stats, people) = tga_metrics::analyse(&export);
@@ -353,6 +367,7 @@ fn refresh_all(
     folder: &Path,
     force: bool,
     digest: bool,
+    handles: bool,
     quiet: bool,
     options: &tga_report::Options,
 ) -> Result<()> {
@@ -378,7 +393,7 @@ fn refresh_all(
                 println!("  {name}  read {done}/{total}  {topic}");
             }
         };
-        match crate::refresh::one(target, digest, options, Some(&mut progress)) {
+        match crate::refresh::one(target, digest, handles, options, Some(&mut progress)) {
             Ok(done) => {
                 written += 1;
                 println!(

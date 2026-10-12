@@ -62,6 +62,7 @@ pub struct Request {
     pub targets: Vec<Target>,
     pub write_digest: bool,
     pub embed_fonts: bool,
+    pub handles_only: bool,
 }
 
 /// What the notes section says wrote the file.
@@ -144,7 +145,13 @@ fn run(request: Request, stop: &AtomicBool, tx: Waking<Progress>) {
             });
         };
         let path = target.path().to_path_buf();
-        match crate::refresh::one(target, request.write_digest, &options, Some(&mut report)) {
+        match crate::refresh::one(
+            target,
+            request.write_digest,
+            request.handles_only,
+            &options,
+            Some(&mut report),
+        ) {
             Ok(written) => tx.send(Progress::Wrote { path, written }),
             Err(e) => tx.send(Progress::Failed {
                 path,
@@ -258,6 +265,7 @@ mod tests {
                 targets: vec![target(&dir)],
                 write_digest: false,
                 embed_fonts: false,
+                handles_only: false,
             },
             &AtomicBool::new(false),
             Waking { tx, ctx },
@@ -290,6 +298,7 @@ mod tests {
                 targets: vec![target(&dir), target(&dir)],
                 write_digest: false,
                 embed_fonts: false,
+                handles_only: false,
             },
             &AtomicBool::new(true),
             Waking {

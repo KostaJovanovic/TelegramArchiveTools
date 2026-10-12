@@ -188,6 +188,9 @@ pub struct State {
     pub sort: Sort,
     pub write_digest: bool,
     pub embed_fonts: bool,
+    /// `--handles`. Off by default, so the window and a bare command line
+    /// write the same report.
+    pub handles_only: bool,
 
     pub status: String,
     pub running: bool,
@@ -216,6 +219,7 @@ impl Default for State {
             sort: Sort::Behind,
             write_digest: true,
             embed_fonts: true,
+            handles_only: false,
             status: "Choose an export folder.".into(),
             running: false,
             stopping: false,

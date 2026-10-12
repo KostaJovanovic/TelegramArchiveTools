@@ -173,6 +173,81 @@ impl Export {
     pub fn said(&self) -> impl Iterator<Item = &Msg> {
         self.msgs.iter().filter(|m| !m.service)
     }
+
+    /// Show everybody who has an `@handle` by it, instead of by name.
+    ///
+    /// **A display name in an export may not be the one the person chose.**
+    /// For anyone the exporting account has saved, Telegram replaces their
+    /// `first_name`/`last_name` with the address-book entry — "Mama", "Marko
+    /// plumber" — and sends no second field with their own. The handle is the
+    /// only identifier guaranteed to be theirs. The exporter's `own_names`
+    /// makes the same substitution at export time; this is the same rule for
+    /// an export written without it.
+    ///
+    /// **Somebody with no handle keeps the name in the export**, which is their
+    /// Telegram name unless they are one of your contacts — there is nothing
+    /// else to show, and a peer key is worse than either. Their renames
+    /// survive; a person with a handle has one name from here on, so theirs
+    /// do not.
+    ///
+    /// Done here, on the model, rather than in the report: names reach the
+    /// figures through a dozen paths — senders, the roster, renames, forwards,
+    /// the names a join announcement lists — and rewriting them once at the
+    /// source is the only way none is missed. The handle comes from the member
+    /// list alone; a message never carries one, so an export with no roster
+    /// comes through unchanged.
+    pub fn handles_only(&mut self) {
+        let handle_of: std::collections::HashMap<String, String> = self
+            .roster
+            .iter()
+            .filter(|m| !m.username.is_empty())
+            .map(|m| (m.key.clone(), format!("@{}", m.username)))
+            .collect();
+
+        // A join announcement and a forward from a hidden account name people
+        // by string alone, with no key. Any name ever seen against a key with
+        // a handle maps to that handle.
+        let mut by_name: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let names = self
+            .roster
+            .iter()
+            .map(|m| (&m.key, &m.name))
+            .chain(self.msgs.iter().map(|m| (&m.sender, &m.name)));
+        for (key, name) in names {
+            if let Some(handle) = handle_of.get(key) {
+                if !name.is_empty() {
+                    by_name
+                        .entry(name.clone())
+                        .or_insert_with(|| handle.clone());
+                }
+            }
+        }
+        let swap =
+            |name: &mut String, map: &std::collections::HashMap<String, String>, key: &str| {
+                if let Some(handle) = map.get(key) {
+                    *name = handle.clone();
+                }
+            };
+
+        for member in &mut self.roster {
+            swap(&mut member.name, &handle_of, &member.key);
+        }
+        for msg in &mut self.msgs {
+            swap(&mut msg.name, &handle_of, &msg.sender);
+            for name in &mut msg.members {
+                let was = name.clone();
+                swap(name, &by_name, &was);
+            }
+            if msg.forward_id.is_empty() {
+                let was = msg.forward_from.clone();
+                swap(&mut msg.forward_from, &by_name, &was);
+            } else {
+                // A channel's key has no handle here, so its title stays.
+                swap(&mut msg.forward_from, &handle_of, &msg.forward_id);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -722,6 +797,60 @@ mod tests {
         assert_eq!(one(&raw, 0, Some(2)).unwrap().reply_to, None);
         assert_eq!(one(&raw, 0, Some(99)).unwrap().reply_to, Some(2));
         assert_eq!(one(&raw, 0, None).unwrap().reply_to, Some(2));
+    }
+
+    #[test]
+    fn handles_only_swaps_a_saved_name_for_the_handle_and_leaves_the_rest() {
+        let member = |key: &str, name: &str, username: &str| {
+            member(&json!({"id": key, "name": name, "username": username})).unwrap()
+        };
+        let mut export = Export {
+            roster: vec![
+                member("user1", "Mama", "ana"),
+                member("user2", "Bob Jones", ""),
+            ],
+            msgs: vec![
+                // An older name of user1's, which must not survive as an alias.
+                one(&msg(json!({"from": "Ana K", "from_id": "user1"})), 0, None).unwrap(),
+                one(
+                    &msg(json!({"from": "Bob Jones", "from_id": "user2"})),
+                    0,
+                    None,
+                )
+                .unwrap(),
+                one(
+                    &msg(json!({"forwarded_from": "Mama", "forwarded_from_id": "user1"})),
+                    0,
+                    None,
+                )
+                .unwrap(),
+                one(
+                    &msg(json!({"forwarded_from": "News", "forwarded_from_id": "channel9"})),
+                    0,
+                    None,
+                )
+                .unwrap(),
+                one(
+                    &msg(json!({"type": "service", "action": "invite_members",
+                                "actor": "Mama", "actor_id": "user1",
+                                "members": ["Ana K", "Bob Jones"]})),
+                    0,
+                    None,
+                )
+                .unwrap(),
+            ],
+            ..Default::default()
+        };
+        export.handles_only();
+
+        assert_eq!(export.roster[0].name, "@ana");
+        assert_eq!(export.roster[1].name, "Bob Jones", "no handle: name kept");
+        assert_eq!(export.msgs[0].name, "@ana");
+        assert_eq!(export.msgs[1].name, "Bob Jones");
+        assert_eq!(export.msgs[2].forward_from, "@ana");
+        assert_eq!(export.msgs[3].forward_from, "News", "a channel is public");
+        assert_eq!(export.msgs[4].name, "@ana");
+        assert_eq!(export.msgs[4].members, vec!["@ana", "Bob Jones"]);
     }
 
     #[test]

@@ -191,18 +191,25 @@ pub struct Written {
 ///
 /// The same steps a single run takes, in the same order, so a refreshed report
 /// is byte for byte the one `TelegramAnalyser <folder>` would have written.
+///
+/// `handles` is `--handles`: every name becomes an `@handle` before anything
+/// is counted, digest included. See `tga_read::Export::handles_only`.
 pub fn one(
     target: &Target,
     digest: bool,
+    handles: bool,
     options: &tga_report::Options,
     progress: Option<tga_read::Progress<'_>>,
 ) -> Result<Written> {
-    let export = match &target.source {
+    let mut export = match &target.source {
         Source::Database(db) => tga_db::load(db, None, progress)?,
         Source::Folder(dir) => tga_read::load(dir, progress)?,
     };
     if export.msgs.is_empty() {
         bail!("no messages in it");
+    }
+    if handles {
+        export.handles_only();
     }
     let (stats, people) = tga_metrics::analyse(&export);
     let folder = target.home();
@@ -268,6 +275,7 @@ mod tests {
 
         let done = one(
             &rows[0],
+            false,
             false,
             &tga_report::Options {
                 embed_fonts: false,

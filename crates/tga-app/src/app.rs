@@ -104,6 +104,7 @@ impl Shell {
             targets,
             write_digest: self.state.write_digest,
             embed_fonts: self.state.embed_fonts,
+            handles_only: self.state.handles_only,
         };
         self.run = Some(job::spawn(request, ctx.clone()));
     }
@@ -476,6 +477,25 @@ impl Shell {
                 ));
                 if digest.clicked() {
                     self.state.write_digest = !self.state.write_digest;
+                }
+                ui.add_space(space::STEP);
+                help(
+                    ui,
+                    "handles",
+                    "Shows everyone with an @handle by it instead of by name. \
+                     For your contacts an export holds the name you saved them \
+                     as, which nobody else should see. Somebody with no handle \
+                     keeps the name in the export.",
+                    &p,
+                );
+                let handles = action(ui, eyebrow("Handles only", &p), !running).union(tick_box(
+                    ui,
+                    self.state.handles_only,
+                    !running,
+                    &p,
+                ));
+                if handles.clicked() {
+                    self.state.handles_only = !self.state.handles_only;
                 }
             });
         });
