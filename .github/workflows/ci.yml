@@ -68,27 +68,31 @@ jobs:
         if: ${{ hashFiles('reference/MANIFEST.txt') == '' }}
         run: echo "::warning::the parity legs did not run - no corpus on CI (reference/ is gitignored, so json/html/media were skipped)"
 
+      # Both binaries until TELEGRAMTOOLS.md's phase 2 makes them one, from one
+      # build so they always agree.
       - name: Release build
-        run: cargo build --locked --release -p tgx-app
+        run: cargo build --locked --release -p tgx-app -p tga-app
 
-      # The binary is ~20 MB. This number has been stale here before, and
-      # disagreed with the README, the ROADMAP and save.bat at the same time,
-      # which is exactly the way a "sudden jump" stops being visible.
-      # Record it so a sudden jump is visible, the way the
+      # Record each size so a sudden jump is visible, the way the
       # Git-Bash-vs-PowerShell OpenSSL discovery was (+2.5 MB from the wrong
-      # build shell).
+      # build shell). This number has been stale here before, and disagreed
+      # with the README, the ROADMAP and save.bat at the same time, which is
+      # exactly the way a jump stops being visible.
       - name: Binary size
         shell: pwsh
         run: |
-          $exe = "target/release/TelegramExporter.exe"
-          $mb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
-          Write-Host "TelegramExporter.exe is $mb MB"
-          if ($mb -gt 30) {
-            Write-Error "binary grew past 30 MB — something large got linked in"
-            exit 1
+          foreach ($name in "TelegramExporter.exe", "TelegramAnalyser.exe") {
+            $mb = [math]::Round((Get-Item "target/release/$name").Length / 1MB, 1)
+            Write-Host "$name is $mb MB"
+            if ($mb -gt 30) {
+              Write-Error "$name grew past 30 MB — something large got linked in"
+              exit 1
+            }
           }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: TelegramExporter
-          path: target/release/TelegramExporter.exe
+          name: TelegramTools
+          path: |
+            target/release/TelegramExporter.exe
+            target/release/TelegramAnalyser.exe

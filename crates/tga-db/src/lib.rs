@@ -13,28 +13,39 @@
 //! [`tga_read::one`] and [`tga_read::header_topic`]. Nothing about a message,
 //! a clock or a thread is decided twice.
 //!
+//! **The rows come through the exporter's own reader**, `tgx_archive::Store`,
+//! opened read-only. See `Cargo.toml` for why this stopped being rusqlite when
+//! the two repositories merged. One behaviour moved with it: a payload or a
+//! topic head that does not parse as JSON used to be skipped here, and now
+//! fails the read with the file named. The exporter is the only writer and
+//! serialises every payload with serde_json, so an unparsable one is a damaged
+//! file — and a report quietly missing messages from a damaged file is the
+//! worse of the two outcomes. The corpus test's "every message SQL counts" rule
+//! already said so.
+//!
 //! What the database has that a folder never did — `deleted_seen` on a message
 //! Telegram no longer returns, the `versions` of an edited one, and the `runs`
 //! table — is read but not yet carried into the model. See `PLAN.md`.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
-use rusqlite::{Connection, OpenFlags};
-use serde_json::{Map, Value};
+use anyhow::{Context, Result};
+use serde_json::Value;
 use tga_read::{Export, Progress};
+use tgx_archive::Store;
 
 /// What the exporter named the file while it kept every chat in one. It now
 /// writes `<title>/<title>.sqlite` per chat; see [`find`].
 pub const FILE_NAME: &str = "telegram.sqlite";
 
-/// The only shape this build knows how to read.
+/// The only shape this build knows how to read — the writer's own constant.
 ///
 /// Refused rather than guessed at, matching the exporter's own rule: a file
 /// from a later build may have moved a column this reader depends on, and a
 /// report drawn from a misread table is worse than no report.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = tgx_archive::SCHEMA_VERSION;
 
 /// One chat in the file.
 #[derive(Debug, Clone)]
@@ -167,38 +178,36 @@ fn is_sqlite(path: &Path) -> bool {
     )
 }
 
+/// Run one of the store's futures to completion on this thread.
+///
+/// **Not callable from inside an async task** — tokio refuses to start a
+/// runtime within a runtime. Every caller of this crate is a plain function on
+/// a worker thread or the command line; a caller living on an async runtime
+/// reaches here through `spawn_blocking`.
+fn block<T>(work: impl Future<Output = Result<T>>) -> Result<T> {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .context("starting the database reader")?
+        .block_on(work)
+}
+
 /// Open read-only.
 ///
 /// **Read-only is the point, not a precaution.** The window and the exporter
 /// can be pointed at one file at the same time, and opening a SQLite database
 /// for writing takes a lock and can create `-wal` and `-shm` files beside it.
 /// An analyser has no business doing either to somebody's archive.
-fn open(path: &Path) -> Result<Connection> {
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .with_context(|| format!("opening {}", path.display()))?;
-
-    let found: i64 = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'schema_version'",
-            [],
-            |r| r.get::<_, String>(0),
-        )
-        .with_context(|| format!("{} is not a TelegramExporter database", path.display()))?
-        .trim()
-        .parse()
-        .unwrap_or(-1);
-    if found != SCHEMA_VERSION {
-        bail!(
-            "{} is schema version {found}; this build reads version {SCHEMA_VERSION}",
-            path.display()
-        );
-    }
-    Ok(conn)
+/// `Store::open_read` is the exporter's own read-only open, and it refuses a
+/// schema version this build does not know.
+async fn open(path: &Path) -> Result<Store> {
+    Store::open_read(path)
+        .await
+        .with_context(|| format!("{} is not a database this build can read", path.display()))
 }
 
 /// Every chat in the file, most messages first.
 pub fn chats(path: &Path) -> Result<Vec<Chat>> {
-    chats_in(&open(path)?)
+    block(async { chats_in(&open(path).await?).await })
 }
 
 /// Just the names, without counting anything.
@@ -208,27 +217,21 @@ pub fn chats(path: &Path) -> Result<Vec<Chat>> {
 /// whole table; on a 450,000-message archive that is long enough to feel in a
 /// text field, and the field only needs to say what the file is.
 pub fn chat_titles(path: &Path) -> Result<Vec<(i64, String)>> {
-    let conn = open(path)?;
-    let mut stmt = conn.prepare("SELECT id, title FROM chats ORDER BY id")?;
-    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    block(async { Ok(open(path).await?.chat_titles().await?) })
 }
 
-fn chats_in(conn: &Connection) -> Result<Vec<Chat>> {
-    let mut stmt = conn.prepare(
-        "SELECT c.id, c.title, c.type, COUNT(m.id)
-           FROM chats c LEFT JOIN messages m ON m.chat_id = c.id
-          GROUP BY c.id ORDER BY COUNT(m.id) DESC, c.id",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok(Chat {
-            id: r.get(0)?,
-            title: r.get(1)?,
-            kind: r.get(2)?,
-            messages: r.get::<_, i64>(3)?.max(0) as usize,
+async fn chats_in(store: &Store) -> Result<Vec<Chat>> {
+    Ok(store
+        .chat_summaries()
+        .await?
+        .into_iter()
+        .map(|c| Chat {
+            id: c.id,
+            title: c.title,
+            kind: c.kind,
+            messages: c.messages.max(0) as usize,
         })
-    })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        .collect())
 }
 
 /// Read one chat out of the database into an [`Export`].
@@ -237,13 +240,17 @@ fn chats_in(conn: &Connection) -> Result<Vec<Chat>> {
 /// The exporter is moving to one database per chat, so the ordinary case is a
 /// file with exactly one and no argument; a file with several is read as its
 /// largest, and the caller is expected to say which others it passed over.
-pub fn load(
+pub fn load(path: &Path, wanted: Option<&str>, progress: Option<Progress<'_>>) -> Result<Export> {
+    block(load_async(path, wanted, progress))
+}
+
+async fn load_async(
     path: &Path,
     wanted: Option<&str>,
     mut progress: Option<Progress<'_>>,
 ) -> Result<Export> {
-    let conn = open(path)?;
-    let all = chats_in(&conn)?;
+    let store = open(path).await?;
+    let all = chats_in(&store).await?;
     anyhow::ensure!(!all.is_empty(), "{} holds no chats", path.display());
 
     let chat = match wanted {
@@ -278,16 +285,18 @@ pub fn load(
         ..Default::default()
     };
 
-    let heads = topics_of(&conn, chat.id)?;
+    // In the order the topics were created. **Only topics with a `topics`
+    // row**, as it always was here: a message is read through the topic it is
+    // filed under, so one filed under a topic no run ever listed is not read.
+    // `Store::message_topics` can name such topics; reading them would change
+    // the figures, which is not a thing a port of the reader should do.
+    let heads = store.topics_of(chat.id).await?;
     let total = heads.len();
-    for (index, (topic_id, head)) in heads.into_iter().enumerate() {
+    for (index, stored) in heads.iter().enumerate() {
         // Back into the map a `result.json` would have carried: the head holds
         // everything except the three keys the `chats` and `topics` rows own.
-        let mut header = head;
-        header.insert(
-            "name".into(),
-            Value::String(title_of(&conn, chat.id, topic_id)?),
-        );
+        let mut header = stored.head.clone();
+        header.insert("name".into(), Value::String(stored.title.clone()));
         header.insert("type".into(), Value::String(chat.kind.clone()));
         header.insert("id".into(), Value::Number(chat.id.into()));
         let header = Value::Object(header);
@@ -307,17 +316,8 @@ pub fn load(
         // of the history whether or not it can still be fetched. The count is
         // available separately, through `deleted`, so a caller can say how
         // many of the figures rest on messages nobody can see any more.
-        let mut stmt = conn.prepare(
-            "SELECT payload FROM messages
-              WHERE chat_id = ?1 AND topic_id = ?2
-              ORDER BY id",
-        )?;
-        let mut rows = stmt.query(rusqlite::params![chat.id, topic_id])?;
-        while let Some(row) = rows.next()? {
-            let text: String = row.get(0)?;
-            let Ok(raw) = serde_json::from_str::<Value>(&text) else {
-                continue;
-            };
+        for stored in store.messages_of(chat.id, stored.id).await? {
+            let raw = Value::Object(stored.payload);
             if let Some(msg) = tga_read::one(&raw, index, topic.root) {
                 export.msgs.push(msg);
                 topic.messages += 1;
@@ -331,7 +331,15 @@ pub fn load(
         }
     }
 
-    (export.roster, export.roster_complete, export.roster_capped) = roster(&conn, chat.id);
+    export.roster_complete = head_flag(&heads, "members_complete");
+    export.roster = roster(&store, chat.id).await;
+    // **`capped` is always `None` here, and that is the honest answer.** The
+    // exporter writes `complete` and `capped` into `participants.json`, but
+    // only `members_complete` reaches the topic head, so a database has no
+    // record of whether the member fetch stopped at a limit. `roster_capped`
+    // is an `Option` for exactly this: absent means the export never said,
+    // which is a different fact from "it said no".
+    export.roster_capped = None;
 
     export
         .msgs
@@ -339,81 +347,30 @@ pub fn load(
     Ok(export)
 }
 
-/// `(topic_id, head)` for one chat, in the order the topics were created.
-fn topics_of(conn: &Connection, chat_id: i64) -> Result<Vec<(i64, Map<String, Value>)>> {
-    let mut stmt = conn.prepare("SELECT id, head FROM topics WHERE chat_id = ?1 ORDER BY id")?;
-    let rows = stmt.query_map([chat_id], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-    })?;
-    let mut out = Vec::new();
-    for row in rows {
-        let (id, head) = row?;
-        let head = match serde_json::from_str::<Value>(&head) {
-            Ok(Value::Object(map)) => map,
-            // A head that will not parse costs the topic its metadata, not its
-            // messages. The `topics` row still names it and the payloads are
-            // untouched.
-            _ => Map::new(),
-        };
-        out.push((id, head));
-    }
-    Ok(out)
-}
-
-fn title_of(conn: &Connection, chat_id: i64, topic_id: i64) -> Result<String> {
-    Ok(conn.query_row(
-        "SELECT title FROM topics WHERE chat_id = ?1 AND id = ?2",
-        rusqlite::params![chat_id, topic_id],
-        |r| r.get(0),
-    )?)
-}
-
-/// The roster, out of the `participants` table.
+/// The roster, out of the `participants` table, ordered by peer key.
 ///
-/// **`capped` is always `None` here, and that is the honest answer.** The
-/// exporter writes `complete` and `capped` into `participants.json`, but only
-/// `members_complete` reaches the topic head, so a database has no record of
-/// whether the member fetch stopped at a limit. `roster_capped` is an `Option`
-/// for exactly this: absent means the export never said, which is a different
-/// fact from "it said no".
-fn roster(conn: &Connection, chat_id: i64) -> (Vec<tga_read::Member>, Option<bool>, Option<bool>) {
-    let complete = head_flag(conn, chat_id, "members_complete");
-
-    let Ok(mut stmt) =
-        conn.prepare("SELECT info FROM participants WHERE chat_id = ?1 ORDER BY peer")
-    else {
-        return (Vec::new(), complete, None);
-    };
-    let Ok(rows) = stmt.query_map([chat_id], |r| r.get::<_, String>(0)) else {
-        return (Vec::new(), complete, None);
-    };
-
-    let people = rows
-        .flatten()
-        .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
-        .filter_map(|entry| tga_read::member(&entry))
-        .collect();
-    (people, complete, None)
+/// A roster that cannot be read is an empty one rather than a failed report,
+/// as it always was here: the figures stand without it, and the report says
+/// when there is no member list.
+async fn roster(store: &Store, chat_id: i64) -> Vec<tga_read::Member> {
+    store
+        .participants_of(chat_id)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(tga_read::member)
+        .collect()
 }
 
 /// One boolean out of any of a chat's topic heads.
 ///
 /// Any of them: the exporter writes the same roster block into every topic's
 /// head of a chat, so the first that carries the key answers for all.
-fn head_flag(conn: &Connection, chat_id: i64, key: &str) -> Option<bool> {
-    let mut stmt = conn
-        .prepare("SELECT head FROM topics WHERE chat_id = ?1 ORDER BY id")
-        .ok()?;
-    let rows = stmt.query_map([chat_id], |r| r.get::<_, String>(0)).ok()?;
-    for text in rows.flatten() {
-        if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&text) {
-            match map.get(key) {
-                None | Some(Value::Null) => continue,
-                Some(v) => return Some(v != &Value::Bool(false)),
-            }
-        }
-    }
-    None
+fn head_flag(heads: &[tgx_archive::StoredTopic], key: &str) -> Option<bool> {
+    heads.iter().find_map(|t| match t.head.get(key) {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v != &Value::Bool(false)),
+    })
 }
 
 /// What the file says about messages Telegram no longer returns.
@@ -423,25 +380,19 @@ fn head_flag(conn: &Connection, chat_id: i64, key: &str) -> Option<bool> {
 /// rather than let it pass unmentioned, because "17 of these were deleted and
 /// kept" is the one thing this format knows that a folder never could.
 pub fn deleted(path: &Path, chat_id: i64) -> Result<usize> {
-    let conn = open(path)?;
-    let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM messages WHERE chat_id = ?1 AND deleted_seen IS NOT NULL",
-        [chat_id],
-        |r| r.get(0),
-    )?;
-    Ok(n.max(0) as usize)
+    block(async {
+        let (all, alive) = open(path).await?.message_count(chat_id).await?;
+        Ok((all - alive).max(0) as usize)
+    })
 }
 
 /// How many stored messages have an earlier version kept, and how many
 /// versions there are in total.
 pub fn edits(path: &Path, chat_id: i64) -> Result<(usize, usize)> {
-    let conn = open(path)?;
-    let (msgs, rows): (i64, i64) = conn.query_row(
-        "SELECT COUNT(DISTINCT id), COUNT(*) FROM versions WHERE chat_id = ?1",
-        [chat_id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    Ok((msgs.max(0) as usize, rows.max(0) as usize))
+    block(async {
+        let (msgs, rows) = open(path).await?.edit_counts(chat_id).await?;
+        Ok((msgs.max(0) as usize, rows.max(0) as usize))
+    })
 }
 
 /// The bytes of one stored file, if the database has them.
@@ -449,13 +400,7 @@ pub fn edits(path: &Path, chat_id: i64) -> Result<(usize, usize)> {
 /// Keyed `(file_id, kind)` because that is the shipped schema's primary key on
 /// `blobs`; `media` is what maps a message to the pair.
 pub fn blob(path: &Path, file_id: i64, kind: &str) -> Result<Option<Vec<u8>>> {
-    let conn = open(path)?;
-    let mut stmt = conn.prepare("SELECT bytes FROM blobs WHERE file_id = ?1 AND kind = ?2")?;
-    let mut rows = stmt.query(rusqlite::params![file_id, kind])?;
-    match rows.next()? {
-        Some(row) => Ok(Some(row.get(0)?)),
-        None => Ok(None),
-    }
+    block(async { Ok(open(path).await?.blob(file_id, kind).await?) })
 }
 
 /// `(message_id, role) -> (file_id, kind)` for one chat.
@@ -470,16 +415,15 @@ pub fn blob(path: &Path, file_id: i64, kind: &str) -> Result<Option<Vec<u8>>> {
 /// shipped schema's, which is *not* the `(family, file_id)` the exporter's own
 /// `DATABASE.md` specifies.
 pub fn media_index(path: &Path, chat_id: i64) -> Result<HashMap<(i64, String), (i64, String)>> {
-    let conn = open(path)?;
-    let mut stmt =
-        conn.prepare("SELECT message_id, role, file_id, kind FROM media WHERE chat_id = ?1")?;
-    let rows = stmt.query_map([chat_id], |r| {
-        Ok((
-            (r.get::<_, i64>(0)?, r.get::<_, String>(1)?),
-            (r.get::<_, i64>(2)?, r.get::<_, String>(3)?),
-        ))
-    })?;
-    Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+    block(async {
+        Ok(open(path)
+            .await?
+            .media_rows_of(chat_id)
+            .await?
+            .into_iter()
+            .map(|r| ((r.message_id, r.role), (r.file_id, r.kind)))
+            .collect())
+    })
 }
 
 #[cfg(test)]
@@ -494,16 +438,22 @@ mod tests {
     /// that a database is a different container and not a different format; if
     /// that is true the two `Export`s agree, and if it ever stops being true
     /// this is where it shows.
+    ///
+    /// **The database is written by the exporter's own `Store`**, not by SQL
+    /// in this file. It used to be built here with a hand-copied schema, which
+    /// proved the reader agreed with that copy and nothing else.
     struct Both {
         folder: PathBuf,
         db: PathBuf,
     }
 
+    const CHAT: i64 = 3586682625;
+
     fn header() -> Value {
         json!({
             "name": "ćaskanje",
             "type": "private_supergroup",
-            "id": 3586682625i64,
+            "id": CHAT,
             "topic_id": 12,
             "topic_created": "2025-12-14T16:41:26",
             "members_count": 45,
@@ -540,6 +490,15 @@ mod tests {
         ]
     }
 
+    /// The fixture's async half, run on the same kind of runtime [`block`]
+    /// builds.
+    fn run<T>(work: impl Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(work)
+    }
+
     fn build(tag: &str) -> Both {
         let base = std::env::temp_dir().join(format!("tga-db-test-{tag}"));
         let _ = std::fs::remove_dir_all(&base);
@@ -568,72 +527,30 @@ mod tests {
         }
 
         let db = base.join(FILE_NAME);
-        let conn = Connection::open(&db).expect("create database");
-        conn.execute_batch(
-            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-             CREATE TABLE chats (id INTEGER PRIMARY KEY, title TEXT NOT NULL, type TEXT NOT NULL,
-                                 first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL);
-             CREATE TABLE topics (chat_id INTEGER NOT NULL, id INTEGER NOT NULL, title TEXT NOT NULL,
-                                  head TEXT NOT NULL, first_seen INTEGER NOT NULL,
-                                  last_seen INTEGER NOT NULL, PRIMARY KEY (chat_id, id));
-             CREATE TABLE messages (chat_id INTEGER NOT NULL, id INTEGER NOT NULL,
-                                    topic_id INTEGER NOT NULL, payload TEXT NOT NULL,
-                                    type TEXT NOT NULL, date_unixtime INTEGER NOT NULL,
-                                    from_id TEXT, version INTEGER NOT NULL DEFAULT 1,
-                                    first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
-                                    deleted_seen INTEGER, PRIMARY KEY (chat_id, id));
-             CREATE TABLE versions (chat_id INTEGER NOT NULL, id INTEGER NOT NULL,
-                                    version INTEGER NOT NULL, payload TEXT NOT NULL,
-                                    seen INTEGER NOT NULL, PRIMARY KEY (chat_id, id, version));
-             CREATE TABLE participants (chat_id INTEGER NOT NULL, peer TEXT NOT NULL,
-                                        info TEXT NOT NULL, first_seen INTEGER NOT NULL,
-                                        last_seen INTEGER NOT NULL, PRIMARY KEY (chat_id, peer));
-             CREATE TABLE blobs (file_id INTEGER NOT NULL, kind TEXT NOT NULL, mime TEXT NOT NULL,
-                                 file_name TEXT, size INTEGER NOT NULL, bytes BLOB NOT NULL,
-                                 first_seen INTEGER NOT NULL, PRIMARY KEY (file_id, kind));
-             CREATE TABLE media (chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL,
-                                 role TEXT NOT NULL, file_id INTEGER NOT NULL, kind TEXT NOT NULL,
-                                 path TEXT NOT NULL, PRIMARY KEY (chat_id, message_id, role));",
-        )
-        .expect("schema");
-        conn.execute(
-            "INSERT INTO meta (key, value) VALUES ('schema_version', '1')",
-            [],
-        )
-        .expect("meta");
-        conn.execute(
-            "INSERT INTO chats VALUES (3586682625, 'UA KOLAB', 'private_supergroup', 0, 0)",
-            [],
-        )
-        .expect("chat");
-        conn.execute(
-            "INSERT INTO topics VALUES (3586682625, 12, 'ćaskanje', ?1, 0, 0)",
-            [head.to_string()],
-        )
-        .expect("topic");
-        for m in messages() {
-            conn.execute(
-                "INSERT INTO messages (chat_id, id, topic_id, payload, type, date_unixtime,
-                                       from_id, first_seen, last_seen)
-                 VALUES (3586682625, ?1, 12, ?2, ?3, ?4, ?5, 0, 0)",
-                rusqlite::params![
-                    m["id"].as_i64().expect("id"),
-                    m.to_string(),
-                    m["type"].as_str().unwrap_or(""),
-                    m["date_unixtime"].as_str().unwrap_or("0"),
-                    m.get("from_id").and_then(Value::as_str),
-                ],
-            )
-            .expect("message");
-        }
-        for p in members() {
-            conn.execute(
-                "INSERT INTO participants VALUES (3586682625, ?1, ?2, 0, 0)",
-                rusqlite::params![p["id"].as_str().expect("peer"), p.to_string()],
-            )
-            .expect("participant");
-        }
-        drop(conn);
+        run(async {
+            let store = Store::open(&db).await.expect("create database");
+            store
+                .upsert_chat(CHAT, "UA KOLAB", "private_supergroup", 0)
+                .await
+                .expect("chat");
+            store
+                .upsert_topic(CHAT, 12, "ćaskanje", head.as_object().expect("head"), 0)
+                .await
+                .expect("topic");
+            for m in messages() {
+                let id = m["id"].as_i64().expect("id");
+                store
+                    .merge(CHAT, id, Some(12), m.as_object().expect("message"), 0)
+                    .await
+                    .expect("message");
+            }
+            for p in members() {
+                store
+                    .upsert_participant(CHAT, p["id"].as_str().expect("peer"), &p, 0)
+                    .await
+                    .expect("participant");
+            }
+        });
 
         Both { folder, db }
     }
@@ -696,17 +613,17 @@ mod tests {
     #[test]
     fn a_deleted_message_is_still_in_the_figures_and_still_counted() {
         let both = build("deleted");
-        let conn = Connection::open(&both.db).expect("open");
-        conn.execute("UPDATE messages SET deleted_seen = 99 WHERE id = 13", [])
-            .expect("mark");
-        drop(conn);
+        run(async {
+            let store = Store::open(&both.db).await.expect("open");
+            store.mark_deleted(CHAT, 13, 99).await.expect("mark");
+        });
 
         // Keeping what Telegram dropped is the whole point of the format.
         // Filtering it out here would make the archive agree with Telegram.
         let export = load(&both.db, None, None).expect("database");
         assert_eq!(export.msgs.len(), 4);
         assert!(export.msgs.iter().any(|m| m.id == 13));
-        assert_eq!(deleted(&both.db, 3586682625).expect("count"), 1);
+        assert_eq!(deleted(&both.db, CHAT).expect("count"), 1);
     }
 
     #[test]
@@ -734,15 +651,24 @@ mod tests {
     #[test]
     fn a_file_from_a_later_schema_is_refused_rather_than_misread() {
         let both = build("schema");
-        let conn = Connection::open(&both.db).expect("open");
-        conn.execute(
-            "UPDATE meta SET value = '2' WHERE key = 'schema_version'",
-            [],
-        )
-        .expect("bump");
-        drop(conn);
+        // No `Store` method writes a future schema version, which is the
+        // point of the refusal; so this one write goes straight to libsql.
+        run(async {
+            let db = libsql::Builder::new_local(&both.db)
+                .build()
+                .await
+                .expect("open");
+            db.connect()
+                .expect("connect")
+                .execute(
+                    "UPDATE meta SET value = '2' WHERE key = 'schema_version'",
+                    (),
+                )
+                .await
+                .expect("bump");
+        });
         let err = load(&both.db, None, None).expect_err("refused");
-        assert!(err.to_string().contains("schema version 2"), "{err}");
+        assert!(format!("{err:#}").contains("schema version 2"), "{err:#}");
     }
 
     #[test]
@@ -804,15 +730,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Read-only, because the exporter may be writing this very file and an
+    /// analyser has no business changing somebody's archive.
+    ///
+    /// **This used to assert that no `-wal` or `-shm` appeared, and that was
+    /// never true of a real export.** The old fixture was built by hand in
+    /// SQLite's rollback mode; the exporter writes WAL, and SQLite cannot let
+    /// even a read-only connection into a WAL database without the shared-memory
+    /// index beside it, so it creates `-shm` and an empty `-wal` on the way in.
+    /// Every database in the corpus folder already carried the pair from the
+    /// rusqlite reader before this one existed. Now that the fixture is written
+    /// by the exporter's own `Store` it is WAL too, and the old assertion failed
+    /// on its first honest run.
+    ///
+    /// What a read must not do is the thing the rule was for: change a byte of
+    /// the database, or put anything into its log.
     #[test]
-    fn opening_a_database_leaves_no_wal_or_shm_beside_it() {
-        // Read-only, because the exporter may be writing this very file and an
-        // analyser has no business taking a lock on somebody's archive.
+    fn reading_a_database_changes_nothing_in_it() {
         let both = build("readonly");
+        let before = std::fs::read(&both.db).expect("database bytes");
         let _ = load(&both.db, None, None).expect("database");
-        let parent = both.db.parent().expect("parent");
-        for tail in ["telegram.sqlite-wal", "telegram.sqlite-shm"] {
-            assert!(!parent.join(tail).exists(), "{tail} was created");
-        }
+        let _ = chats(&both.db).expect("chats");
+        assert!(
+            std::fs::read(&both.db).expect("database bytes") == before,
+            "the database file changed"
+        );
+        let wal = both.db.with_extension("sqlite-wal");
+        let logged = std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
+        assert_eq!(logged, 0, "a read wrote {logged} bytes into the WAL");
     }
 }

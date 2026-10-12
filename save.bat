@@ -5,14 +5,38 @@ cd /d "%~dp0"
 rem Run it bare for a menu, or pass the action as an argument. Exit code is
 rem non-zero if anything failed, so it can be chained.
 
-set REPO=https://github.com/KostaJovanovic/TelegramExporter.git
+rem TelegramTools: the exporter and the analyser, one repository since the merge
+rem recorded in TELEGRAMTOOLS.md. Only used when the checkout has no origin.
+set REPO=https://github.com/KostaJovanovic/TelegramTools.git
+
+rem Two binaries until phase 2 of the merge makes them one. Both come out of
+rem one `cargo build --release`, so dist\ cannot hold one from Tuesday and the
+rem other from Friday.
 set EXENAME=TelegramExporter.exe
+set ANALYSER=TelegramAnalyser.exe
 
 rem The one check that cannot be faked: a real Telegram Desktop export of the
 rem same chat, replayed through our writers and diffed line for line. It lives
 rem on an external drive, so every step that uses it degrades to a skip when the
 rem drive is not mounted rather than failing the run.
-set REFEXPORT=N:\telegram export\UA KOLAB TELEGRAM
+rem
+rem The analyser's baseline reads the same export, as its `ua-kolab` leg.
+set "REFEXPORT=N:\telegram export\UA KOLAB TELEGRAM"
+
+rem The analyser baseline's second corpus.
+rem
+rem **The KRGM folder is not spelled out, and that is deliberate.** Its name is
+rem "KRGM TRECI 2026.06.09" with a C-acute, and a .bat is read in the console's
+rem OEM codepage rather than as UTF-8 -- so the literal would arrive mangled on
+rem any machine whose console is not cp1250, and `if exist` would then report a
+rem mounted drive as missing. `for /d` gets the name from the filesystem, in
+rem whatever encoding the shell is already using, and hands it straight back out
+rem to cargo through the same layer.
+set "KRGMEXPORT="
+for /d %%d in ("J:\temp pureraw\KRGM*") do set "KRGMEXPORT=%%~fd"
+rem Square brackets, not round: this value is echoed inside `if (...)` blocks,
+rem where a `)` closes the block early and the line printed "(not mounted".
+if not defined KRGMEXPORT set "KRGMEXPORT=J:\temp pureraw\KRGM [not mounted]"
 
 rem ...except that it does not have to. `corpus` cuts the 7.8 MB text half of
 rem that export into reference\, and the legs run against it with identical
@@ -26,6 +50,9 @@ rem corpus.rs panics instead. `set TGX_REQUIRE_CORPUS=0` before calling opts
 rem back out; plain `cargo test --all` is unaffected, which is what keeps CI
 rem and a fresh clone working.
 if not defined TGX_REQUIRE_CORPUS set "TGX_REQUIRE_CORPUS=1"
+rem The analyser's corpus tests, the same rule. `set TGA_REQUIRE_CORPUS=0` opts
+rem out; the document leg needs a drive that is often not mounted.
+if not defined TGA_REQUIRE_CORPUS set "TGA_REQUIRE_CORPUS=1"
 
 rem Two clocks. T0 covers the whole run and is reported at the end; TS is
 rem restarted per step, so a slow run says *which* step was slow rather than
@@ -73,11 +100,16 @@ if /i "%ACTION%"=="tests"   goto test
 if /i "%ACTION%"=="parity"  goto parity
 if /i "%ACTION%"=="corpus"  goto corpus
 if /i "%ACTION%"=="wire"    goto wire
+if /i "%ACTION%"=="baseline" goto baseline
+if /i "%ACTION%"=="bless"   goto bless
+if /i "%ACTION%"=="report"  goto report
+if /i "%ACTION%"=="run"     goto runwindow
+if /i "%ACTION%"=="window"  goto runwindow
 if /i "%ACTION%"=="clean"   goto clean
 
 :menu
 echo.
-echo === telegram exporter (rust) ===
+echo === telegram tools ===
 echo.
 echo   1  save     test + commit + push
 echo   2  commit   test + commit, no push
@@ -89,12 +121,17 @@ echo   7  test     fmt + clippy + every suite
 echo   8  parity   diff against a real Desktop export
 echo   9  corpus   cut the 7.8 MB parity corpus out of that export
 echo   10 wire     diff a live export against the reference run
-echo   11 clean    report the build cache, and empty it
-echo   12 quit
+echo   11 baseline the analyser's reports against the last recording
+echo   12 bless    re-record the analyser's committed golden
+echo   13 report   write report.html beside an export
+echo   14 run      the analyser's window
+echo   15 clean    report the build cache, and empty it
+echo   16 quit
 echo.
-echo   save.bat --force  runs save and force-with-lease pushes without asking
+echo   save.bat --force          runs save and force-with-lease pushes without asking
+echo   save.bat baseline record  re-records the analyser's baseline
 echo.
-set /p CHOICE=select [1-12]:
+set /p CHOICE=select [1-16]:
 if "%CHOICE%"=="1" goto save
 if "%CHOICE%"=="2" (set "COMMIT_ONLY=1" & goto save)
 if "%CHOICE%"=="3" goto push
@@ -105,8 +142,12 @@ if "%CHOICE%"=="7" goto test
 if "%CHOICE%"=="8" goto parity
 if "%CHOICE%"=="9" goto corpus
 if "%CHOICE%"=="10" goto wire
-if "%CHOICE%"=="11" goto clean
-if "%CHOICE%"=="12" exit /b 0
+if "%CHOICE%"=="11" goto baseline
+if "%CHOICE%"=="12" goto bless
+if "%CHOICE%"=="13" goto report
+if "%CHOICE%"=="14" goto runwindow
+if "%CHOICE%"=="15" goto clean
+if "%CHOICE%"=="16" exit /b 0
 echo [err]  invalid choice
 goto menu
 
@@ -149,9 +190,12 @@ if errorlevel 1 goto testsfailed
 call :since TS "cargo clippy"
 
 echo.
-echo [chk]  cargo test
+echo [chk]  cargo test   (TGX_REQUIRE_CORPUS=%TGX_REQUIRE_CORPUS% TGA_REQUIRE_CORPUS=%TGA_REQUIRE_CORPUS%)
 call :clock TS
-cargo test --all
+rem --nocapture, which the analyser's half needs: a corpus skip there is an
+rem eprintln, and libtest discards stdout and stderr for a passing test. A skip
+rem nobody sees is how a suite reports as coverage while having compared nothing.
+cargo test --all -- --nocapture
 if errorlevel 1 goto testsfailed
 call :since TS "cargo test"
 
@@ -160,6 +204,12 @@ rem the writers. Skipped, loudly, when neither the corpus nor the drive is here.
 rem A red leg lands in :testsfailed with the other checks, which still offers
 rem "commit anyway"; what it no longer does is decide that for you.
 call :runparity
+if errorlevel 1 goto testsfailed
+
+rem The analyser's oracle: the whole report and the whole stats dump, byte for
+rem byte, against the last recording. Same shape as parity: a missing drive or
+rem recording skips, a differing leg fails.
+call :runbaseline
 if errorlevel 1 goto testsfailed
 
 echo.
@@ -283,16 +333,18 @@ echo.
 call :checkcargo
 if errorlevel 1 goto end
 
-rem A running instance holds both the linker output and dist\%EXENAME% open,
+rem A running instance holds both the linker output and its dist\ copy open,
 rem so the build fails and then the copy does. Killing it first is not optional.
 rem taskkill exits non-zero when nothing was running, which is the normal case.
 echo [exe]  stop any running instance
 taskkill /F /IM %EXENAME% >nul 2>&1
-if errorlevel 1 (echo        none running) else (echo        stopped)
+if errorlevel 1 (echo        %EXENAME% none running) else (echo        %EXENAME% stopped)
+taskkill /F /IM %ANALYSER% >nul 2>&1
+if errorlevel 1 (echo        %ANALYSER% none running) else (echo        %ANALYSER% stopped)
 
 echo [exe]  cargo build --release
 call :clock TS
-cargo build --release -p tgx-app
+cargo build --release -p tgx-app -p tga-app
 if errorlevel 1 (
   echo.
   echo [err]  build failed
@@ -301,27 +353,29 @@ if errorlevel 1 (
 )
 call :since TS "release build"
 
-if not exist "target\release\%EXENAME%" (
-  echo [err]  build reported success but target\release\%EXENAME% is missing
-  set SAVE_ERROR=1
-  goto end
-)
-
 rem The exe ships from dist\, not from target\. cargo clean empties target,
-rem and the app keeps its state beside its own executable -- so an exe living
-rem in a build directory would take TelegramExporterData\ and Exports\ down
-rem with it. dist\ is a folder you can copy anywhere and it still works.
+rem and the exporter keeps its state beside its own executable -- so an exe
+rem living in a build directory would take TelegramExporterData\ and Exports\
+rem down with it. dist\ is a folder you can copy anywhere and it still works.
 if not exist "dist" mkdir dist
-copy /y "target\release\%EXENAME%" "dist\%EXENAME%" >nul
-if errorlevel 1 (
-  echo [err]  could not copy the exe into dist\ - is it still running?
-  set SAVE_ERROR=1
-  goto end
+for %%e in (%EXENAME% %ANALYSER%) do (
+  if not exist "target\release\%%e" (
+    echo [err]  build reported success but target\release\%%e is missing
+    set SAVE_ERROR=1
+    goto end
+  )
+  copy /y "target\release\%%e" "dist\%%e" >nul
+  if errorlevel 1 (
+    echo [err]  could not copy %%e into dist\ - is it still running?
+    set SAVE_ERROR=1
+    goto end
+  )
 )
 
-for /f %%s in ('powershell -NoProfile -Command "'{0:N1}' -f ((Get-Item 'dist\%EXENAME%').Length/1MB)"') do set EXESIZE=%%s
 echo.
-echo [ok]   dist\%EXENAME%  %EXESIZE% MB
+for %%e in (%EXENAME% %ANALYSER%) do (
+  for /f %%s in ('powershell -NoProfile -Command "'{0:N1}' -f ((Get-Item 'dist\%%e').Length/1MB)"') do echo [ok]   dist\%%e  %%s MB
+)
 
 rem The cache, reported where somebody will actually read it. target\ reached
 rem 45 GB without a single line of this script ever mentioning it, and cargo
@@ -348,7 +402,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 if errorlevel 1 set SAVE_ERROR=1
 call :since TS "cargo clippy"
 call :clock TS
-cargo test --all
+cargo test --all -- --nocapture
 if errorlevel 1 set SAVE_ERROR=1
 call :since TS "cargo test"
 goto end
@@ -434,6 +488,102 @@ if not exist "%OUREXPORT%" (
 call :pickref
 if errorlevel 1 goto noref
 cargo run -q -p tgx-parity -- wire "%OUREXPORT%" "%PARITYROOT%"
+if errorlevel 1 set SAVE_ERROR=1
+goto end
+
+
+rem ---------------------------------------------------------------------------
+rem The analyser: what it wrote before, against what it writes now.
+rem
+rem **This is what replaced the Python oracle the analyser was ported from.**
+rem That harness could only ever answer "does this still match the program it
+rem was ported from", which stops being a useful question the moment the two
+rem are meant to differ. This asks the question that survives: did anything I
+rem just changed alter one byte of the report? A difference is a mistake rather
+rem than a judgement call, unless the change was meant to alter the output --
+rem and then it is `save.bat baseline record`, after reading the diff.
+rem
+rem Both files are compared byte for byte, the stats dump included. That is only
+rem possible because the dump's layout is held still on purpose -- see the
+rem serde note on `Count` in tga-stats, and the sort in `tga_stats::write`.
+:baseline
+echo.
+if /i "%~2"=="record" goto baserecord
+echo === test: baseline ===
+echo.
+call :checkcargo
+if errorlevel 1 goto end
+call :runbaseline
+if errorlevel 1 set SAVE_ERROR=1
+goto end
+
+:baserecord
+echo === baseline: record what the report looks like now ===
+call :checkcargo
+if errorlevel 1 goto end
+cargo build -q --release -p tga-app
+if errorlevel 1 (set SAVE_ERROR=1 & goto end)
+if not exist "baseline" mkdir "baseline"
+rem Three legs, not two. Neither export has an events file beside it, so the
+rem first two leave the entire annotation layer -- the rail, the markers, the
+rem cards, the coverage band, the "matches nobody" list -- unrecorded. The third
+rem points at the 42 notes that were written by hand about the KRGM archive.
+call :onerecord "ua-kolab" "%REFEXPORT%"
+call :onerecord "krgm" "%KRGMEXPORT%"
+call :onerecord "krgm-notes" "%KRGMEXPORT%" "%KRGMEXPORT%\_timeline\events\general.json"
+echo.
+echo [note] baseline\ is gitignored. It is whole reports on real archives,
+echo        which is other people's conversation.
+goto end
+
+
+rem ---------------------------------------------------------------------------
+:bless
+echo.
+echo === test: bless the analyser's golden ===
+echo.
+call :checkcargo
+if errorlevel 1 goto end
+set "TGA_BLESS=1"
+cargo test -p tga-report --test golden -- --nocapture
+if errorlevel 1 set SAVE_ERROR=1
+set "TGA_BLESS="
+echo.
+echo [note] read the diff before committing it. A golden updated without being
+echo        read is a golden that records whatever the bug did.
+goto end
+
+
+rem ---------------------------------------------------------------------------
+rem Write report.html beside an export: a folder, a database, or -- with
+rem --refresh -- every database the exporter syncs into one folder.
+:report
+call :askfolder "%~2"
+if errorlevel 1 goto end
+echo.
+echo === report: %FOLDER% ===
+echo.
+call :checkcargo
+if errorlevel 1 goto end
+call :clock TS
+cargo run -q --release -p tga-app --bin TelegramAnalyser -- "%FOLDER%" --quiet
+if errorlevel 1 set SAVE_ERROR=1
+call :since TS "report"
+goto end
+
+
+rem ---------------------------------------------------------------------------
+:runwindow
+echo.
+echo === run: the analyser's window ===
+echo.
+rem **`cargo run`, not `start dist\...`.** `start` inside a batch that has its
+rem output redirected does not detach -- cmd holds on and the action never
+rem returns, so `save.bat run` would hang the terminal while looking like it had
+rem detached. To run what `build` shipped, run it: `dist\TelegramAnalyser.exe`.
+call :checkcargo
+if errorlevel 1 goto end
+cargo run -p tga-app --bin TelegramAnalyser
 if errorlevel 1 set SAVE_ERROR=1
 goto end
 
@@ -650,6 +800,107 @@ if errorlevel 1 (echo [warn] media names no longer land where Desktop put them &
 cargo run -q -p tgx-parity -- archive "%PARITYROOT%"
 if errorlevel 1 (echo [warn] the database no longer reads back Desktop's bytes & set "PARITY_FAILED=1")
 exit /b !PARITY_FAILED!
+
+rem :askfolder <folder or empty>  ->  FOLDER
+rem
+rem Offers the two baseline corpora by number, because typing a path with a
+rem Serbian character in it into a cmd prompt is its own adventure.
+:askfolder
+set "FOLDER=%~1"
+if not "%FOLDER%"=="" goto :askfolder_check
+echo.
+echo   1  %REFEXPORT%
+echo   2  %KRGMEXPORT%
+echo   or paste a folder or a .sqlite
+echo.
+set /p FOLDER=export:
+if "%FOLDER%"=="1" set "FOLDER=%REFEXPORT%"
+if "%FOLDER%"=="2" set "FOLDER=%KRGMEXPORT%"
+:askfolder_check
+rem Explorer's "Copy as path" wraps in quotes and `set /p` keeps them.
+set "FOLDER=%FOLDER:"=%"
+if "%FOLDER%"=="" (
+  echo [err]  no export given
+  set SAVE_ERROR=1
+  exit /b 1
+)
+if not exist "%FOLDER%" (
+  echo [err]  not there: %FOLDER%
+  set SAVE_ERROR=1
+  exit /b 1
+)
+exit /b 0
+
+rem Every recorded analyser leg, compared. A *missing* recording or drive is
+rem non-fatal: a machine without the archives is allowed to commit. A
+rem *differing* leg is not, and it returns non-zero so :save sends it to
+rem :testsfailed, the same shape as :runparity.
+:runbaseline
+set "BASE_FAILED=0"
+if not exist "baseline\*.report.html" (
+  echo [skip] analyser baseline - nothing recorded. Run: save.bat baseline record
+  exit /b 0
+)
+echo.
+echo [chk]  analyser baseline
+cargo build -q --release -p tga-app
+if errorlevel 1 exit /b 1
+call :onebase "ua-kolab" "%REFEXPORT%"
+call :onebase "krgm" "%KRGMEXPORT%"
+call :onebase "krgm-notes" "%KRGMEXPORT%" "%KRGMEXPORT%\_timeline\events\general.json"
+exit /b !BASE_FAILED!
+
+rem `--stamp` is not decoration. The stamp is the one value in the report that
+rem comes from the clock, so it is pinned here to a date that is obviously not a
+rem real one. Recording on Tuesday and comparing on Friday would otherwise
+rem differ in the Notes line and nowhere else, which is the kind of failure that
+rem teaches you to ignore the output. Both legs pass the same literal.
+:onerecord
+if not exist "%~2" (
+  echo [skip] %~1: no export at %~2
+  exit /b 0
+)
+echo.
+echo [rec]  %~1
+set "NOTESARG="
+if not "%~3"=="" set NOTESARG=--notes "%~3"
+call :clock TS
+target\release\%ANALYSER% "%~2" --quiet --stamp "1 January 2000" !NOTESARG! --out "baseline\%~1.report.html" --stats "baseline\%~1.stats.json"
+if errorlevel 1 (set SAVE_ERROR=1 & exit /b 1)
+call :since TS "%~1"
+exit /b 0
+
+:onebase
+if not exist "%~2" (
+  echo [skip] %~1: no export at %~2
+  exit /b 0
+)
+if not exist "baseline\%~1.report.html" (
+  echo [skip] %~1: never recorded
+  exit /b 0
+)
+set "NOTESARG="
+if not "%~3"=="" set NOTESARG=--notes "%~3"
+call :clock TS
+target\release\%ANALYSER% "%~2" --quiet --stamp "1 January 2000" !NOTESARG! --out "baseline\_now-%~1.report.html" --stats "baseline\_now-%~1.stats.json"
+if errorlevel 1 (set "BASE_FAILED=1" & exit /b 1)
+call :samebytes "baseline\%~1.report.html" "baseline\_now-%~1.report.html" "%~1 report"
+call :samebytes "baseline\%~1.stats.json"  "baseline\_now-%~1.stats.json"  "%~1 stats "
+call :since TS "%~1"
+exit /b 0
+
+rem fc /b rather than a hash, because when it does differ the first differing
+rem offset is the thing worth having and a hash cannot give it.
+:samebytes
+fc /b "%~1" "%~2" >nul 2>&1
+if errorlevel 1 (
+  echo [warn] %~3 differs from the baseline
+  echo        fc /b "%~1" "%~2"
+  set "BASE_FAILED=1"
+  exit /b 1
+)
+echo [ok]   %~3 identical
+exit /b 0
 
 
 :end

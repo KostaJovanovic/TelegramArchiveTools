@@ -14,14 +14,25 @@
 
 use std::path::PathBuf;
 
-/// Same default as the Python side's `save.bat REFEXPORT`. Lives on an
-/// external drive, so it is absent more often than not.
+/// Same default as `save.bat`'s `REFEXPORT`. Lives on an external drive, so it
+/// is absent more often than not.
 const DEFAULT_EXPORT: &str = r"N:\telegram export\UA KOLAB TELEGRAM";
 
+/// **The exporter's parity corpus is the same export**, cut down to its text
+/// half: every `result.json` of UA KOLAB TELEGRAM's four topics, in the layout
+/// this reader calls ours (one per topic at the root). Since the merge into
+/// TelegramTools it sits in this workspace's `reference/`, so the test runs
+/// with the drive unplugged — which is most of the time — instead of skipping.
+fn workspace_corpus() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../reference")
+}
+
 fn corpus() -> Option<PathBuf> {
-    let path = std::env::var("TGA_EXPORT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(DEFAULT_EXPORT));
+    let path = match std::env::var("TGA_EXPORT") {
+        Ok(path) => PathBuf::from(path),
+        Err(_) if PathBuf::from(DEFAULT_EXPORT).is_dir() => PathBuf::from(DEFAULT_EXPORT),
+        Err(_) => workspace_corpus(),
+    };
     if path.is_dir() {
         return Some(path);
     }
@@ -43,8 +54,12 @@ fn the_reference_export_reads_the_way_python_reads_it() {
     let Some(root) = corpus() else { return };
     let export = tga_read::load(&root, None).expect("load");
 
-    // Every one of these is from the Python analyser's own --stats dump.
-    assert_eq!(export.name, "UA KOLAB TELEGRAM");
+    // Every one of these is from the Python analyser's own --stats dump, but
+    // the name: a folder export is named for its folder, which is
+    // `UA KOLAB TELEGRAM` on the drive and `reference` in the workspace.
+    let folder = root.canonicalize().expect("corpus path");
+    let folder = folder.file_name().expect("folder name").to_string_lossy();
+    assert_eq!(export.name, folder);
     assert_eq!(export.topics.len(), 4, "topics");
     assert_eq!(export.msgs.len(), 6_643, "messages");
     assert_eq!(

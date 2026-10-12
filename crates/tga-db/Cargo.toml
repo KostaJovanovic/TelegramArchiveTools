@@ -12,21 +12,32 @@ description = "An export that is a SQLite file rather than a folder."
 # table and hand it to the reader. A second parser would drift from the first,
 # and the two clocks and the thread rule are exactly what it would drift on.
 #
-# Only `tga-app` depends on this, the way only `tga-app` depends on `tga-docs`
-# — it links a C SQLite and nothing else in the tree should pay for that.
+# Only `tga-app` depends on this, the way only `tga-app` depends on `tga-docs`.
 [dependencies]
 tga-read = { path = "../tga-read" }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 
-# `bundled` compiles SQLite into the binary rather than looking for one on the
-# machine. A report is a thing you hand somebody; "install SQLite first" is not
-# part of the deal. The exporter pins `libsql` instead, because grammers
-# already links it there — no such constraint here, and rusqlite is the plainer
-# of the two for reading.
-rusqlite = { version = "0.40", features = ["bundled"] }
+# **The exporter's own reader, not a second SQLite.** This crate used rusqlite
+# with its bundled SQLite while it lived in its own repository. In the
+# TelegramTools workspace that is a second copy of the `sqlite3_*` symbols
+# beside the libsql that grammers and `tgx-archive` already link, and one
+# binary carrying both fails to link -- which the merged TelegramTools.exe
+# would. It was also a second copy of the schema, agreeing with the writer's
+# by luck. `tgx-archive` has no Telegram types and no network, so depending on
+# it keeps the analyser offline; `tgx-parity`'s `layering.rs` holds that.
+tgx-archive = { path = "../tgx-archive" }
+
+# libsql's API is async and this crate's is not: every reader here is a plain
+# function called from a worker thread or the command line. A current-thread
+# runtime per call is the whole of what that costs. `rt` alone, no scheduler.
+tokio = { version = "1", features = ["rt"] }
 
 # The corpus test runs a real database through the metrics, which is the claim
 # worth proving: an `Export` from SQLite needs no special handling downstream.
 [dev-dependencies]
 tga-metrics = { path = "../tga-metrics" }
+# For the one test that has to write what no `Store` method will: a schema
+# version from the future. The exact pin `tgx-archive` carries, so nothing new
+# is compiled.
+libsql = { version = "=0.9.30", default-features = false, features = ["core"] }

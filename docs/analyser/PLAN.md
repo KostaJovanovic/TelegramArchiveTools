@@ -309,10 +309,22 @@ one was not this change.
 
 Two smaller decisions:
 
-- **Read-only, always.** Opening SQLite for writing takes a lock and leaves
-  `-wal` and `-shm` files beside the database. The exporter may be writing that
-  very file; an analyser has no business doing either to somebody's archive.
-  There is a test that no such file appears.
+- **Read-only, always.** Opening SQLite for writing takes a lock and can write
+  into the database. The exporter may be writing that very file; an analyser has
+  no business doing either to somebody's archive. **The test used to say that
+  no `-wal` or `-shm` appears, and that was only ever true of its hand-built
+  fixture,** which was in SQLite's rollback mode. The exporter writes WAL, and
+  SQLite cannot let even a read-only connection into a WAL database without
+  creating the shared-memory index and an empty log beside it. Every database
+  in the corpus folder already carried the pair. Since the merge the fixture is
+  written by the exporter's own `Store`, and the test now holds what was meant:
+  the database's bytes are unchanged, and nothing is written into its log.
+- **Read through the exporter's reader.** `tga-db` used rusqlite until the
+  merge into TelegramTools. In one workspace that is a second SQLite beside the
+  libsql grammers already links, and one binary carrying both fails to link. It
+  now reads through `tgx_archive::Store::open_read`, and `tools/merge_check.ps1`
+  showed the port changed no byte of any report, stats dump or model field on
+  three databases (221,680 messages).
 - **`chat_titles` exists separately from `chats`** because the window
   revalidates on every keystroke in the path field, and counting messages per
   chat is an index scan over the whole table. The field only needs to say what
@@ -478,8 +490,9 @@ notes layouts. Those are facts about behaviour, not about provenance.
   so it goes in a sidecar at the export root. A Desktop export has no such
   sidecar and never will, so a missing file is the normal case: fall back to
   English and say nothing. The report is already built with its strings behind
-  one lookup, so wiring it in stays mechanical. The exporter's half is not this
-  repo's to do.
+  one lookup, so wiring it in stays mechanical. Since the merge into
+  TelegramTools both halves are in one repository; `TELEGRAMTOOLS.md` phase 3
+  carries it.
 - **`reference/`** still holds the recorded output of the deleted Python
   harness. Nothing reads it; it can be deleted whenever you like.
 - No `origin` remote; `save.bat push` says so and stops.

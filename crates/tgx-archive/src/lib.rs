@@ -27,10 +27,19 @@
 //! It renders nothing. Both outputs still come from the one map that
 //! `tgx-tg/src/output.rs` builds; this is a fourth *output*, not a fourth
 //! writer.
+//!
+//! **It is also the only reader of the format.** The analyser's `tga-db` once
+//! opened these files itself, through `rusqlite`. That was a second SQLite in
+//! a tree that already links libsql, and both export the same `sqlite3_*`
+//! symbols, so one binary carrying the two fails to link. It was also a second
+//! copy of the schema that agreed with this one by luck. `tga-db` now reads
+//! through [`Store::open_read`], and a schema change made here is one the
+//! analyser either compiles against or fails to.
 
 pub mod store;
 
 pub use store::{
-    merge_volatile, plain_text, ChatEntry, Error, Hit, MediaEntry, MediaRow, Merge, Store,
-    StoredMessage, StoredTopic, StoredVersion, Userpic, FILE_EXT, SCHEMA_VERSION, USERPIC_KIND,
+    merge_volatile, plain_text, ChatEntry, ChatSummary, Error, Hit, MediaEntry, MediaRow, Merge,
+    Store, StoredMessage, StoredTopic, StoredVersion, Userpic, FILE_EXT, SCHEMA_VERSION,
+    USERPIC_KIND,
 };

@@ -396,3 +396,71 @@ Because the merged repo is public, the gitignore rules of both halves carry
 over in full: `reference/`, `baseline/`, `Exports/`, `TelegramToolsData/`,
 every `report*.html` and `*.stats.json`. Phase 1 checks the merged
 `.gitignore` against both originals line by line before the first push.
+
+---
+
+## 7. Log
+
+### Phase 0 — 2026-10-12
+
+- Pending work committed in each repo: the exporter's "why a database run
+  reads the whole history" log line, and the analyser's `--handles` (v0.15).
+- **The analyser's baseline could not run.** Its two folder corpora were not
+  mounted (`N:` was a different disk that day, and `J:\temp pureraw` held no
+  KRGM). So the recording was taken with what was on hand:
+  `tools/merge_check.ps1` writes the report and stats dump for `reference\`
+  (the exporter's cut of the same UA KOLAB export) and three databases on
+  `L:`, the digest, and `model_hash`, a hash of every field of the database
+  model, per topic: 49 lines over 221,680 messages.
+- **The exporter's screenshots no longer sign in.** `TGX_SHOT` used to connect
+  with the stored session. It now shows an invented account. "Before" shots of
+  every view of both windows are in `target\shots\before\`.
+- Sizes: `TelegramAnalyser.exe` 10.6 MB; `TelegramExporter.exe` 12.4 MB
+  (`dist\`, as last built).
+
+### Phase 1 — 2026-10-12
+
+- The analyser's history is merged in (merge commit `17fdbda`). Its copy of
+  `tgx-ui` was byte-identical to the exporter's and is gone.
+- **The merge checkout made every analyser file CRLF**, golden and report
+  assets included, because this repo had no `.gitattributes`. The analyser's
+  targeted rules came over, but not its repo-wide `eol=lf`, and the seven
+  byte-compared files were checked out again.
+- **`preserve_order` changed nothing.** With it on, all 49 manifest lines
+  matched the recording. One false alarm on the way: the input folder had been
+  copied inside each run's own output directory, and the stats dump records the
+  export's path, so the folder legs differed by that path alone. The input now
+  goes to one fixed scratch path.
+- **`rusqlite` and `libsql` coexist in one workspace.** They use different
+  native link names, so cargo resolves both, and only a binary linking the two
+  would fail. That binary is phase 2's `TelegramTools.exe`. The port was still
+  done here, as planned.
+- **`tga-db` reads through `tgx_archive::Store::open_read`.** Four read
+  methods were added to the store: `chat_summaries`, `chat_titles`,
+  `participants_of`, `edit_counts`. All 49 manifest lines matched again. The
+  corpus test reads 63 databases (1,608,533 messages).
+- **The "no `-wal`/`-shm`" test was never true of a real export.** Its old
+  fixture was hand-built in rollback mode. Built by the exporter's `Store`
+  instead, it is WAL, and SQLite creates the pair for any reader, rusqlite
+  included: every database on `L:` already had them. The test now asserts that
+  the database's bytes are unchanged and its log stays empty.
+- **The `tga-db` corpus test crashed twice with an access violation**
+  (`0xc0000005`), in about a dozen runs, both times in a binary built by a
+  multi-crate `cargo test`. Four parallel runs of the single-crate build did
+  not crash. The test opens stores on five threads at once.
+  Reading libsql 0.9.30 found one use-after-free on that path: a connection's
+  SQLite handle is closed twice on drop (`LibsqlConnection::drop` and then
+  its field's own `Drop` both call `disconnect()`). `tgx_archive::Store` now
+  holds one never-run statement so the handle is closed exactly once (see
+  `_close_once`). A stress test of many stores on eight threads did not crash
+  either before or after the fix, so **the double close is not proven to be
+  the crash.** The exporter's own window opens read-only stores on worker
+  threads while an export writes, so it was exposed to the same double close.
+- `tga-read`'s corpus test falls back to `reference\`, so it runs without the
+  drive.
+- `layering.rs` holds the analyser's rules: no `tga-*` reaches Telegram, no
+  `tgx-*` reaches `tga-*`, the report depends on neither the reader nor the
+  metrics, the notes depend on neither the reader nor the documents, and only
+  `tga-app` reaches `tga-docs` and `tga-db`.
+- One `save.bat` and one `CLAUDE.md`. CI builds, size-checks and uploads both
+  exes.

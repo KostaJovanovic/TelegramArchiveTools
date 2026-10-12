@@ -2,11 +2,24 @@
 
 Guidance for Claude Code (claude.ai/code) working in this repository.
 
-A Rust/egui exporter for Telegram chats. It reproduces **Telegram Desktop's own
-export format byte for byte**, plus the one thing Desktop cannot do: forum
-supergroups split into one folder per topic.
+**TelegramTools**: two programs becoming one, in one workspace.
 
-`ROADMAP.md` holds the design record and what is still open. `AUDIT.md` holds
+- **The exporter** (`tgx-*`) gets chats off Telegram. It reproduces **Telegram
+  Desktop's own export format byte for byte**, plus the one thing Desktop
+  cannot do: forum supergroups split into one folder per topic. It can also
+  keep each chat as an accumulating `<chat>.sqlite`.
+- **The analyser** (`tga-*`) reads a finished export, a folder or a database,
+  and writes one self-contained `report.html` beside it. It never touches the
+  network.
+
+They were two repositories until 2026-10-12; `TELEGRAMTOOLS.md` is the merge
+plan and its log, and says which phase is done. Until phase 2 they ship as two
+binaries, `TelegramExporter.exe` and `TelegramAnalyser.exe`.
+
+`ROADMAP.md` holds the exporter's design record and what is still open.
+`docs/analyser/PLAN.md` is the analyser's: why each figure is computed the way
+it is. `docs/analyser/REFACTOR.md` is the log of the rewrite that gave the
+analyser its current shape. `AUDIT.md` holds
 what past reviews and live runs found. `DEFECTS.csv` is the register of known
 output differences against Desktop, with a `caught_by` column naming what would
 have found each — eleven are open, and several are invisible to every leg. Read
@@ -17,10 +30,15 @@ the relevant part before changing the area it covers.
 ```powershell
 save.bat                    # menu; also takes an action as an argument
 save.bat test               # fmt + clippy + every suite, same as CI
-save.bat build              # release build -> dist\TelegramExporter.exe
+save.bat build              # release build -> both exes in dist\
 save.bat parity             # all four replay legs against corpus or drive
 save.bat corpus             # cut reference\ out of the reference export
 save.bat wire <export dir>  # diff a live export against the reference run
+save.bat baseline           # the analyser's reports against the last recording
+save.bat baseline record    # re-record it, after reading the diff
+save.bat bless              # re-record the analyser's committed golden
+save.bat report <folder>    # write report.html beside an export
+save.bat run                # the analyser's window
 save.bat clean              # report target\ and empty it
 ```
 
@@ -37,7 +55,20 @@ cargo run -p tgx-app --bin TelegramExporter     # the window
 cargo run -p tgx-tg  --bin tgx -- login|chats|export "<title>"
 cargo run -p tgx-tg  --bin tgx -- export --db-only "<title>"   # sync the database
 cargo run -p tgx-parity -- archive reference                    # one leg on its own
+
+cargo test -p tga-report --test golden          # the analyser's golden; no corpus needed
+cargo test -p tga-db --test corpus -- --nocapture   # every database on L:
+cargo run -p tga-app --bin TelegramAnalyser -- <folder or .sqlite>
+        [--out P] [--chat ID|TITLE] [--digest] [--handles] [--no-fonts]
+        [--stats P] [--notes P] [--stamp T]
+cargo run -p tga-app --bin TelegramAnalyser -- <output folder> --refresh [--force]
+cargo run -p tga-app --bin TelegramAnalyser -- --from-stats <s.json> --out <p>
 ```
+
+**Pass `-- --nocapture` to anything touching the analyser's corpus tests.**
+Their skips are `eprintln`s, and libtest discards stderr for a passing test, so
+without it a suite that compared nothing reports as coverage. `save.bat` and CI
+both pass it.
 
 CI (`windows-latest`) runs fmt, clippy with `-D warnings`, `cargo test --all`,
 a release build, and fails if the binary exceeds 30 MB.
@@ -96,7 +127,25 @@ tgx-tg       grammers client, topics, engine, planning, download, enrichment (+ 
 tgx-ui       the design system in egui: tokens, type scale, components, theme.
 tgx-app      the window. Depends only on tgx-ui + tgx-tg.
 tgx-parity   the oracle: lib + bin. Depends on format/html/media/archive, never on tgx-tg.
+
+tga-read     export folder -> model. Both layouts: ours (result.json per topic at
+             the root) and Desktop's (chats/chat_<id>/result.json). No UI, no network.
+tga-db       <chat>.sqlite -> the same model, read through tgx-archive's read-only
+             Store. Hands the stored JSON to tga-read rather than parsing it again.
+tga-docs     a .txt/.docx/.pdf attachment -> its text and its real date.
+tga-notes    the hand-written annotation layer + the model-facing digest.
+             MUST NOT depend on tga-read or tga-docs.
+tga-stats    the shape of every figure, and the dump's format. Data only.
+tga-metrics  every figure, one pass. No I/O. Fills in a tga_stats::Stats.
+tga-report   the ramp, the SVG marks, the one HTML file. Reads a Stats.
+             MUST NOT depend on tga-read or tga-metrics.
+tga-app      TelegramAnalyser.exe: arguments run the command, none open the window.
+             The only crate that reaches tga-docs and tga-db.
 ```
+
+The analyser's rules sit in the same `layering.rs`: no `tga-*` crate reaches
+`grammers-*`, `tgx-tg` or `tgx-app`, and **no `tgx-*` crate reaches any
+`tga-*`**, so the exporter's oracle cannot move because a report changed.
 
 A Telegram type in `tgx-html` would let Desktop's markup depend on wire shapes,
 and the harness could no longer replay recorded JSON through it. That is the
@@ -217,6 +266,97 @@ connection: one round trip per process, not per action.
 **One writer per fact.** A chat's message count has three sources and one
 setter, `Shell::set_count`. The queue owns what a run did, so no worker composes
 its own summary. The second writer always wins a race you did not know you had.
+
+## The analyser
+
+Point it at a finished export, folder or database, and it writes one
+self-contained `report.html` beside it. Its window is a library: every export
+under a folder is a row, with what needs a report already ticked.
+
+**`tga-report` renders from a `tga_stats::Stats`, which is exactly what
+`--stats` dumps.** That is what lets a recorded dump replay through the writer
+with no export on disk; the golden test and `--from-stats` both rest on it. The
+shape lives in `tga-stats` so the writer depends on neither the reader nor the
+metrics. `tga-notes` inherits the rule at one remove, so the
+`Export -> digest::Row` and `Doc -> Attachment` mappings live in the caller
+(`tga-app/src/cli.rs`), not in `tga-notes`.
+
+Every field of `Stats` has a `Default` and the struct is `#[serde(default)]`,
+so a dump with a branch missing renders an empty section. `dynamics` is an
+`Option` on purpose: absent means "recorded before this existed", which is a
+different fact from an archive with nothing in it.
+
+### Invariants that change numbers or break the harness
+
+- **Time is two clocks.** Anything with a calendar or clock face reads
+  `Msg::when` (naive local wall clock); anything measuring a *duration* reads
+  `Msg::unix`, which stays monotonic across DST. Decided once in `tga-read`.
+- **A deleted message still counts.** `tga-db` does *not* filter on
+  `deleted_seen`. Keeping what was deleted is the whole reason the database
+  format exists; the count is reported separately instead.
+- **A document has its own date, and it is not the message's.** `tga-docs` dates
+  an attachment from its filename and text, never the filesystem, and names the
+  rung it stopped on (`filename`, `content`, `filename+posted`, `posted`).
+- **A sender is a typed peer key, never a display name.**
+- **A forum topic is a thread**, so the reply to the topic's root is dropped.
+  Read literally, response-time medians stretch to days.
+- **The stats dump is sorted by `tga_stats::write`, not by the map type.** In
+  this workspace `serde_json` has `preserve_order` on (the exporter needs it),
+  so `Map` keeps insertion order and the explicit sort is the only thing
+  ordering the dump. Do not remove it.
+- **`assets/report.css` and `report.js` are copied into the report verbatim.**
+  Editing either changes every report's bytes. `.gitattributes` pins them and
+  the goldens as `-text`; a CRLF checkout of either fails every compare.
+- **`Count` serialises as `["label", 41]`**, not as an object. Changing it
+  invalidates every recorded dump.
+- **Nothing in a notes file is trusted.** Every string is escaped, and a
+  malformed entry is dropped, never raised.
+- **One file, no network.** Fonts base64'd, charts inline SVG, every view
+  rendered server-side; JS only filters and pans what is drawn.
+- **Reading a database writes nothing into it.** It is opened through
+  `Store::open_read`. SQLite still creates an empty `-wal` and a `-shm` index
+  beside a WAL database, even for a reader, and the old rusqlite reader did the
+  same; what the test holds is that the database's bytes and its log are
+  unchanged.
+
+### The analyser's oracle
+
+**`save.bat baseline` is the load-bearing check.** It runs the release build
+over the real archives and compares the whole report and the whole stats dump,
+byte for byte, against a recording in `baseline\`. A difference is a mistake
+unless the change was meant to alter the output; then it is
+`save.bat baseline record`, after reading the diff. Three legs: `ua-kolab`,
+`krgm`, and `krgm-notes`, which passes the 42 hand-written notes.
+
+| corpus | messages | what it is for |
+|---|---:|---|
+| `N:\telegram export\UA KOLAB TELEGRAM` | 6,643 | baseline; also cut into `reference\` |
+| `J:\temp pureraw\KRGM*` | 333,582 | baseline |
+| `N:\telegram_export\KROVNA RADNA GRUPA ZA MEDIJE*` | 450,817 | `tga-docs` corpus: 150 docx, 238 pdf, 9 txt |
+| `L:\9 telegram export\` | 1.6M in 63 databases | `tga-db` corpus: every database must read |
+
+The drive letters move: on 2026-10-12 `N:` was a different disk, and only `L:`
+held its corpus. **`tga-read`'s corpus test falls back to `reference\`**, the
+exporter's cut of the same UA KOLAB export, so it runs without the drive.
+
+`TGA_REQUIRE_CORPUS=1` (set by `save.bat`) turns a missing corpus into a
+failure. `TGA_EXPORT`, `TGA_DOCS_EXPORT`, `TGA_DATABASE` and
+`TGA_DATABASE_OUTPUT` override the paths. `TGA_BLESS=1` re-records the golden.
+The document leg takes a minute in a debug build, because it parses 238 PDFs.
+
+**`tools/merge_check.ps1`** records what the analyser writes, the digest and a
+hash of every field of the database model included, and is how the merge was
+proved to change nothing. Run it before and after any change that could move
+the reader or the serialiser, and compare the two `MANIFEST.txt` files.
+
+**Two traps in the document corpus:** the `.txt` files at each topic's root are
+`missing_media.txt`, the exporter's own log, not attachments; and 133 of the
+referenced `.docx` were never downloaded, so a document that reads as empty is
+a missing file far more often than a broken parser.
+
+The committed fixtures (`tga-report/tests/fixture.stats.json`,
+`tests/synthetic/`) are hand-written and name nobody, which is why they can be
+committed and never skip.
 
 ## Byte-exactness invariants
 

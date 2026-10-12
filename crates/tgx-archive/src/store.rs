@@ -233,6 +233,17 @@ pub struct ChatEntry {
     pub synced: Option<i64>,
 }
 
+/// One chat with its size, as [`Store::chat_summaries`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatSummary {
+    pub id: i64,
+    pub title: String,
+    /// Desktop's `type` string: `private_supergroup`, `personal_chat`, …
+    pub kind: String,
+    /// Every stored message, deleted ones included.
+    pub messages: i64,
+}
+
 /// One message as the database holds it.
 #[derive(Debug, Clone)]
 pub struct StoredMessage {
@@ -438,6 +449,26 @@ pub struct Store {
     /// Held so the connection cannot outlive the handle that made it.
     _db: libsql::Database,
     path: PathBuf,
+    /// **A statement prepared and never run, held so the SQLite handle is
+    /// closed once.** libsql 0.9.30 closes it twice: its connection wrapper's
+    /// `Drop` calls `disconnect()`, which runs `sqlite3_close_v2` when no other
+    /// clone of the connection is alive, and then the wrapped connection's own
+    /// `Drop` calls `disconnect()` again — still the only clone, so the freed
+    /// handle is closed a second time. Usually that second call reads a stale
+    /// "closed" marker and returns an error nobody sees; with another thread
+    /// allocating in between it reads reused memory. The analyser's corpus
+    /// test, which opens stores on five threads at once, died with an access
+    /// violation twice in about a dozen runs on 2026-10-12. This is the one
+    /// use-after-free found in the path, but it was **not** proven to be that
+    /// crash; see TELEGRAMTOOLS.md's log.
+    ///
+    /// Every prepared statement holds a clone of the connection. With this one
+    /// alive, neither of the two disconnects is the last, so neither closes.
+    /// It is declared last, so it is dropped last, and its clone is then the
+    /// only one: the handle is closed once, and freed when the statement is
+    /// finalized right after. Never stepped, so it holds no lock and reads no
+    /// table. Remove it only on a libsql that drops a connection once.
+    _close_once: libsql::Statement,
 }
 
 impl Store {
@@ -472,6 +503,7 @@ impl Store {
         conn.execute_batch("PRAGMA synchronous = NORMAL;").await?;
 
         let store = Self {
+            _close_once: conn.prepare("SELECT 1").await?,
             conn,
             _db: db,
             path: path.to_path_buf(),
@@ -503,6 +535,7 @@ impl Store {
         let conn = db.connect()?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
         let store = Self {
+            _close_once: conn.prepare("SELECT 1").await?,
             conn,
             _db: db,
             path: path.to_path_buf(),
@@ -554,6 +587,84 @@ impl Store {
             });
         }
         Ok(out)
+    }
+
+    /// Every chat the file records, with its Desktop `type` and how many
+    /// messages it holds — most first, then by id.
+    ///
+    /// **Deleted ones are counted.** This is the analyser's question ("which
+    /// chat is this file, and how big"), and the analyser keeps a message
+    /// Telegram dropped in its figures; see `tga-db`. A `chats` row with no
+    /// messages still answers, with zero.
+    pub async fn chat_summaries(&self) -> Result<Vec<ChatSummary>, Error> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT c.id, c.title, c.type, COUNT(m.id)
+                   FROM chats c LEFT JOIN messages m ON m.chat_id = c.id
+                  GROUP BY c.id ORDER BY COUNT(m.id) DESC, c.id",
+                (),
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next().await? {
+            out.push(ChatSummary {
+                id: r.get::<i64>(0)?,
+                title: r.get::<String>(1)?,
+                kind: r.get::<String>(2)?,
+                messages: r.get::<i64>(3)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// `(id, title)` of every chat, by id, **without counting anything.**
+    ///
+    /// Separate from [`Self::chat_summaries`] because the analyser asks it on
+    /// every keystroke in a path field, and counting messages per chat is an
+    /// index scan over the whole table — long enough on a 450,000-message
+    /// archive to feel in a text field that only needs to say what the file is.
+    pub async fn chat_titles(&self) -> Result<Vec<(i64, String)>, Error> {
+        let mut rows = self
+            .conn
+            .query("SELECT id, title FROM chats ORDER BY id", ())
+            .await?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next().await? {
+            out.push((r.get::<i64>(0)?, r.get::<String>(1)?));
+        }
+        Ok(out)
+    }
+
+    /// Everyone this file has ever seen in `chat_id`, as the `participants.json`
+    /// entry each was stored from, ordered by peer key.
+    pub async fn participants_of(&self, chat_id: i64) -> Result<Vec<Value>, Error> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT info FROM participants WHERE chat_id = ?1 ORDER BY peer",
+                params![chat_id],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next().await? {
+            out.push(serde_json::from_str(&r.get::<String>(0)?)?);
+        }
+        Ok(out)
+    }
+
+    /// `(messages with an earlier version kept, versions in total)`.
+    pub async fn edit_counts(&self, chat_id: i64) -> Result<(i64, i64), Error> {
+        let row = self
+            .row(
+                "SELECT COUNT(DISTINCT id), COUNT(*) FROM versions WHERE chat_id = ?1",
+                params![chat_id],
+            )
+            .await?;
+        Ok(match row {
+            Some(r) => (r.get::<i64>(0)?, r.get::<i64>(1)?),
+            None => (0, 0),
+        })
     }
 
     async fn ensure_schema(&self) -> Result<(), Error> {
@@ -2329,5 +2440,98 @@ mod tests {
             merge_volatile(&stored, &later)["reactions"],
             later["reactions"]
         );
+    }
+
+    /// Many stores opened, read and dropped at once, from many threads.
+    ///
+    /// libsql 0.9.30 closes every connection's SQLite handle twice on drop
+    /// (see [`Store`]'s `_close_once`), and the second `sqlite3_close_v2` runs
+    /// on freed memory. This did not reproduce the analyser corpus test's two
+    /// access violations on its own — what it holds is that many stores at once
+    /// keep working, which is the shape the window will have when an export and
+    /// an analysis run side by side.
+    #[test]
+    fn stores_opened_and_dropped_on_many_threads_do_not_crash() {
+        let path = tmp("threads");
+        let rt = || {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+        };
+        rt().block_on(async {
+            let s = Store::open(&path).await.unwrap();
+            s.upsert_chat(7, "Dev Team", "private_supergroup", 100)
+                .await
+                .unwrap();
+            for id in 1..50 {
+                s.merge(7, id, Some(1), &msg(id, "hi"), 100).await.unwrap();
+            }
+        });
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let rt = rt();
+                    for _ in 0..150 {
+                        rt.block_on(async {
+                            let s = Store::open_read(&path).await.unwrap();
+                            assert_eq!(s.messages_of(7, 1).await.unwrap().len(), 49);
+                            let _ = s.chat_summaries().await.unwrap();
+                        });
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("a reader thread panicked");
+        }
+    }
+
+    /// What the analyser's `tga-db` asks of a file, through a read-only open.
+    #[tokio::test]
+    async fn the_analysers_questions_are_answered_read_only() {
+        let path = tmp("analyser");
+        let s = Store::open(&path).await.unwrap();
+        s.upsert_chat(7, "Dev Team", "private_supergroup", 100)
+            .await
+            .unwrap();
+        s.upsert_chat(3, "Empty", "personal_chat", 100)
+            .await
+            .unwrap();
+        for id in [10, 11, 12] {
+            s.merge(7, id, Some(1), &msg(id, "hi"), 100).await.unwrap();
+        }
+        // An edit, and a deletion: both still count as messages.
+        s.merge(7, 10, Some(1), &msg(10, "edited"), 200)
+            .await
+            .unwrap();
+        s.merge(7, 10, Some(1), &msg(10, "edited again"), 300)
+            .await
+            .unwrap();
+        s.mark_deleted(7, 12, 300).await.unwrap();
+        for peer in ["user2", "user1"] {
+            s.upsert_participant(7, peer, &json!({"id": peer, "name": peer}), 100)
+                .await
+                .unwrap();
+        }
+        drop(s);
+
+        let r = Store::open_read(&path).await.unwrap();
+        let chats = r.chat_summaries().await.unwrap();
+        assert_eq!(
+            chats.iter().map(|c| (c.id, c.messages)).collect::<Vec<_>>(),
+            [(7, 3), (3, 0)],
+            "most messages first, deleted ones counted, an empty chat listed"
+        );
+        assert_eq!(chats[0].kind, "private_supergroup");
+        assert_eq!(
+            r.chat_titles().await.unwrap(),
+            [(3, "Empty".to_string()), (7, "Dev Team".to_string())]
+        );
+        let people = r.participants_of(7).await.unwrap();
+        assert_eq!(people[0]["id"], "user1", "ordered by peer");
+        assert_eq!(people.len(), 2);
+        assert_eq!(r.edit_counts(7).await.unwrap(), (1, 2));
+        assert_eq!(r.edit_counts(3).await.unwrap(), (0, 0));
     }
 }

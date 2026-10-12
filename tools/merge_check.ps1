@@ -16,9 +16,12 @@
 # this records what was on hand:
 #
 #   - the exporter's own reference\ cut of UA KOLAB, which is our folder layout
-#     (result.json per topic at the root). It is copied into <dir> first,
-#     because --digest writes analysis\ beside the export, and the reference
-#     tree is the parity oracle, which must not be written into.
+#     (result.json per topic at the root). It is copied to one fixed scratch
+#     folder first, because --digest writes analysis\ beside the export, and the
+#     reference tree is the parity oracle, which must not be written into.
+#     **Fixed, not inside <dir>:** the export's path is in the stats dump and
+#     the report (`root`), so a copy under each run's own <dir> made every
+#     before/after pair differ by that one string.
 #   - three databases on L:, small, medium and large. They get the report and
 #     stats dump only. A digest would go into the export folder on L:, which
 #     is somebody's archive.
@@ -30,7 +33,7 @@ param(
     [Parameter(Mandatory)] [string] $Exe,
     [Parameter(Mandatory)] [string] $Out,
     [string] $Args0 = "",
-    [string] $Reference = "$PSScriptRoot\..\..\TelegramExporter\reference",
+    [string] $Reference = "$PSScriptRoot\..\reference",
     [string] $Cargo = "$PSScriptRoot\.."
 )
 
@@ -53,13 +56,16 @@ function Run([string[]] $a) {
 }
 
 # -- the folder layout, with the digest ------------------------------------
-$folder = Join-Path $Out "ua-folder"
+$folder = Join-Path $env:TEMP "tt-merge-check\ua-folder"
 if (Test-Path $folder) { Remove-Item -Recurse -Force $folder }
+New-Item -ItemType Directory -Force (Split-Path $folder) | Out-Null
 Copy-Item -Recurse $Reference $folder
 Get-ChildItem $folder -Recurse -Filter "messages*.html" | Remove-Item
 Remove-Item (Join-Path $folder "MANIFEST.txt") -ErrorAction SilentlyContinue
 Run @($folder, "--out", "$Out\ua-folder.report.html", "--stats", "$Out\ua-folder.stats.json", "--digest")
 Run @($folder, "--out", "$Out\ua-folder-handles.report.html", "--stats", "$Out\ua-folder-handles.stats.json", "--handles")
+Copy-Item -Recurse -Force (Join-Path $folder "analysis") (Join-Path $Out "ua-folder-analysis")
+Remove-Item -Recurse -Force (Split-Path $folder)
 
 # -- the databases ----------------------------------------------------------
 $i = 0
