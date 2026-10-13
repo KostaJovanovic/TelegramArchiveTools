@@ -1,0 +1,63 @@
+name: Release
+
+# A tag named v<version> builds TelegramTools.exe and publishes it as a GitHub
+# release with its SHA-256 beside it. The checks are ci.yml's: this runs only
+# the release build, so tag a commit CI has already passed.
+#
+# The exe is unsigned (ROADMAP: "The binary is unsigned"), so a downloaded copy
+# meets SmartScreen on first run. The release notes say so, and the checksum
+# is how someone can tell the file they have is the file that was built here.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Release build
+        run: cargo build --locked --release -p tt-app
+
+      # The tag and the workspace must name the same version, or the
+      # diagnostics the exe reports and the release page disagree about what
+      # was downloaded.
+      - name: Tag matches the crate version
+        shell: pwsh
+        run: |
+          $line = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          $version = $line.Matches[0].Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            Write-Error "tag ${{ github.ref_name }} but Cargo.toml says $version"
+            exit 1
+          }
+
+      - name: Checksum
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/TelegramTools.exe dist/
+          $hash = (Get-FileHash dist/TelegramTools.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  TelegramTools.exe" | Out-File -Encoding ascii dist/TelegramTools.exe.sha256
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $notes = @"
+          TelegramTools.exe is a single portable file: put it in a folder of its own and run it. It keeps its settings and session beside itself.
+
+          The exe is not code-signed, so Windows SmartScreen will warn on first run (More info -> Run anyway). Check the download against TelegramTools.exe.sha256 first:
+
+              Get-FileHash TelegramTools.exe -Algorithm SHA256
+          "@
+          gh release create "${{ github.ref_name }}" dist/TelegramTools.exe dist/TelegramTools.exe.sha256 --title "TelegramTools ${{ github.ref_name }}" --notes $notes
