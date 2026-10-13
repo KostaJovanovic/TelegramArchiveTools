@@ -55,6 +55,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "signal"
 anyhow = { workspace = true }
 chrono = { workspace = true }
 log = { workspace = true }
+serde_json = { workspace = true }
+
+# The Windows version in Copy diagnostics. grammers already links this exact
+# crate to name the device a session signs in from, so it adds nothing.
+os_info = { version = "3", default-features = false }
 
 # Three small pieces of Win32: the run-finished notification (`notify.rs`),
 # one window per data folder (`instance.rs`), and the destination's free space

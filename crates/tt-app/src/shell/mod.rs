@@ -20,6 +20,7 @@ mod chats;
 mod chrome;
 mod commands;
 mod events;
+mod keys;
 mod library;
 mod queue;
 mod settings;
@@ -152,6 +153,9 @@ pub struct Shell {
     search: String,
     /// The saved-selection name field's buffer. See `Shell::saved_selections`.
     selection_name: String,
+    /// Ctrl+F was pressed: the view's filter or search box takes the focus
+    /// when next drawn. See [`Shell::shortcuts`].
+    focus_filter: bool,
 
     signed_in: bool,
     /// Who is signed in, as Telegram names them — the rail's foot says it.
@@ -162,6 +166,12 @@ pub struct Shell {
     sign_out_armed: bool,
     /// A sign-out is on the worker.
     signing_out: bool,
+    /// Reset settings has been pressed once; the next press does it.
+    reset_armed: bool,
+    /// The stored zoom changed under the window — a reset — and the context
+    /// has not been told. `track_window` would otherwise copy the old zoom
+    /// straight back into the settings on the next frame.
+    zoom_stale: bool,
     /// Tracked separately from `chats.is_empty()`: the list is empty both
     /// before a sign-in and after one that found nothing, and those two need
     /// opposite instructions.
@@ -291,12 +301,13 @@ pub struct Shell {
 }
 
 impl Shell {
-    /// Build the shell.
+    /// Build the shell from the settings `main` already read for the window's
+    /// size and place.
     ///
     /// Takes no context: everything here is data. The startup work waits for
     /// the first frame, which is the first moment there is a window to wake.
-    pub fn new() -> Self {
-        Self::with_settings(Settings::load())
+    pub fn with(settings: Settings) -> Self {
+        Self::with_settings(settings)
     }
 
     /// The same state without a window, for the interaction tests.
@@ -353,6 +364,7 @@ impl Shell {
             settings,
             search: String::new(),
             selection_name: String::new(),
+            focus_filter: false,
             signed_in: false,
             loaded: false,
             exporting: false,
@@ -390,6 +402,8 @@ impl Shell {
             account: None,
             sign_out_armed: false,
             signing_out: false,
+            reset_armed: false,
+            zoom_stale: false,
         }
     }
 
@@ -538,8 +552,10 @@ impl Shell {
 
     /// Show a view because the user asked for it. **Pins it.**
     pub(super) fn show(&mut self, body: View) {
-        // A half-pressed Sign out does not survive going somewhere else.
+        // A half-pressed Sign out or Reset does not survive going somewhere
+        // else.
         self.sign_out_armed = false;
+        self.reset_armed = false;
         self.body = body;
         self.body_pinned = true;
     }
@@ -570,6 +586,48 @@ impl Shell {
     pub(super) fn suggest(&mut self, body: View) {
         if !self.body_pinned {
             self.body = body;
+        }
+    }
+
+    /// With the appearance set to System, follow Windows' app mode — on
+    /// launch and whenever it changes while the window is open.
+    fn follow_system_theme(&mut self, ctx: &Context) {
+        if self.settings.theme != "system" {
+            return;
+        }
+        let wanted = system_palette(ctx.system_theme());
+        if wanted != self.palette {
+            self.palette = wanted;
+            self.theme_stale = true;
+        }
+    }
+
+    /// Note where the window is and how far it is zoomed, for `on_exit` to
+    /// save. In logical points, which is what the next launch's builder
+    /// takes — egui's own points are those divided by the zoom.
+    fn track_window(&mut self, ctx: &Context) {
+        let zoom = ctx.zoom_factor();
+        if shot::path().is_some() {
+            return;
+        }
+        self.settings.zoom = zoom;
+        let (outer, inner, maximized, minimized) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.outer_rect, v.inner_rect, v.maximized, v.minimized)
+        });
+        // Maximised or minimised is not a size to come back to: the restored
+        // one stays as it was last seen.
+        self.settings.window_maximized = maximized.unwrap_or(false);
+        if maximized == Some(true) || minimized == Some(true) {
+            return;
+        }
+        if let (Some(outer), Some(inner)) = (outer, inner) {
+            self.settings.window = vec![
+                outer.min.x * zoom,
+                outer.min.y * zoom,
+                inner.width() * zoom,
+                inner.height() * zoom,
+            ];
         }
     }
 
@@ -758,7 +816,16 @@ impl eframe::App for Shell {
             if let Some(view) = shot::view() {
                 self.show(view);
             }
+            // A photograph is always at 100%, so two of them compare.
+            if shot::path().is_none() {
+                ctx.set_zoom_factor(self.settings.zoom);
+            }
         }
+        if std::mem::take(&mut self.zoom_stale) {
+            ctx.set_zoom_factor(self.settings.zoom);
+        }
+        self.follow_system_theme(ctx);
+        self.track_window(ctx);
         self.frame_no = self.frame_no.saturating_add(1);
         if self.theme_stale {
             self.theme_stale = false;
@@ -812,6 +879,8 @@ impl eframe::App for Shell {
         if self.exporting {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
+
+        self.shortcuts(ctx);
 
         let p = self.palette;
         // Every panel in this window is unfilled but for the page colour, and
@@ -897,6 +966,14 @@ impl eframe::App for Shell {
     /// the same moment, and it runs before the window is torn down rather than
     /// after.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // The window's place and zoom, kept for the next launch. Saved here
+        // and not as they change: a drag is a hundred frames of positions,
+        // and only the last one is wanted. A photograph keeps nothing.
+        if shot::path().is_none() {
+            if let Err(e) = self.settings.save() {
+                log::warn!("could not save the window's place: {e}");
+            }
+        }
         self.cancel.cancel();
         // The analyser stops between reports, never inside one. Its worker is
         // not the bridge's and nothing here waits for it — as in the analyser's
@@ -912,13 +989,24 @@ impl eframe::App for Shell {
     }
 }
 
-/// The two appearances, in the order the Settings panel offers them.
+/// The appearances, in the order the Settings panel offers them.
 ///
-/// **The names are `Palette::named`'s own**, so a settings file cannot leave the
-/// control promising an appearance the palette will not produce. Anything else
-/// in the file falls back to dark — see `Palette::named` — and the segmented
-/// control then shows Dark, which is what is actually on screen.
-pub(super) const THEMES: [&str; 2] = ["light", "dark"];
+/// **The first two are `Palette::named`'s own names**, so a settings file
+/// cannot leave the control promising an appearance the palette will not
+/// produce. Anything else in the file falls back to dark — see
+/// `Palette::named` — and the segmented control then shows Dark, which is
+/// what is actually on screen. `system` is resolved here, not there: it is a
+/// question for the window, which is the only thing that can ask Windows.
+pub(super) const THEMES: [&str; 3] = ["light", "dark", "system"];
+
+/// The palette for Windows' app mode. Dark when it cannot be told, which is
+/// the default appearance anyway.
+pub(super) fn system_palette(theme: Option<egui::Theme>) -> Palette {
+    match theme {
+        Some(egui::Theme::Light) => Palette::light(),
+        _ => Palette::dark(),
+    }
+}
 
 /// **Quitting mid-export cancels, and then waits.**
 ///

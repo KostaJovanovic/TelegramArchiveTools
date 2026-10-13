@@ -12,6 +12,8 @@ Keep your own copy of your Telegram conversations, and read them back.
 Forum supergroups come out as **one folder per topic**, each a complete archive
 in its own right. That's the part Telegram's own exporter won't do for you.
 
+![The Chats view, with a made-up account](docs/screenshots/chats.png)
+
 TelegramTools used to be two programs, Telegram Exporter and Telegram
 Analyser. They are one window and one exe now; see `TELEGRAMTOOLS.md` for how
 and why.
@@ -34,20 +36,36 @@ save.bat build          # → dist\TelegramTools.exe
 
 Launch the exe and press **Sign in** at the foot of the left rail. It asks for
 your API keys and phone, sends a code to Telegram, and remembers the session —
-you won't do this again.
+you won't do this again. **Sign out**, in the same place, ends the session at
+Telegram and deletes it from this computer; it is also how you switch
+accounts.
 
 The rail has four places:
 
 - **Chats** — tick the chats you want and press **Export** at the top right.
   **Reload** fetches the list again; **Count** asks how many messages each chat
-  holds, so the list can sort by size.
+  holds, so the list can sort by size. Right-click a chat to export just that
+  one.
 - **Activity** — what is running: the exports, the reports, and the log of
-  both. **Stop** works at any moment, and whatever was already written stays on
-  disk.
+  both, with the speed, the time left in the chat being read, and the time
+  so far. **Stop** works at any moment, and whatever was already written stays
+  on disk. If the window is in the background when a run ends, Windows shows a
+  notification.
 - **Library** — every export in your destination folder, one row per chat.
   **Make report**, **Open report**, **Read** a database in the window, or
-  **Show in folder**. Rows that need a report are ticked already.
+  **Show in folder**. Rows that need a report are ticked already. The search
+  box on the right looks inside the messages of every database.
 - **Settings** — every setting says what it does on the line under it.
+
+Reading a database shows deleted and edited messages, every earlier version,
+and the files it kept — **Save as…** writes one out, **Export as folder…**
+writes the whole chat back out in Desktop's format. Filter by sender, or type
+a day into **Go to date**.
+
+Keys: **Ctrl+1–4** switch views, **Ctrl+F** jumps to the filter, **Ctrl+A**
+ticks every chat shown, **Ctrl+E** exports, **F5** reloads, **Esc** clears
+the filter, and **Ctrl +/−/0** zoom. The window remembers its size, place and
+zoom.
 
 ## What you end up with
 
@@ -81,6 +99,7 @@ change:
 | | Default | |
 |---|---|---|
 | **Format** | Folder | Folder writes Desktop's folders; Database writes one accumulating file per chat. See below |
+| **From / Until** | blank | A folder export of only those days, both included |
 | **Size limit** | 20 MB | Anything bigger is skipped. `0` means no limit — a busy group can run to tens of gigabytes |
 | **Download media** | on | Turn off for text-only pages, which is enormously faster |
 | **Where exports go** | `Exports/` | Point it anywhere. The Library follows it |
@@ -125,7 +144,9 @@ created, though that offers nothing on a FAT32 or exFAT drive. (It was called
 `TelegramExporterData/`; the first run renames it.)
 
 If you're ever unsure, revoke the session from Telegram → **Settings →
-Devices**.
+Devices**. Reporting a problem? Settings → **Copy diagnostics** gives you the
+version and settings with the credentials taken out; see `SECURITY.md` for
+anything security-related.
 
 And exports — and reports — are other people's messages as much as yours.
 Store them like it.
@@ -147,8 +168,10 @@ The same exe takes commands. No arguments open the window.
 
 ```powershell
 TelegramTools login
+TelegramTools logout
 TelegramTools chats
 TelegramTools export "Dev Team"
+TelegramTools export --since 2026-01-01 "Dev Team"   # only from that day on
 TelegramTools export --db "Dev Team"          # database instead of folders
 TelegramTools export --db --full "Dev Team"   # walk the whole history
 

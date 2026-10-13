@@ -69,6 +69,8 @@ pub struct Library {
     /// A search, pressed this frame, and the folder it is of. The shell takes
     /// it and shows the results in the reader, as it takes a row's Read.
     pub(super) search_all: Option<(String, String)>,
+    /// Ctrl+F was pressed: the filter box takes the focus when next drawn.
+    pub(super) focus_filter: bool,
 }
 
 /// What a click on one of a row's own actions asked for.
@@ -141,6 +143,13 @@ impl Library {
     fn rescan(&mut self, ctx: &egui::Context) {
         let todo = self.state.rescan();
         self.count(todo, ctx);
+    }
+
+    /// F5: read the folder again. Not mid-run — the rows are the run's.
+    pub(super) fn reload(&mut self, ctx: &egui::Context) {
+        if !self.state.running {
+            self.rescan(ctx);
+        }
     }
 
     fn set_path(&mut self, path: &Path, ctx: &egui::Context) {
@@ -411,11 +420,14 @@ impl Library {
     fn filter_row(&mut self, ui: &mut Ui, p: &Palette) {
         row(ui, |ui| {
             ui.spacing_mut().item_spacing.x = space::STEP;
-            ui.add(
+            let filter = ui.add(
                 field(&mut self.state.filter, p)
-                    .hint_text("Filter exports…")
+                    .hint_text("Filter exports…  Ctrl+F")
                     .desired_width(FILTER_W),
             );
+            if std::mem::take(&mut self.focus_filter) {
+                filter.request_focus();
+            }
             ui.label(meta("Show", p));
             egui::ComboBox::from_id_salt("library-show")
                 .selected_text(text(self.state.show.label(), p))
@@ -589,6 +601,41 @@ impl Library {
                     ui.add(egui::Label::new(meta(entry.caption(now), p)).truncate());
                 });
             });
+        });
+
+        // The row's actions again, where a right-click looks, and the path.
+        response.context_menu(|ui| {
+            if let Some(chat_id) = entry.chat_id {
+                if ui.button("Read").clicked() {
+                    act = Some(RowAction::Read(Read {
+                        path: path.clone(),
+                        chat_id,
+                        title: entry.title.clone(),
+                    }));
+                    ui.close();
+                }
+            }
+            if let Some(report) = entry.report() {
+                if ui.button("Open report").clicked() {
+                    act = Some(RowAction::Open(report.to_path_buf()));
+                    ui.close();
+                }
+            }
+            if ui
+                .add_enabled(!self.state.running, egui::Button::new("Make report"))
+                .clicked()
+            {
+                act = Some(RowAction::Report(path.clone()));
+                ui.close();
+            }
+            if ui.button("Show in folder").clicked() {
+                act = Some(RowAction::Reveal(entry.target.home()));
+                ui.close();
+            }
+            if ui.button("Copy path").clicked() {
+                ui.ctx().copy_text(path.display().to_string());
+                ui.close();
+            }
         });
 
         match act {

@@ -37,7 +37,9 @@ impl Pace {
     /// The run ended. Returns how long it took.
     pub fn stop(&mut self, now: Instant) -> Option<Duration> {
         self.samples.clear();
-        self.started.take().map(|s| now.saturating_duration_since(s))
+        self.started
+            .take()
+            .map(|s| now.saturating_duration_since(s))
     }
 
     pub fn elapsed(&self, now: Instant) -> Option<Duration> {
@@ -57,9 +59,7 @@ impl Pace {
         self.samples.push_back((now, read));
         // Keep one sample older than the window, so the span reaching back
         // to it is never shorter than the window once the run is that old.
-        while self.samples.len() > 2
-            && now.saturating_duration_since(self.samples[1].0) > WINDOW
-        {
+        while self.samples.len() > 2 && now.saturating_duration_since(self.samples[1].0) > WINDOW {
             self.samples.pop_front();
         }
     }

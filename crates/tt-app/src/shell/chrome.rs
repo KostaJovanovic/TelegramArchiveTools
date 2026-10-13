@@ -218,7 +218,10 @@ impl Shell {
             let enabled = (paused || !self.selected.is_empty()) && !self.counting;
             // **The one red in the window.** This is the button the
             // application exists for. See `components::button`.
-            if button(ui, &label, enabled, true, &p).clicked() {
+            if button(ui, &label, enabled, true, &p)
+                .on_hover_text("Ctrl+E")
+                .clicked()
+            {
                 if paused {
                     let picked = self.ticked_chats();
                     self.resume_queue(picked);
@@ -275,8 +278,12 @@ impl Shell {
             return;
         }
         self.settings.theme = name.into();
-        self.palette = Palette::named(&self.settings.theme);
-        self.theme_stale = true;
+        // System is resolved on the next frame, by `follow_system_theme`,
+        // which has the context to ask Windows with.
+        if name != "system" {
+            self.palette = Palette::named(&self.settings.theme);
+            self.theme_stale = true;
+        }
         self.commit_settings();
     }
 

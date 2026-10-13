@@ -564,6 +564,9 @@ impl Shell {
                     .hint_text(hint)
                     .desired_width(SEARCH_W),
             );
+            if std::mem::take(&mut self.focus_filter) {
+                typed.request_focus();
+            }
             // **Enter searches, typing does not.** A search reads every
             // message of the chat, and of every chat when widened; doing that
             // per keystroke would queue a scan per letter.
@@ -1122,9 +1125,8 @@ impl Shell {
         };
         self.status = format!("Saving {}…", media.name);
         let tx = self.bridge.sender();
-        self.bridge.spawn(async move {
-            crate::actions::viewer::save_media(db.path, media, to, tx).await
-        });
+        self.bridge
+            .spawn(async move { crate::actions::viewer::save_media(db.path, media, to, tx).await });
     }
 
     // -- acting --------------------------------------------------------------
@@ -1376,8 +1378,8 @@ impl Shell {
                 // **Not under a search of every database** — the Library's
                 // search box comes here with no chat open, and opening one
                 // would put a chat over the results that were asked for.
-                let searching_all = self.viewer.showing_found
-                    || matches!(self.viewer.asked, Some((_, None)));
+                let searching_all =
+                    self.viewer.showing_found || matches!(self.viewer.asked, Some((_, None)));
                 if self.viewer.open.is_none() && !searching_all {
                     let wanted = super::shot::database().and_then(|want| {
                         self.viewer
@@ -1429,8 +1431,7 @@ impl Shell {
             )
         });
         v.senders = ViewerState::senders_of(&rows);
-        if v
-            .sender
+        if v.sender
             .as_ref()
             .is_some_and(|s| !v.senders.iter().any(|x| &x.0 == s))
         {

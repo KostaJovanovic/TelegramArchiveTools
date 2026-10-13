@@ -282,9 +282,22 @@ pub struct Settings {
     /// ignored, so a file written by another build still opens.
     pub folded_categories: Vec<String>,
 
-    /// "dark" or "light". Anything else falls back to the default, so an edited
-    /// settings file cannot leave the app unreadable.
+    /// "dark", "light", or "system" to follow Windows' own app mode. Anything
+    /// else falls back to dark, so an edited settings file cannot leave the
+    /// app unreadable.
     pub theme: String,
+
+    /// The window's zoom, egui's `zoom_factor`: Ctrl+plus and Ctrl+minus
+    /// change it, and it is kept so the next launch opens at the same size.
+    /// Held between 0.5 and 2.0 when read.
+    pub zoom: f32,
+
+    /// Where the window was when it last closed, `[x, y, width, height]` in
+    /// points, or empty for the default. Kept here rather than by eframe's
+    /// own persistence, which writes into AppData — and nothing of this app
+    /// lives anywhere but beside the executable.
+    pub window: Vec<f32>,
+    pub window_maximized: bool,
 
     /// Named sets of chats, so a selection built up over six hundred rows is
     /// made once and recalled with a click. By chat id, like the ticks, so a
@@ -389,6 +402,9 @@ impl Default for Settings {
             group_by_type: true,
             folded_categories: Vec::new(),
             theme: "dark".into(),
+            zoom: 1.0,
+            window: Vec::new(),
+            window_maximized: false,
             saved_selections: Vec::new(),
         }
     }
@@ -504,8 +520,24 @@ impl Settings {
         // `base` is now known to deserialise — every step preserved that — so
         // the fallback here is unreachable rather than load-bearing.
         let mut out: Self = serde_json::from_value(Value::Object(base)).unwrap_or(defaults);
-        if out.theme != "dark" && out.theme != "light" {
+        if !["dark", "light", "system"].contains(&out.theme.as_str()) {
             out.theme = "dark".into();
+        }
+        // A zoom that is not a number, or too small to read, or too large for
+        // the window's own floor, is the default — the window has to be usable
+        // to change it back.
+        out.zoom = if out.zoom.is_finite() {
+            out.zoom.clamp(0.5, 2.0)
+        } else {
+            1.0
+        };
+        // Four finite numbers and a positive size, or nothing.
+        if out.window.len() != 4
+            || out.window.iter().any(|v| !v.is_finite())
+            || out.window[2] <= 0.0
+            || out.window[3] <= 0.0
+        {
+            out.window.clear();
         }
         if ![USERPICS_OFF, USERPICS_CURRENT, USERPICS_HISTORY]
             .contains(&out.profile_photos.as_str())
@@ -623,10 +655,13 @@ fn same_shape(a: &Value, b: &Value) -> bool {
         (Value::Bool(_), _) | (_, Value::Bool(_)) => false,
         (Value::Number(_), Value::Number(_)) => true,
         (Value::String(_), Value::String(_)) => true,
-        (Value::Array(_), Value::Array(items)) => {
-            // Every settings array is a list of strings.
-            items.iter().all(Value::is_string)
-        }
+        // **Any array, and the element types are serde's to judge** — the
+        // whole-struct deserialisation in `load_from_str` refuses `[1]` for
+        // `media_kinds` on its own. This used to accept only lists of
+        // strings, on the claim that every settings array was one; then
+        // `saved_selections` (a list of objects) arrived, and every saved
+        // selection was dropped on the next launch without a word.
+        (Value::Array(_), Value::Array(_)) => true,
         (Value::Object(_), Value::Object(_)) => true,
         (Value::Null, Value::Null) => true,
         _ => false,
@@ -694,6 +729,41 @@ mod tests {
         assert!(e.contains("From"), "{e}");
         let e = ranged("", "2026-02-30").date_range().unwrap_err();
         assert!(e.contains("Until"), "{e}");
+    }
+
+    #[test]
+    fn saved_selections_survive_a_save_and_a_load() {
+        let s = Settings {
+            saved_selections: vec![SavedSelection {
+                name: "work".into(),
+                chats: vec![1, 2],
+            }],
+            ..Settings::default()
+        };
+        let raw = serde_json::to_string(&s).unwrap();
+        assert_eq!(
+            Settings::load_from_str(&raw).saved_selections,
+            s.saved_selections
+        );
+        // And an array of the wrong things is still refused, by serde.
+        let bad = Settings::load_from_str(r#"{"media_kinds": [1, 2]}"#);
+        assert_eq!(bad.media_kinds, Settings::default().media_kinds);
+    }
+
+    #[test]
+    fn a_zoom_or_a_window_that_would_leave_the_app_unusable_is_dropped() {
+        let s = Settings::load_from_str(r#"{"zoom": 9.0, "window": [10, 20, 0, 600]}"#);
+        assert_eq!(s.zoom, 2.0);
+        assert!(s.window.is_empty(), "a zero width is not a window");
+        let s = Settings::load_from_str(r#"{"zoom": 0.1, "window": [1, 2, 3]}"#);
+        assert_eq!(s.zoom, 0.5);
+        assert!(s.window.is_empty());
+        let s = Settings::load_from_str(r#"{"window": [-1920, 0, 1200, 800]}"#);
+        assert_eq!(s.window, vec![-1920.0, 0.0, 1200.0, 800.0]);
+        assert_eq!(
+            Settings::load_from_str(r#"{"theme": "system"}"#).theme,
+            "system"
+        );
     }
 
     #[test]

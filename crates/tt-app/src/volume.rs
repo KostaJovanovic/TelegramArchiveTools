@@ -67,7 +67,12 @@ pub fn warnings(v: &Volume, settings: &Settings) -> Vec<String> {
             ));
         }
     }
-    match v.file_system.as_deref().map(str::to_ascii_uppercase).as_deref() {
+    match v
+        .file_system
+        .as_deref()
+        .map(str::to_ascii_uppercase)
+        .as_deref()
+    {
         Some("FAT32" | "FAT") => out.push(format!(
             "{drive} is FAT32, which cannot hold a file over 4 GB — larger \
              files will fail{}.",
@@ -146,8 +151,7 @@ mod imp {
 
         let mut root = [0u16; 261];
         // SAFETY: the buffer's length is what is passed.
-        if unsafe { GetVolumePathNameW(path.as_ptr(), root.as_mut_ptr(), root.len() as u32) } == 0
-        {
+        if unsafe { GetVolumePathNameW(path.as_ptr(), root.as_mut_ptr(), root.len() as u32) } == 0 {
             return v;
         }
         v.root = Some(string(&root));
@@ -226,7 +230,9 @@ mod tests {
 
     #[test]
     fn a_destination_not_made_yet_is_asked_about_its_nearest_parent() {
-        let dir = std::env::temp_dir().join("tt-volume-not-there").join("deeper");
+        let dir = std::env::temp_dir()
+            .join("tt-volume-not-there")
+            .join("deeper");
         let v = inspect(&dir);
         if cfg!(windows) {
             assert!(v.root.is_some() && v.free.is_some(), "{v:?}");

@@ -255,9 +255,31 @@ impl Shell {
                                 removed = Some(job.chat_id);
                             }
                         });
-                        if job.root.is_some() && r.response().clicked() {
+                        let response = r.response();
+                        if job.root.is_some() && response.clicked() {
                             opened = Some(job.chat_id);
                         }
+                        // The same three things, where a right-click looks.
+                        response.context_menu(|ui| {
+                            if ui
+                                .add_enabled(job.root.is_some(), egui::Button::new("Open folder"))
+                                .clicked()
+                            {
+                                opened = Some(job.chat_id);
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(live, egui::Button::new("Remove from queue"))
+                                .clicked()
+                            {
+                                removed = Some(job.chat_id);
+                                ui.close();
+                            }
+                            if ui.button("Copy title").clicked() {
+                                ui.ctx().copy_text(job.title.clone());
+                                ui.close();
+                            }
+                        });
                     });
                 });
         });

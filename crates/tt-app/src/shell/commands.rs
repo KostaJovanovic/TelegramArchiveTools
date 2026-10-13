@@ -239,6 +239,23 @@ impl Shell {
         self.run_chats(picked);
     }
 
+    /// Export these chats, whatever is ticked — a row's right-click. The same
+    /// checks as Export, and the same run: added to one going, or a new one.
+    pub(super) fn export_these(&mut self, chats: Vec<ChatInfo>) {
+        self.commit_settings();
+        if !self.settings.writes_anything() {
+            self.journal.warn(
+                "Nothing to write. Tick HTML pages or result.json in Settings, or choose Database.",
+            );
+            self.status = "No output format selected".into();
+            return;
+        }
+        if self.range_refused() {
+            return;
+        }
+        self.run_chats(chats);
+    }
+
     /// A date range that does not parse stops the run here, in the window,
     /// rather than failing every chat of the queue one by one with the same
     /// sentence.
@@ -310,7 +327,13 @@ impl Shell {
         // and a month-long export of a ten-year chat otherwise reads as a
         // broken one.
         if let Ok(Some(_)) = self.settings.date_range() {
-            let open = |d: &str, or: &'static str| if d.is_empty() { or.to_string() } else { d.to_string() };
+            let open = |d: &str, or: &'static str| {
+                if d.is_empty() {
+                    or.to_string()
+                } else {
+                    d.to_string()
+                }
+            };
             self.journal.push(format!(
                 "Only messages from {} to {} (Settings → From / Until)",
                 open(&self.settings.date_from, "the beginning"),

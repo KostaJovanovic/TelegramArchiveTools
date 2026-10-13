@@ -22,6 +22,7 @@
 mod actions;
 mod bridge;
 mod cli;
+mod diagnostics;
 mod instance;
 mod journal;
 mod list;
@@ -225,21 +226,34 @@ fn main() {
     // `TGX_SHOT_SIZE=WxH` opens the window at that size, so `tools/shot.ps1`
     // can photograph the narrow window — which is where layouts break — and
     // not only the default one. Clamped by the floor below like a drag would be.
-    let size = std::env::var("TGX_SHOT_SIZE")
-        .ok()
-        .and_then(|s| {
-            let (a, b) = s.split_once('x')?;
-            Some([a.trim().parse().ok()?, b.trim().parse().ok()?])
-        })
-        .unwrap_or([w + 320.0, h + 160.0]);
-    let viewport = eframe::egui::ViewportBuilder::default()
+    let shot_size = std::env::var("TGX_SHOT_SIZE").ok().and_then(|s| {
+        let (a, b) = s.split_once('x')?;
+        Some([a.trim().parse().ok()?, b.trim().parse().ok()?])
+    });
+    let settings = tgx_tg::config::Settings::load();
+    let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title(TITLE)
-        .with_inner_size(size)
+        .with_inner_size(shot_size.unwrap_or([w + 320.0, h + 160.0]))
         // **The floor the layout was measured at.** Without it the window
         // drags below 900x620, where the queue's Chat column — the only
         // thing naming which row is which — is squeezed to 11px, i.e. gone,
         // while the count columns beside it keep their full width.
         .with_min_inner_size([w, h]);
+    // **Where it was last time** — unless a photograph asked for a size, which
+    // has to be the same every time. A position on a monitor that is no
+    // longer there is dropped, or the window would open somewhere nobody can
+    // reach; the size is kept either way.
+    if shot_size.is_none() {
+        if let [x, y, width, height] = settings.window[..] {
+            if on_screen(x, y) {
+                viewport = viewport.with_position([x, y]);
+            }
+            viewport = viewport.with_inner_size([width.max(w), height.max(h)]);
+        }
+        if settings.window_maximized {
+            viewport = viewport.with_maximized(true);
+        }
+    }
     // **eframe stamps its own logo on the window** when given no icon, and the
     // taskbar draws the window's icon, not the exe's — so the one embedded by
     // `build.rs` showed in Explorer and nowhere the app was actually running.
@@ -264,17 +278,45 @@ fn main() {
             // The design, before the first frame draws anything in egui's own
             // rounded, shadowed defaults. `Shell::update` reinstalls it when the
             // appearance changes and not otherwise — see `theme_stale`.
-            let settings = tgx_tg::config::Settings::load();
             tgx_ui::theme::install(
                 &cc.egui_ctx,
                 &tgx_ui::tokens::Palette::named(&settings.theme),
             );
-            Ok(Box::new(shell::Shell::new()))
+            Ok(Box::new(shell::Shell::with(settings)))
         }),
     );
     if let Err(e) = started {
         report_startup_failure(&format!("could not open a window: {e}"));
     }
+}
+
+/// Is a window's top-left corner, in logical points, somewhere on the
+/// desktop as it is now? Asked of the whole virtual screen, which is in
+/// physical pixels — at a display scale above 100% a logical point is never
+/// further out than its pixel, so this errs towards keeping the position.
+#[cfg(windows)]
+fn on_screen(x: f32, y: f32) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
+    };
+    // SAFETY: plain metric queries.
+    let (left, top, width, height) = unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN) as f32,
+            GetSystemMetrics(SM_YVIRTUALSCREEN) as f32,
+            GetSystemMetrics(SM_CXVIRTUALSCREEN) as f32,
+            GetSystemMetrics(SM_CYVIRTUALSCREEN) as f32,
+        )
+    };
+    // The title bar has to be reachable, so a corner just past the far edge
+    // does not count.
+    x >= left - 8.0 && y >= top - 8.0 && x < left + width - 100.0 && y < top + height - 50.0
+}
+
+#[cfg(not(windows))]
+fn on_screen(_x: f32, _y: f32) -> bool {
+    true
 }
 
 /// The largest PNG-encoded image in an `.ico`, decoded for the window.

@@ -1278,19 +1278,74 @@ fn the_librarys_search_shows_results_and_no_chat_is_opened_over_them() {
     assert!(s.viewer.open.is_none());
 }
 
+#[test]
+fn shortcuts_do_what_their_buttons_do_and_only_where_those_are() {
+    use super::keys::Shortcut;
+    let ctx = egui::Context::default();
+    let mut s = shell_with(vec![chat(1, "news", None), chat(2, "other", None)]);
+
+    s.set_filter("news".into());
+    s.search = "news".into();
+    s.shortcut(Shortcut::TickAll, &ctx);
+    assert_eq!(s.selected.len(), 1, "only the chats the filter shows");
+    s.shortcut(Shortcut::ClearFilter, &ctx);
+    assert!(s.search.is_empty() && s.view.filter.is_empty());
+
+    s.shortcut(Shortcut::Go(View::Library), &ctx);
+    assert_eq!(s.body, View::Library);
+    s.shortcut(Shortcut::TickAll, &ctx);
+    assert_eq!(s.selected.len(), 1, "Ctrl+A ticks chats on Chats only");
+    s.shortcut(Shortcut::Find, &ctx);
+    assert!(s.library.focus_filter && !s.focus_filter);
+}
+
+#[test]
+fn reset_takes_two_presses_and_keeps_the_sign_in_the_folder_and_the_selections() {
+    let mut s = Shell::headless();
+    s.settings.api_id = 7;
+    s.settings.api_hash = "hash".into();
+    s.settings.output_dir = r"X:\exports".into();
+    s.settings.saved_selections = vec![tgx_tg::config::SavedSelection {
+        name: "work".into(),
+        chats: vec![1],
+    }];
+    s.settings.page_size = 77;
+    s.settings.theme = "light".into();
+    s.form.sync(&s.settings);
+
+    s.reset_settings();
+    assert_eq!(s.settings.page_size, 77, "the first press only arms");
+    s.reset_settings();
+    assert_eq!(s.settings.page_size, 1000);
+    assert_eq!(s.form.page_size, "1000", "the field shows what is stored");
+    assert_eq!(s.settings.theme, "dark");
+    assert_eq!(
+        (s.settings.api_id, s.settings.api_hash.as_str()),
+        (7, "hash")
+    );
+    assert_eq!(s.settings.output_dir, r"X:\exports");
+    assert_eq!(s.settings.saved_selections.len(), 1);
+}
+
 // Only the first press is driven here: the second spawns the real sign-out,
 // which would revoke whatever session sits in the workspace's data folder.
 #[test]
 fn sign_out_takes_two_presses_and_not_during_a_run() {
     let mut s = shell_with(vec![chat(1, "a", None)]);
     s.sign_out();
-    assert!(s.sign_out_armed && !s.signing_out, "the first press only arms");
+    assert!(
+        s.sign_out_armed && !s.signing_out,
+        "the first press only arms"
+    );
     s.show(View::Settings);
     assert!(!s.sign_out_armed, "going elsewhere disarms it");
 
     s.exporting = true;
     s.sign_out();
-    assert!(!s.sign_out_armed, "refused while an export holds the connection");
+    assert!(
+        !s.sign_out_armed,
+        "refused while an export holds the connection"
+    );
 }
 
 #[test]

@@ -118,11 +118,14 @@ impl Shell {
         row(ui, |ui| {
             ui.spacing_mut().item_spacing.x = space::STEP;
             let typed_before = self.search.clone();
-            ui.add(
+            let filter = ui.add(
                 field(&mut self.search, &p)
-                    .hint_text("Filter chats…")
+                    .hint_text("Filter chats…  Ctrl+F")
                     .desired_width(FILTER_W),
             );
+            if std::mem::take(&mut self.focus_filter) {
+                filter.request_focus();
+            }
             // Read from the field, never typed into a mirror of it: a second
             // copy of the same string is how the empty state ends up quoting
             // something other than what is in the box.
@@ -385,6 +388,39 @@ impl Shell {
         // they survive re-sorting, regrouping and filtering.
         if response.clicked() && !self.selected.remove(&chat.id) {
             self.selected.insert(chat.id);
+        }
+        // **Right-click: this chat alone**, without touching the ticks — a
+        // selection built over six hundred rows is not the price of
+        // exporting one more.
+        let can_export = self.signed_in && !self.counting;
+        let mut export_one = false;
+        response.context_menu(|ui| {
+            let verb = if self.exporting {
+                "Add this chat to the queue"
+            } else {
+                "Export this chat"
+            };
+            if ui
+                .add_enabled(can_export, egui::Button::new(verb))
+                .clicked()
+            {
+                export_one = true;
+                ui.close();
+            }
+            let label = if ticked { "Untick" } else { "Tick" };
+            if ui.button(label).clicked() {
+                if !self.selected.remove(&chat.id) {
+                    self.selected.insert(chat.id);
+                }
+                ui.close();
+            }
+            if ui.button("Copy title").clicked() {
+                ui.ctx().copy_text(chat.title.clone());
+                ui.close();
+            }
+        });
+        if export_one {
+            self.export_these(vec![chat.clone()]);
         }
     }
 

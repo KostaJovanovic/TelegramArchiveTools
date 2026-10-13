@@ -34,10 +34,11 @@
 //! unreliable. An old `settings.json` naming it still loads, because unknown
 //! keys are dropped per field.
 
-use super::{Shell, THEMES};
+use super::{list, Shell, THEMES};
 use eframe::egui::{self, Ui};
 use tgx_ui::components::{
-    action, block, button, eyebrow, field, help, meta, row, segmented, setting_row, text, tick_box,
+    action, block, button, eyebrow, field, figure, help, meta, row, segmented, setting_row, text,
+    tick_box,
 };
 use tgx_ui::tokens::{space, Palette};
 
@@ -459,20 +460,33 @@ impl Shell {
         // The stored name decides which cell is filled, so an edited settings
         // file naming neither shows Dark — which is what `Palette::named` will
         // actually have produced.
-        let at = usize::from(self.settings.theme != "light");
+        let at = theme_index(&self.settings.theme);
         let mut chosen = None;
         setting_row(
             ui,
             "Theme",
-            "Kept with the rest of the settings.",
+            "System follows Windows' own light or dark mode.",
             &p,
             |ui| {
-                chosen = pair(ui, ["Light", "Dark"], at, &p);
+                // Drawn right to left, so given in reverse and turned back.
+                chosen = segmented(ui, &["System", "Dark", "Light"], 2 - at, &p).map(|i| 2 - i);
             },
         );
         if let Some(i) = chosen {
             self.set_theme(THEMES[i]);
         }
+        setting_row(
+            ui,
+            "Zoom",
+            "Ctrl+plus and Ctrl+minus; Ctrl+0 is 100%. Kept between launches.",
+            &p,
+            |ui| {
+                ui.label(figure(
+                    format!("{:.0}%", ui.ctx().zoom_factor() * 100.0),
+                    &p,
+                ));
+            },
+        );
     }
 
     /// The dial and the two folder checks: rarely touched, and each one a
@@ -516,6 +530,122 @@ impl Shell {
         if dupes {
             self.find_dupes();
         }
+
+        // **Where to look when something goes wrong**, and the way to hand it
+        // to someone else without handing them the account.
+        let (mut log, mut data, mut copy) = (false, false, false);
+        setting_row(
+            ui,
+            "Log and data folder",
+            "tgx.log holds every run's account of itself; never message text.",
+            &p,
+            |ui| {
+                data = button(ui, "Data folder", true, false, &p).clicked();
+                log = button(ui, "Log", true, false, &p).clicked();
+            },
+        );
+        setting_row(
+            ui,
+            "Copy diagnostics",
+            "For a bug report: version, Windows, and settings without credentials.",
+            &p,
+            |ui| {
+                copy = button(ui, "Copy", true, false, &p)
+                    .on_hover_text(
+                        "Paths can include your Windows user name — look it over before \
+                         posting it.",
+                    )
+                    .clicked();
+            },
+        );
+        if log {
+            self.open_or_warn(&tgx_tg::logging::log_file());
+        }
+        if data {
+            self.open_or_warn(&tgx_tg::config::data_dir());
+        }
+        if copy {
+            ui.ctx()
+                .copy_text(crate::diagnostics::report(&self.settings));
+            self.status = "Diagnostics copied — no credentials in them".into();
+        }
+
+        let mut reset = false;
+        let label = if self.reset_armed {
+            "Press again"
+        } else {
+            "Reset"
+        };
+        setting_row(
+            ui,
+            "Reset settings",
+            "Everything here back to its default. Keeps the sign-in and the folder.",
+            &p,
+            |ui| reset = button(ui, label, !self.exporting, false, &p).clicked(),
+        );
+        if reset {
+            self.reset_settings();
+        }
+        row(ui, |ui| {
+            ui.label(meta(
+                "Keys: Ctrl+1–4 views · Ctrl+F filter · Ctrl+A tick all shown · \
+                 Ctrl+E export · F5 reload · Esc clear filter",
+                &p,
+            ));
+        });
+        row(ui, |ui| {
+            ui.label(meta(
+                format!("TelegramTools {}", env!("CARGO_PKG_VERSION")),
+                &p,
+            ));
+        });
+    }
+
+    fn open_or_warn(&mut self, path: &std::path::Path) {
+        if let Err(e) = crate::actions::open_path(path) {
+            self.journal.warn(e);
+            self.log_copied = false;
+        }
+    }
+
+    /// Reset settings, on the second press: every setting to its default
+    /// **except** what is not a preference — the api_id, api_hash and phone
+    /// the sign-in needs, the destination (the Library and every database
+    /// path hang off it), and the saved selections, which are work.
+    pub(super) fn reset_settings(&mut self) {
+        if self.exporting {
+            return;
+        }
+        if !self.reset_armed {
+            self.reset_armed = true;
+            return;
+        }
+        self.reset_armed = false;
+        let old = std::mem::take(&mut self.settings);
+        self.settings = tgx_tg::config::Settings {
+            api_id: old.api_id,
+            api_hash: old.api_hash,
+            phone: old.phone,
+            output_dir: old.output_dir,
+            saved_selections: old.saved_selections,
+            window: old.window,
+            window_maximized: old.window_maximized,
+            ..Default::default()
+        };
+        // The fields first: `commit_settings` reads them back, and the old
+        // text in them would undo the reset.
+        self.form.sync(&self.settings);
+        self.view.sort = list::SortMode::from_key(&self.settings.sort_mode);
+        self.view.grouped = self.settings.group_by_type;
+        self.view.folded.clear();
+        self.palette = Palette::named(&self.settings.theme);
+        self.theme_stale = true;
+        self.zoom_stale = true;
+        self.rebuild_rows();
+        self.arm_schedule(std::time::Instant::now());
+        self.commit_settings();
+        self.status = "Settings reset to their defaults".into();
+        self.journal.push(self.status.clone());
     }
 
     /// **From and Until: a folder export of only those days.** Folder mode
@@ -662,6 +792,12 @@ fn section(ui: &mut Ui, heading: &str, p: &Palette) {
     ui.add_space(space::TIGHT);
 }
 
+/// Which of [`THEMES`] a stored name is. Anything unknown is Dark, which is
+/// what `Palette::named` will have put on screen for it.
+fn theme_index(name: &str) -> usize {
+    THEMES.iter().position(|t| *t == name).unwrap_or(1)
+}
+
 fn extra(s: &tgx_tg::config::Settings, key: &str) -> bool {
     match key {
         "full_reactions" => s.full_reactions,
@@ -791,11 +927,12 @@ mod tests {
         // settings file naming something else must fill the Dark cell — a strip
         // showing Light over a dark window is worse than no strip.
         for (name, expect) in [("light", 0), ("dark", 1), ("chartreuse", 1)] {
-            assert_eq!(usize::from(name != "light"), expect, "{name}");
+            assert_eq!(theme_index(name), expect, "{name}");
             assert_eq!(
-                Palette::named(THEMES[usize::from(name != "light")]),
+                Palette::named(THEMES[theme_index(name)]),
                 Palette::named(name)
             );
         }
+        assert_eq!(theme_index("system"), 2);
     }
 }
