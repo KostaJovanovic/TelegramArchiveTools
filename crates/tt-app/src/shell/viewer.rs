@@ -139,6 +139,15 @@ pub(super) struct ViewerState {
     pub(super) topic: Option<i64>,
     pub(super) topic_names: HashMap<i64, String>,
 
+    /// Everyone who wrote in the open chat, `(from_id, name, messages)`, most
+    /// messages first — what the sender picker offers. By id, because two
+    /// people can share a display name.
+    pub(super) senders: Vec<(String, String, usize)>,
+    /// The one sender shown, `None` for everyone.
+    pub(super) sender: Option<String>,
+    /// The Go to date box's buffer, `YYYY-MM-DD`.
+    pub(super) go_to: String,
+
     /// What the list draws — day separators and messages in runs — and, for
     /// each entry of `shown`, which item it is.
     pub(super) items: Vec<bubbles::Item>,
@@ -178,10 +187,13 @@ impl ViewerState {
     fn rebuild_shown(&mut self) {
         let filter = self.filter;
         let topic = self.topic;
+        let sender = self.sender.as_deref();
         self.shown = (0..self.rows.len())
             .filter(|&i| {
                 let r = &self.rows[i];
-                filter.keeps(r) && topic.is_none_or(|t| r.topic_id == t)
+                filter.keeps(r)
+                    && topic.is_none_or(|t| r.topic_id == t)
+                    && sender.is_none_or(|s| r.from_id == s)
             })
             .collect();
         let (items, item_of) = bubbles::build(&self.rows, &self.shown);
@@ -201,6 +213,38 @@ impl ViewerState {
         self.hit_set = hits.iter().copied().collect();
         self.hits = hits;
         self.hit_at = None;
+    }
+
+    /// Who wrote in `rows`, most messages first; a tie goes by name.
+    fn senders_of(rows: &[Row]) -> Vec<(String, String, usize)> {
+        let mut by_id: HashMap<&str, (&str, usize)> = HashMap::new();
+        for r in rows.iter().filter(|r| !r.from_id.is_empty()) {
+            let entry = by_id.entry(&r.from_id).or_insert((&r.from, 0));
+            entry.1 += 1;
+        }
+        let mut out: Vec<(String, String, usize)> = by_id
+            .into_iter()
+            .map(|(id, (name, n))| {
+                let name = if name.is_empty() { id } else { name };
+                (id.to_string(), name.to_string(), n)
+            })
+            .collect();
+        out.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
+        out
+    }
+
+    /// The first message shown on or after `day` (`YYYY-MM-DD`), as an index
+    /// into `shown` — or the last one, when the chat ends before that day.
+    fn first_on_or_after(&self, day: &str) -> Option<usize> {
+        if self.shown.is_empty() {
+            return None;
+        }
+        // `day` sorts as text because it is zero-padded ISO, and `shown` is
+        // in date order because the rows are.
+        let at = self
+            .shown
+            .partition_point(|&i| self.rows[i].day.as_str() < day);
+        Some(at.min(self.shown.len() - 1))
     }
 
     pub(super) fn is_open(&self, path: &std::path::Path, chat_id: i64) -> bool {
@@ -284,6 +328,8 @@ impl Shell {
         let p = self.palette;
         let mut back = false;
         let mut topic = None;
+        let mut sender = None;
+        let mut go_to = false;
         let mut refresh = false;
         let mut unpack = false;
         row(ui, |ui| {
@@ -324,6 +370,52 @@ impl Shell {
                         }
                     });
             }
+            // **One person's messages**, most prolific first. Only where
+            // there is more than one person to choose between.
+            if v.senders.len() > 1 {
+                ui.label(meta("From", &p));
+                let current = match &v.sender {
+                    None => "Everyone".to_string(),
+                    Some(id) => v
+                        .senders
+                        .iter()
+                        .find(|s| &s.0 == id)
+                        .map(|s| s.1.clone())
+                        .unwrap_or_default(),
+                };
+                egui::ComboBox::from_id_salt("viewer-sender")
+                    .selected_text(text(current, &p))
+                    .width(150.0)
+                    .truncate()
+                    .height(320.0)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(v.sender.is_none(), text("Everyone", &p))
+                            .clicked()
+                        {
+                            sender = Some(None);
+                        }
+                        for (id, name, n) in &v.senders {
+                            let on = v.sender.as_ref() == Some(id);
+                            let label = format!("{name}  ({})", thousands(*n as i64));
+                            if ui.selectable_label(on, text(label, &p)).clicked() {
+                                sender = Some(Some(id.clone()));
+                            }
+                        }
+                    });
+            }
+            if v.open.is_some() {
+                let typed = ui.add(
+                    field(&mut self.viewer.go_to, &p)
+                        .hint_text("Go to date")
+                        .desired_width(96.0),
+                );
+                if typed.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    go_to = true;
+                }
+                typed.on_hover_text("A day like 2026-01-31, then Enter");
+            }
+            let v = &self.viewer;
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let can_unpack = v.open.is_some() && !v.unpacking;
                 if button(ui, "Export as folder…", can_unpack, false, &p)
@@ -344,6 +436,12 @@ impl Shell {
         }
         if let Some(t) = topic {
             self.viewer_set_topic(t);
+        }
+        if let Some(s) = sender {
+            self.viewer_set_sender(s);
+        }
+        if go_to {
+            self.viewer_go_to_date();
         }
         if refresh {
             self.viewer_list_databases();
@@ -368,6 +466,37 @@ impl Shell {
             .and_then(|id| self.viewer.index.get(&id))
         {
             self.viewer.scroll_to = self.viewer.shown.binary_search(at).ok();
+        }
+    }
+
+    /// Show one sender's messages, or everyone's with `None`. Like a topic,
+    /// the selection stays in view when it survives.
+    pub(super) fn viewer_set_sender(&mut self, sender: Option<String>) {
+        self.viewer.sender = sender;
+        self.viewer.rebuild_shown();
+        if let Some(at) = self
+            .viewer
+            .selected
+            .and_then(|id| self.viewer.index.get(&id))
+        {
+            self.viewer.scroll_to = self.viewer.shown.binary_search(at).ok();
+        }
+    }
+
+    /// Go to date: select the first message shown on or after the day typed.
+    /// A day that does not parse says so on the status line and goes nowhere.
+    pub(super) fn viewer_go_to_date(&mut self) {
+        let day = self.viewer.go_to.trim().to_string();
+        if chrono::NaiveDate::parse_from_str(&day, "%Y-%m-%d").is_err() {
+            self.status = format!("\"{day}\" is not a day like 2026-01-31");
+            return;
+        }
+        match self.viewer.first_on_or_after(&day) {
+            Some(i) => {
+                let id = self.viewer.rows[self.viewer.shown[i]].id;
+                self.viewer_select(id, true);
+            }
+            None => self.status = "Nothing shown to go to".into(),
         }
     }
 
@@ -873,6 +1002,8 @@ impl Shell {
         };
         let mut jump = None;
         let mut open = None;
+        let mut save = None;
+        let mut copy = false;
         egui::ScrollArea::vertical()
             .id_salt("viewer-detail-scroll")
             .auto_shrink([false, false])
@@ -905,6 +1036,11 @@ impl Shell {
                     ui.add_space(space::TIGHT);
                     if !d.text.is_empty() {
                         ui.add(egui::Label::new(text(&d.text, &p)).wrap());
+                        // To the clipboard and nowhere else: the text is
+                        // other people's, and nothing here logs it.
+                        if action(ui, meta("Copy text", &p), true).clicked() {
+                            copy = true;
+                        }
                     }
 
                     if !d.versions.is_empty() {
@@ -940,6 +1076,11 @@ impl Shell {
                                 if button(ui, "Open", stored, false, &p).clicked() {
                                     open = Some(m.clone());
                                 }
+                                // Open's copy is deleted when the window
+                                // closes; this one is kept where it is put.
+                                if button(ui, "Save as…", stored, false, &p).clicked() {
+                                    save = Some(m.clone());
+                                }
                                 let size = m
                                     .size
                                     .map(|s| crate::list::human_bytes(s.max(0) as u64))
@@ -958,6 +1099,32 @@ impl Shell {
         if let Some(m) = open {
             self.viewer_open_media(m);
         }
+        if let Some(m) = save {
+            self.viewer_save_media(m);
+        }
+        if copy {
+            ui.ctx().copy_text(d.text.clone());
+            self.status = "Message text copied".into();
+        }
+    }
+
+    /// Save as: ask where, then copy the stored file there.
+    fn viewer_save_media(&mut self, media: Media) {
+        let Some(db) = self.viewer.open.clone() else {
+            return;
+        };
+        let Some(to) = rfd::FileDialog::new()
+            .set_title("Save file as")
+            .set_file_name(&media.name)
+            .save_file()
+        else {
+            return;
+        };
+        self.status = format!("Saving {}…", media.name);
+        let tx = self.bridge.sender();
+        self.bridge.spawn(async move {
+            crate::actions::viewer::save_media(db.path, media, to, tx).await
+        });
     }
 
     // -- acting --------------------------------------------------------------
@@ -984,6 +1151,8 @@ impl Shell {
             v.topic = None;
             v.topics.clear();
             v.topic_names.clear();
+            v.sender = None;
+            v.senders.clear();
             v.pictures.clear();
             v.pic_used.clear();
             v.userpics.clear();
@@ -1043,13 +1212,21 @@ impl Shell {
         let row_topic = self.viewer.rows[at].topic_id;
         let hidden_by_filter = !self.viewer.filter.keeps(&self.viewer.rows[at]);
         let hidden_by_topic = self.viewer.topic.is_some_and(|t| t != row_topic);
+        let hidden_by_sender = self
+            .viewer
+            .sender
+            .as_ref()
+            .is_some_and(|s| *s != self.viewer.rows[at].from_id);
         if hidden_by_filter {
             self.viewer.filter = Filter::All;
         }
         if hidden_by_topic {
             self.viewer.topic = Some(row_topic);
         }
-        if hidden_by_filter || hidden_by_topic {
+        if hidden_by_sender {
+            self.viewer.sender = None;
+        }
+        if hidden_by_filter || hidden_by_topic || hidden_by_sender {
             self.viewer.rebuild_shown();
         }
         if scroll {
@@ -1085,8 +1262,24 @@ impl Shell {
         }
     }
 
-    /// Search this chat, or every database.
+    /// The Library's search box: search every database for `needle` and show
+    /// the results in the reader, with no chat needing to be open first.
+    ///
+    /// `dir` is the Library's folder, which may not be the destination: the
+    /// results have to be of the exports the user was looking at.
+    pub(super) fn search_everywhere(&mut self, needle: String, dir: String) {
+        self.viewer.query = needle;
+        self.viewer.everywhere = true;
+        self.viewer_search_in(dir);
+        self.show(View::Viewer);
+    }
+
+    /// Search this chat, or every database in the destination.
     pub(super) fn viewer_search(&mut self) {
+        self.viewer_search_in(self.settings.output_dir.clone());
+    }
+
+    fn viewer_search_in(&mut self, dir: String) {
         let needle = self.viewer.query.trim().to_string();
         if needle.is_empty() {
             return;
@@ -1102,7 +1295,6 @@ impl Shell {
         self.viewer.asked = Some((needle.clone(), scope.as_ref().map(|s| s.1)));
         self.status = "Searching…".into();
         let tx = self.bridge.sender();
-        let dir = self.settings.output_dir.clone();
         self.bridge
             .spawn(async move { crate::actions::viewer::search(dir, scope, needle, tx).await });
     }
@@ -1181,7 +1373,12 @@ impl Shell {
                 // **Open the first, when nothing is open yet.** A view whose
                 // first screen is an empty list under a picker is a question
                 // the user has to answer before they can see anything at all.
-                if self.viewer.open.is_none() {
+                // **Not under a search of every database** — the Library's
+                // search box comes here with no chat open, and opening one
+                // would put a chat over the results that were asked for.
+                let searching_all = self.viewer.showing_found
+                    || matches!(self.viewer.asked, Some((_, None)));
+                if self.viewer.open.is_none() && !searching_all {
                     let wanted = super::shot::database().and_then(|want| {
                         self.viewer
                             .databases
@@ -1231,6 +1428,14 @@ impl Shell {
                 r + usize::from(row.recovered),
             )
         });
+        v.senders = ViewerState::senders_of(&rows);
+        if v
+            .sender
+            .as_ref()
+            .is_some_and(|s| !v.senders.iter().any(|x| &x.0 == s))
+        {
+            v.sender = None;
+        }
         v.rows = rows;
         v.topic_names = topics.iter().map(|t| (t.id, t.title.clone())).collect();
         // A topic picked in this chat before a Refresh stays picked; one from

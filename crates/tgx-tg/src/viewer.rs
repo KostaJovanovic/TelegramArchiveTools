@@ -590,11 +590,21 @@ pub fn clear_temp() {
 /// overwrite each other — and so the file keeps its own name, which is what
 /// the program it opens in will show.
 pub async fn extract(path: &Path, media: &Media) -> Result<PathBuf, String> {
-    let (path, file_id, kind, name) = (
+    let dir = temp_dir().join(media.file_id.to_string());
+    let out = dir.join(safe_name(&media.name, media.file_id));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    save(path, media, &out).await?;
+    Ok(out)
+}
+
+/// Write one stored file to `to`, a path the user chose — the reader's Save
+/// as. Unlike [`extract`] it is not cleared on exit: keeping it is the point.
+pub async fn save(path: &Path, media: &Media, to: &Path) -> Result<(), String> {
+    let (path, file_id, kind, to) = (
         path.to_path_buf(),
         media.file_id,
         media.kind.clone(),
-        safe_name(&media.name, media.file_id),
+        to.to_path_buf(),
     );
     off_the_runtime(async move {
         let store = tgx_archive::Store::open_read(&path)
@@ -605,11 +615,7 @@ pub async fn extract(path: &Path, media: &Media) -> Result<PathBuf, String> {
             .await
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "the database holds no bytes for this file".to_string())?;
-        let dir = temp_dir().join(file_id.to_string());
-        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let out = dir.join(name);
-        std::fs::write(&out, bytes).map_err(|e| format!("{}: {e}", out.display()))?;
-        Ok(out)
+        std::fs::write(&to, bytes).map_err(|e| format!("{}: {e}", to.display()))
     })
     .await
 }

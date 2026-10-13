@@ -63,6 +63,12 @@ pub struct Library {
     /// Exports the exporter has finished, waiting for the analyser: the
     /// database file or the export folder of each. See [`Library::report_later`].
     waiting: Vec<PathBuf>,
+    /// The search box's buffer: text to find in every database's messages.
+    /// Not the filter beside it, which matches export titles.
+    search: String,
+    /// A search, pressed this frame, and the folder it is of. The shell takes
+    /// it and shows the results in the reader, as it takes a row's Read.
+    pub(super) search_all: Option<(String, String)>,
 }
 
 /// What a click on one of a row's own actions asked for.
@@ -428,6 +434,27 @@ impl Library {
                         ui.selectable_value(&mut self.state.sort, option, text(option.label(), p));
                     }
                 });
+            // **Inside the messages, not the titles**: every database here,
+            // earlier versions and deleted messages included. Enter searches —
+            // it reads every message, and a scan per keystroke would queue one
+            // per letter.
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let typed = ui.add(
+                    field(&mut self.search, p)
+                        .hint_text("Search messages in every database…")
+                        .desired_width(FILTER_W),
+                );
+                let needle = self.search.trim();
+                if typed.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    && !needle.is_empty()
+                {
+                    if let Some(dir) = self.state.folder() {
+                        self.search_all =
+                            Some((needle.to_string(), dir.to_string_lossy().into_owned()));
+                    }
+                }
+            });
         });
     }
 

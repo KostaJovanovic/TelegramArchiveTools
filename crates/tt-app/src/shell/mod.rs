@@ -866,6 +866,9 @@ impl eframe::App for Shell {
         if let Some(read) = self.library.read.take() {
             self.read(read);
         }
+        if let Some((needle, dir)) = self.library.search_all.take() {
+            self.search_everywhere(needle, dir);
+        }
 
         // Last, so it takes its clicks before anything under it does.
         self.login_panel(ctx);

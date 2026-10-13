@@ -213,6 +213,15 @@ pub async fn open_media(path: PathBuf, media: Media, tx: Events) {
     });
 }
 
+/// Save one stored file where the user chose. A file name in the status
+/// line, never its contents.
+pub async fn save_media(path: PathBuf, media: Media, to: PathBuf, tx: Events) {
+    let _ = tx.send(match viewer::save(&path, &media, &to).await {
+        Ok(()) => Event::Status(format!("Saved {}", to.display())),
+        Err(e) => Event::Warn(format!("Could not save {}: {e}", media.name)),
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

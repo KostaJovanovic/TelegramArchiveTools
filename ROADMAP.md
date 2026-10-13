@@ -126,9 +126,10 @@ Stated rather than hidden. None of these is a defect being ignored.
 - **A sync only backfills files on messages it re-reads.** Raising the size
   limit or switching a media kind back on fills in what the window covers;
   anything older needs "Re-read the whole history".
-- **No command writes a blob back out to disk.** `Store::blob` exists and
-  nothing calls it outside tests; getting a file out of a chat's `.sqlite`
-  today means a SQL client.
+- **Files come back out one at a time or a whole chat at a time.** The
+  reader's Save as writes one stored file where the user chooses, and Export
+  as folder writes the chat back out as Desktop's folders, files included.
+  There is no command-line equivalent of either.
 - **Two chats whose titles sanitise to one name get one plain file and one
   suffixed with the chat id.** `Store::holds_another_chat` decides it, so which
   chat gets the plain name is whichever exported first — stable afterwards, but

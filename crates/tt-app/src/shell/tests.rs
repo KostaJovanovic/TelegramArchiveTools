@@ -1207,6 +1207,77 @@ fn update_databases_does_not_join_a_classic_run() {
     assert!(!s.settings.export_db, "the mode is left alone");
 }
 
+fn said_by(mut row: tgx_tg::viewer::Row, who: &str, day: &str) -> tgx_tg::viewer::Row {
+    row.from = who.to_uppercase();
+    row.from_id = who.into();
+    row.day = day.into();
+    row
+}
+
+#[test]
+fn the_reader_lists_its_senders_most_prolific_first_and_filters_by_one() {
+    let a = db(1, "A");
+    let mut s = viewing(
+        &a,
+        vec![
+            said_by(message(1, false, 1), "ana", "2025-01-01"),
+            said_by(message(2, false, 1), "bo", "2025-01-02"),
+            said_by(message(3, false, 1), "bo", "2025-01-03"),
+        ],
+    );
+    let names: Vec<&str> = s.viewer.senders.iter().map(|x| x.1.as_str()).collect();
+    assert_eq!(names, ["BO", "ANA"]);
+    s.viewer_set_sender(Some("ana".into()));
+    assert_eq!(s.viewer.shown.len(), 1);
+    // Selecting a message the sender filter hides shows everyone again,
+    // rather than selecting something nobody can see.
+    s.viewer_select(2, true);
+    assert!(s.viewer.sender.is_none());
+    assert_eq!(s.viewer.shown.len(), 3);
+}
+
+#[test]
+fn go_to_date_lands_on_the_first_message_of_that_day_or_after() {
+    let a = db(1, "A");
+    let mut s = viewing(
+        &a,
+        vec![
+            said_by(message(1, false, 1), "ana", "2025-01-01"),
+            said_by(message(2, false, 1), "ana", "2025-01-05"),
+            said_by(message(3, false, 1), "ana", "2025-01-09"),
+        ],
+    );
+    s.viewer.go_to = "2025-01-04".into();
+    s.viewer_go_to_date();
+    assert_eq!(s.viewer.selected, Some(2));
+    // Past the end: the last message, not nothing.
+    s.viewer.go_to = "2030-01-01".into();
+    s.viewer_go_to_date();
+    assert_eq!(s.viewer.selected, Some(3));
+    // Not a day: said, and nowhere is gone to.
+    s.viewer.go_to = "soon".into();
+    s.viewer_go_to_date();
+    assert_eq!(s.viewer.selected, Some(3));
+    assert!(s.status.contains("not a day"));
+}
+
+#[test]
+fn the_librarys_search_shows_results_and_no_chat_is_opened_over_them() {
+    let mut s = Shell::headless();
+    s.show(View::Library);
+    s.search_everywhere("budget".into(), "X:\\exports".into());
+    assert_eq!(s.body, View::Viewer);
+    assert_eq!(s.viewer.asked, Some(("budget".into(), None)));
+    // The database list arriving first must not open a chat over the results
+    // still on their way.
+    let output_dir = s.settings.output_dir.clone();
+    s.apply(Event::ViewerDatabases {
+        output_dir,
+        found: Ok(vec![db(1, "A")]),
+    });
+    assert!(s.viewer.open.is_none());
+}
+
 // Only the first press is driven here: the second spawns the real sign-out,
 // which would revoke whatever session sits in the workspace's data folder.
 #[test]
