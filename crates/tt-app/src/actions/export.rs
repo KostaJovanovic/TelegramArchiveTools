@@ -344,9 +344,14 @@ pub async fn export(settings: Settings, pending: Pending, cancel: Cancel, tx: Ev
                     // "500 of 6,643" with an 8% bar, and `set_count` would then
                     // overwrite the chat list's size with 500. See
                     // `ExportResult::complete`, which draws the same
-                    // distinction for the INCOMPLETE warning.
-                    expected: if result.windowed { 0 } else { result.expected },
-                    messages_measured: !result.windowed,
+                    // distinction for the INCOMPLETE warning. A date-ranged
+                    // export is short on purpose in the same way.
+                    expected: if result.short_by_design() {
+                        0
+                    } else {
+                        result.expected
+                    },
+                    messages_measured: !result.short_by_design(),
                     // `result.topics` counts output folders, and an unsplit
                     // chat has exactly one. Only a chat that really was split
                     // has a topic count to report.

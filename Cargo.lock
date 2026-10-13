@@ -3903,11 +3903,13 @@ dependencies = [
  "egui_extras",
  "image",
  "log",
+ "raw-window-handle",
  "rfd",
  "tga-run",
  "tgx-tg",
  "tgx-ui",
  "tokio",
+ "windows-sys 0.61.2",
  "winresource",
 ]
 

@@ -96,6 +96,69 @@ impl Shell {
         }
     }
 
+    /// Sign out, on the second press of the rail's Sign out.
+    ///
+    /// **Two presses.** It ends the session at Telegram, so the next sign-in
+    /// needs a fresh code on the phone — not something one stray click should
+    /// cost. The first press arms it and the label says so.
+    ///
+    /// Refused while anything is using the connection: the export would lose
+    /// it mid-chat.
+    pub(super) fn sign_out(&mut self) {
+        if self.exporting || self.counting || self.signing_out {
+            return;
+        }
+        if !self.sign_out_armed {
+            self.sign_out_armed = true;
+            return;
+        }
+        self.sign_out_armed = false;
+        self.signing_out = true;
+        let tx = self.bridge.sender();
+        let settings = self.settings.clone();
+        self.bridge
+            .spawn(async move { crate::actions::sign_out(settings, tx).await });
+    }
+
+    /// Sign out came back.
+    ///
+    /// **The chat list goes with the account.** It is the list of somebody who
+    /// is no longer signed in, and the next account to sign in would see it
+    /// until its own arrived. The phone number goes from the settings for the
+    /// same reason; the api_id and api_hash stay, because they belong to the
+    /// app registration, not to the account, and switching accounts reuses
+    /// them.
+    pub(super) fn signed_out(&mut self, revoked: Result<(), String>, removed: Result<(), String>) {
+        self.signing_out = false;
+        self.signed_in = false;
+        self.account = None;
+        self.loaded = false;
+        self.chats.clear();
+        self.selected.clear();
+        self.rebuild_rows();
+        self.settings.phone.clear();
+        self.commit_settings();
+        self.log_copied = false;
+        if let Err(e) = &revoked {
+            self.journal.warn(format!(
+                "Telegram did not confirm the sign-out ({e}). End the session \
+                 yourself from Telegram → Settings → Devices."
+            ));
+        }
+        if let Err(e) = &removed {
+            self.journal.warn(format!(
+                "Could not delete the saved session: {e}. Delete the session \
+                 file in TelegramToolsData yourself."
+            ));
+        }
+        self.status = if revoked.is_ok() && removed.is_ok() {
+            "Signed out".into()
+        } else {
+            "Signed out, with warnings — see Activity".into()
+        };
+        self.journal.push(self.status.clone());
+    }
+
     pub(super) fn start_refresh(&mut self) {
         let tx = self.bridge.sender();
         let settings = self.settings.clone();
@@ -144,6 +207,7 @@ impl Shell {
         // unwritable last time — was reported as the reason *this* run ended.
         self.failure = None;
         self.count_progress = None;
+        self.pace.start(std::time::Instant::now());
     }
 
     /// Start a run, **or add to the one already going**.
@@ -168,8 +232,27 @@ impl Shell {
             self.status = "No output format selected".into();
             return;
         }
+        if self.range_refused() {
+            return;
+        }
         let picked = self.ticked_chats();
         self.run_chats(picked);
+    }
+
+    /// A date range that does not parse stops the run here, in the window,
+    /// rather than failing every chat of the queue one by one with the same
+    /// sentence.
+    pub(super) fn range_refused(&mut self) -> bool {
+        match self.settings.date_range() {
+            Ok(_) => false,
+            Err(e) => {
+                self.journal
+                    .warn(format!("Not started: {e}. Fix the dates in Settings."));
+                self.status = e;
+                self.log_copied = false;
+                true
+            }
+        }
     }
 
     /// The chats ticked in the list, in list order.
@@ -222,7 +305,28 @@ impl Shell {
             picked.len(),
             self.settings.output_dir
         ));
+        self.check_volume();
+        // Said once at the start, because a range is easy to set and forget,
+        // and a month-long export of a ten-year chat otherwise reads as a
+        // broken one.
+        if let Ok(Some(_)) = self.settings.date_range() {
+            let open = |d: &str, or: &'static str| if d.is_empty() { or.to_string() } else { d.to_string() };
+            self.journal.push(format!(
+                "Only messages from {} to {} (Settings → From / Until)",
+                open(&self.settings.date_from, "the beginning"),
+                open(&self.settings.date_until, "now"),
+            ));
+        }
         self.spawn_export();
+    }
+
+    /// Free space, file system and network drive, said in the log as a run
+    /// starts. Warnings only — see [`crate::volume`].
+    fn check_volume(&mut self) {
+        let tx = self.bridge.sender();
+        let settings = self.settings.clone();
+        self.bridge
+            .spawn(async move { crate::actions::check_volume(settings, tx).await });
     }
 
     /// Find out which chats the destination already holds, for the list's
@@ -471,6 +575,9 @@ impl Shell {
                 "Nothing to write. Tick HTML pages or result.json in Settings, or choose Database.",
             );
             self.status = "No output format selected".into();
+            return;
+        }
+        if self.range_refused() {
             return;
         }
         self.queue

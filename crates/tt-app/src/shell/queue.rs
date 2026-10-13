@@ -379,7 +379,7 @@ impl Shell {
     fn progress_row(&mut self, ui: &mut Ui) {
         let p = self.palette;
         let (fraction, caption) = if self.exporting {
-            (self.queue.fraction(), self.queue.running_caption())
+            (self.queue.fraction(), self.pace_caption())
         } else if let Some((done, total)) = self.count_progress {
             (
                 Some(done as f32 / total.max(1) as f32),
@@ -405,6 +405,27 @@ impl Shell {
             ui.label(meta(&caption, &p));
         });
         ui.add_space(space::STEP);
+    }
+
+    /// The running caption, with the clock, the speed and the time left in
+    /// this chat after it — each only once there is something true to say.
+    pub(super) fn pace_caption(&self) -> String {
+        let now = std::time::Instant::now();
+        let mut parts = vec![self.queue.running_caption()];
+        if let Some(rate) = self.pace.rate() {
+            parts.push(crate::pace::rate_text(rate));
+            if let Some(left) = self
+                .queue
+                .remaining_in_flight()
+                .and_then(|n| self.pace.left(n))
+            {
+                parts.push(format!("{} in this chat", crate::pace::left_text(left)));
+            }
+        }
+        if let Some(elapsed) = self.pace.elapsed(now) {
+            parts.push(format!("{} elapsed", crate::pace::clock(elapsed)));
+        }
+        parts.join(" · ")
     }
 
     fn log_panel(&mut self, ui: &mut Ui) {

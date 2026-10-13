@@ -118,6 +118,13 @@ pub enum Event {
     /// warning out of the text catches "0 failed", which is the opposite of one.
     Warn(String),
     SignedIn(String),
+    /// Sign out finished. Each half reported on its own: a revoke that could
+    /// not reach Telegram leaves a key that may still work elsewhere, and the
+    /// user has to be told to end it from Settings → Devices.
+    SignedOut {
+        revoked: Result<(), String>,
+        removed: Result<(), String>,
+    },
     /// The sign-in advanced a step: a code was sent, or 2FA is wanted.
     LoginStage(crate::login::Stage),
     /// The step failed, and the dialog stays open saying why.

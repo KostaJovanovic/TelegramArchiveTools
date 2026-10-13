@@ -157,6 +157,11 @@ pub struct Shell {
     /// Who is signed in, as Telegram names them — the rail's foot says it.
     /// `None` until a sign-in answers, and after none.
     account: Option<String>,
+    /// Sign out has been pressed once; the next press does it. See
+    /// [`Shell::sign_out`].
+    sign_out_armed: bool,
+    /// A sign-out is on the worker.
+    signing_out: bool,
     /// Tracked separately from `chats.is_empty()`: the list is empty both
     /// before a sign-in and after one that found nothing, and those two need
     /// opposite instructions.
@@ -233,6 +238,8 @@ pub struct Shell {
     /// Chats counted so far, and how many there are. Separate from the export's
     /// progress because **one bar has two claimants** and the export owns it.
     count_progress: Option<(usize, usize)>,
+    /// The export's clock and speed. See [`crate::pace`].
+    pace: crate::pace::Pace,
 
     /// **One dialog, ever.** An `Option`, not a flag plus a stage, so
     /// "is one open?" and "which one?" cannot disagree.
@@ -247,6 +254,10 @@ pub struct Shell {
     /// A run has ended and the taskbar button should flash. A flag rather than
     /// a call because `apply` holds no context; `update` sends it and clears it.
     wants_attention: bool,
+    /// What the run-finished notification says, waiting for `update` to send
+    /// it — which it does only to a window that is not focused. See
+    /// [`crate::notify`].
+    notice: Option<String>,
     /// Which of the log's two Copy controls `log_copied` is about — the whole
     /// transcript or just the warnings — so only that one reads "Copied".
     copied_warnings: bool,
@@ -364,9 +375,11 @@ impl Shell {
             queue: Queue::default(),
             pending: Pending::new(),
             count_progress: None,
+            pace: Default::default(),
             login: None,
             log_copied: false,
             wants_attention: false,
+            notice: None,
             copied_warnings: false,
             started: false,
             theme_stale: true,
@@ -375,6 +388,8 @@ impl Shell {
             viewer: Default::default(),
             library: Default::default(),
             account: None,
+            sign_out_armed: false,
+            signing_out: false,
         }
     }
 
@@ -523,6 +538,8 @@ impl Shell {
 
     /// Show a view because the user asked for it. **Pins it.**
     pub(super) fn show(&mut self, body: View) {
+        // A half-pressed Sign out does not survive going somewhere else.
+        self.sign_out_armed = false;
         self.body = body;
         self.body_pinned = true;
     }
@@ -731,7 +748,7 @@ mod shot {
 }
 
 impl eframe::App for Shell {
-    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &Context, frame: &mut eframe::Frame) {
         // **Before anything is drained.** Senders handed out before this cannot
         // repaint, and the startup jobs below are handed one immediately.
         self.bridge.wake_with(ctx);
@@ -782,6 +799,18 @@ impl eframe::App for Shell {
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                 egui::UserAttentionType::Informational,
             ));
+        }
+        if let Some(body) = self.notice.take() {
+            // Not to a window someone is looking at, and never from a
+            // photograph of the window.
+            if !ctx.input(|i| i.focused) && shot::path().is_none() {
+                crate::notify::run_finished(frame, &body);
+            }
+        }
+        // The elapsed clock moves every second whether or not an event
+        // arrives — a rate-limit wait sends nothing for minutes.
+        if self.exporting {
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
 
         let p = self.palette;

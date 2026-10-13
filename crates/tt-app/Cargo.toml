@@ -56,6 +56,22 @@ anyhow = { workspace = true }
 chrono = { workspace = true }
 log = { workspace = true }
 
+# Three small pieces of Win32: the run-finished notification (`notify.rs`),
+# one window per data folder (`instance.rs`), and the destination's free space
+# and file system (`volume.rs`). Both crates are already in the build —
+# eframe links this `windows-sys` and this `raw-window-handle` itself — so
+# naming them here compiles nothing new.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+raw-window-handle = "0.6"
+
 # Gated on the *host*, not the target: cargo resolves `build-dependencies` under
 # a `cfg` section against the machine running the build script, which is the
 # machine that would have to have a resource compiler. A `cargo check` on Linux

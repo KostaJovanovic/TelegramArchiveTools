@@ -5,7 +5,9 @@
 
 use super::*;
 use eframe::egui::{Layout, Ui};
-use tgx_ui::components::{button, edge_rule, figure, meta, nav_item, row, rule, text, title};
+use tgx_ui::components::{
+    action, button, edge_rule, figure, meta, nav_item, row, rule, text, title,
+};
 use tgx_ui::tokens::{space, window, Palette};
 
 /// A view's name on the top bar: the reading face, medium, in ink — a
@@ -101,6 +103,26 @@ impl Shell {
             let busy = self.exporting || self.counting;
             match self.account.clone() {
                 Some(name) => {
+                    // Bottom-up, so this is drawn under the name. Quiet, like
+                    // every other link here; the second press is the one that
+                    // acts, and the label says so between them.
+                    let label = if self.signing_out {
+                        "Signing out…"
+                    } else if self.sign_out_armed {
+                        "Press again to sign out"
+                    } else {
+                        "Sign out"
+                    };
+                    let enabled = !busy && !self.signing_out;
+                    if row(ui, |ui| action(ui, meta(label, &p), enabled))
+                        .on_hover_text(
+                            "Ends this session at Telegram and deletes it from this \
+                             computer. Signing in again needs a new code.",
+                        )
+                        .clicked()
+                    {
+                        self.sign_out();
+                    }
                     row(ui, |ui| ui.add(egui::Label::new(text(name, &p)).truncate()));
                     row(ui, |ui| ui.label(meta("Signed in as", &p)));
                 }

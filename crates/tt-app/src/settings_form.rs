@@ -62,6 +62,11 @@ pub struct SettingsForm {
     pub member_limit: String,
     pub reread_window: String,
     pub sync_every: String,
+    /// `YYYY-MM-DD` or blank. Kept as typed: a date is not clamped into
+    /// anything, and one that does not parse is refused when a run starts —
+    /// see `Settings::date_range` — with the panel saying so under the field.
+    pub date_from: String,
+    pub date_until: String,
 }
 
 impl SettingsForm {
@@ -101,6 +106,8 @@ impl SettingsForm {
             SYNC_RANGE,
             i64::from(settings.sync_every_hours),
         ) as u32;
+        settings.date_from = self.date_from.trim().to_string();
+        settings.date_until = self.date_until.trim().to_string();
     }
 
     /// Write the stored values back into the fields.
@@ -126,6 +133,8 @@ impl SettingsForm {
         set(&mut self.member_limit, &settings.member_limit.to_string());
         set(&mut self.reread_window, &settings.reread_window.to_string());
         set(&mut self.sync_every, &settings.sync_every_hours.to_string());
+        set(&mut self.date_from, &settings.date_from);
+        set(&mut self.date_until, &settings.date_until);
     }
 }
 

@@ -22,13 +22,17 @@
 mod actions;
 mod bridge;
 mod cli;
+mod instance;
 mod journal;
 mod list;
 mod login;
+mod notify;
+mod pace;
 mod pending;
 mod queue;
 mod settings_form;
 mod shell;
+mod volume;
 
 /// What the window and its failures call themselves.
 pub const TITLE: &str = "TelegramTools";
@@ -171,6 +175,17 @@ fn main() {
     // that keeps it. Nothing in the analyser logs.
     if let Command::Analyse(args) = command {
         finish(tga_run::cli::run(args));
+        return;
+    }
+    // **And a second window leaves before it too**, for the same reason and a
+    // worse one: it would rotate the log the first window is writing. See
+    // `instance`.
+    // A photograph (`TGX_SHOT`) is exempt: it touches no account and quits
+    // on its own, and it is taken while a real window is open.
+    if command == Command::Window
+        && std::env::var_os("TGX_SHOT").is_none()
+        && !instance::claim(&tgx_tg::config::data_dir())
+    {
         return;
     }
 

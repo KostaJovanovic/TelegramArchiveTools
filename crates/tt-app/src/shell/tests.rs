@@ -1206,3 +1206,47 @@ fn update_databases_does_not_join_a_classic_run() {
     assert!(s.queue.is_empty());
     assert!(!s.settings.export_db, "the mode is left alone");
 }
+
+// Only the first press is driven here: the second spawns the real sign-out,
+// which would revoke whatever session sits in the workspace's data folder.
+#[test]
+fn sign_out_takes_two_presses_and_not_during_a_run() {
+    let mut s = shell_with(vec![chat(1, "a", None)]);
+    s.sign_out();
+    assert!(s.sign_out_armed && !s.signing_out, "the first press only arms");
+    s.show(View::Settings);
+    assert!(!s.sign_out_armed, "going elsewhere disarms it");
+
+    s.exporting = true;
+    s.sign_out();
+    assert!(!s.sign_out_armed, "refused while an export holds the connection");
+}
+
+#[test]
+fn signing_out_forgets_the_account_and_its_chats() {
+    let mut s = shell_with(vec![chat(1, "a", None)]);
+    s.account = Some("Someone".into());
+    s.selected.insert(1);
+    s.settings.phone = "+100".into();
+    s.signing_out = true;
+    s.apply(Event::SignedOut {
+        revoked: Ok(()),
+        removed: Ok(()),
+    });
+    assert!(!s.signed_in && s.account.is_none() && !s.signing_out);
+    assert!(s.chats.is_empty() && s.selected.is_empty() && s.rows.is_empty());
+    assert!(s.settings.phone.is_empty());
+    assert_eq!(s.list_state(), ListState::NotSignedIn);
+    assert_eq!(s.status, "Signed out");
+}
+
+#[test]
+fn a_sign_out_telegram_did_not_confirm_says_where_to_finish_it() {
+    let mut s = shell_with(vec![]);
+    s.apply(Event::SignedOut {
+        revoked: Err("timed out".into()),
+        removed: Ok(()),
+    });
+    assert!(s.journal.to_text().contains("Settings → Devices"));
+    assert!(s.status.contains("warnings"));
+}

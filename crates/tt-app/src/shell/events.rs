@@ -53,6 +53,7 @@ impl Shell {
                 self.status = format!("Signed in: {name}");
                 self.account = Some(name);
             }
+            Event::SignedOut { revoked, removed } => self.signed_out(revoked, removed),
             Event::LoginStage(stage) => {
                 if let Some(d) = self.login.as_mut() {
                     d.busy = false;
@@ -184,6 +185,8 @@ impl Shell {
                 total,
             } => {
                 self.queue.progressed(chat_id, done, total);
+                self.pace
+                    .sample(std::time::Instant::now(), self.queue.read_total());
                 // **Put the status line back.** A rate-limit wait writes over
                 // it, and nothing else during an export writes to it at all —
                 // so one 60-second wait halfway through a chat left the bar
@@ -285,7 +288,14 @@ impl Shell {
                 // "Exported 0 of 3 chats, 3 not run" would land on top of the
                 // one sentence that says *why*, leaving the reason only in the
                 // log, which is not where the user is looking.
-                self.journal.push(self.queue.summary());
+                match self.pace.stop(std::time::Instant::now()) {
+                    Some(took) => self.journal.push(format!(
+                        "{}, in {}",
+                        self.queue.summary(),
+                        crate::pace::clock(took)
+                    )),
+                    None => self.journal.push(self.queue.summary()),
+                }
                 // The run has just written what the marks describe.
                 self.scan_destination();
                 // A long run is something people walk away from; the taskbar
@@ -297,6 +307,14 @@ impl Shell {
                     Some(why) => format!("{}: {why}", self.queue.summary()),
                     None => self.queue.summary(),
                 };
+                // And a notification, for the walk that went further than the
+                // taskbar. Sent from `update` like the flash, and only if the
+                // window is not the one being looked at.
+                self.notice = Some(if stopped {
+                    format!("Stopped. {}", self.status)
+                } else {
+                    self.status.clone()
+                });
                 self.rebuild_rows();
             }
             // **Only the activity that failed is switched off.** This used to

@@ -222,6 +222,73 @@ pub async fn disconnect() {
     }
 }
 
+/// What [`sign_out`] managed, each half on its own.
+#[derive(Debug)]
+pub struct SignedOut {
+    /// Telegram ended the session on its side (`auth.logOut`). An error here
+    /// means the key may still be live, and Settings → Devices is the way to
+    /// end it.
+    pub revoked: Result<(), String>,
+    /// The session file is gone from `TelegramToolsData/`.
+    pub removed: Result<(), String>,
+}
+
+/// Sign this account out: end the session at Telegram, close the shared
+/// connection, and delete the session file.
+///
+/// **Both halves, in this order, and the second does not wait on the first.**
+/// Deleting the file alone leaves a key that still works for anyone who copied
+/// it; revoking alone leaves a dead key on disk that the next launch probes
+/// with. A revoke that cannot reach Telegram must not keep the file either —
+/// the user asked for it to be gone — so the result says which half failed
+/// rather than stopping at it.
+pub async fn sign_out(settings: &Settings) -> SignedOut {
+    let path = session_file();
+    let revoked = if !path.exists() {
+        Ok(())
+    } else {
+        match Session::connect(settings).await {
+            Ok(session) => {
+                match within("signing out", CONNECT_TIMEOUT, session.client.sign_out()).await {
+                    Ok(Ok(_)) => Ok(()),
+                    Ok(Err(e)) => Err(e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    };
+    // The session above is dropped by now, so this takes the last handle on
+    // the connection and its `SqliteSession` closes — which is what lets the
+    // file be deleted on Windows.
+    disconnect().await;
+    let removed = remove_session_files(&path);
+    match (&revoked, &removed) {
+        (Ok(()), Ok(())) => log::info!("signed out"),
+        _ => log::warn!("sign-out: revoke {revoked:?}, remove {removed:?}"),
+    }
+    SignedOut { revoked, removed }
+}
+
+/// Delete the session database and SQLite's files beside it. A file that is
+/// not there is not a failure.
+fn remove_session_files(path: &std::path::Path) -> Result<(), String> {
+    let mut failed = Vec::new();
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let file = std::path::PathBuf::from(format!("{}{suffix}", path.display()));
+        match std::fs::remove_file(&file) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => failed.push(format!("{}: {e}", file.display())),
+        }
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed.join("; "))
+    }
+}
+
 pub struct Session {
     pub client: Client,
     conn: Arc<Connection>,

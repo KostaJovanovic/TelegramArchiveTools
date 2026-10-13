@@ -75,7 +75,7 @@ async fn ready(session: &Session, tx: &Events, activity: Activity) -> bool {
         Ok(false) => {
             let _ = tx.send(Event::Failed {
                 activity,
-                message: "Not signed in. Press 01 Sign in first.".into(),
+                message: "Not signed in. Press Sign in at the foot of the left rail.".into(),
             });
             false
         }
@@ -140,6 +140,20 @@ fn pending() -> &'static tokio::sync::Mutex<Option<Session>> {
 /// Drop any half-finished sign-in.
 pub async fn forget_pending_login() {
     *pending().lock().await = None;
+}
+
+/// Sign out: end the session at Telegram and delete the session file.
+///
+/// A half-finished sign-in is dropped first, because it holds a handle on the
+/// same connection and would keep the session database open.
+pub async fn sign_out(settings: Settings, tx: Events) {
+    let _ = tx.send(Event::Status("Signing out…".into()));
+    forget_pending_login().await;
+    let done = tgx_tg::client::sign_out(&settings).await;
+    let _ = tx.send(Event::SignedOut {
+        revoked: done.revoked,
+        removed: done.removed,
+    });
 }
 
 /// Ask Telegram to send a login code.
@@ -306,6 +320,21 @@ pub async fn unpack(
         })
         .map_err(|e| format!("Export as folder failed: {e}"));
     let _ = tx.send(Event::Unpacked(done));
+}
+
+/// Say what is wrong with the destination's drive, as warnings, when a run
+/// starts. Off the async worker's thread: a network drive can take a while to
+/// answer. See `crate::volume`.
+pub async fn check_volume(settings: Settings, tx: Events) {
+    let dir = std::path::PathBuf::from(&settings.output_dir);
+    let lines = tokio::task::spawn_blocking(move || {
+        crate::volume::warnings(&crate::volume::inspect(&dir), &settings)
+    })
+    .await
+    .unwrap_or_default();
+    for line in lines {
+        let _ = tx.send(Event::Warn(line));
+    }
 }
 
 /// Check folder: what is wrong with the destination, as log lines. Changes

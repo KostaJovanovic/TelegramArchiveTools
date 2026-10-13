@@ -69,38 +69,72 @@ async fn command(args: Vec<String>) -> Result<()> {
 
     match cmd {
         "login" => login(&settings).await,
+        "logout" => {
+            let done = tgx_tg::client::sign_out(&settings).await;
+            if let Err(e) = &done.revoked {
+                eprintln!(
+                    "warning: Telegram did not confirm the sign-out ({e}).\n\
+                     End the session from Telegram -> Settings -> Devices."
+                );
+            }
+            done.removed
+                .map_err(|e| anyhow!("could not delete the saved session: {e}"))?;
+            println!("Signed out.");
+            Ok(())
+        }
         "chats" => chats(&settings).await,
         "export" => {
             // The flags are read off the whole tail rather than positionally,
             // so `export --db "Dev Team"` and `export "Dev Team" --db`
             // both work. A title starting with `--` is not a thing this tool
             // has to support.
-            let flags: Vec<&str> = args
-                .iter()
-                .skip(1)
-                .map(String::as_str)
-                .filter(|a| a.starts_with("--"))
-                .collect();
-            for flag in &flags {
-                match *flag {
+            //
+            // **The date flags replace the settings file's dates**, and a run
+            // with neither ignores them: the window's From and Until are a
+            // setting someone may have left behind, and a command line that
+            // quietly exported one month of a chat because of it would be the
+            // window deciding what a script gets.
+            settings.date_from.clear();
+            settings.date_until.clear();
+            let mut want = None;
+            let mut rest = args.iter().skip(1).map(String::as_str);
+            while let Some(a) = rest.next() {
+                match a {
                     // Database *mode*: it replaces the folder export, it
                     // does not join it. `export_html` and `export_json` are
                     // left as they are and simply ignored, so the flag does not
                     // quietly rewrite the settings file for the next run.
                     "--db" => settings.export_db = true,
                     "--full" => settings.reread_all = true,
-                    other => return Err(anyhow!("unknown flag {other:?}\n\n{USAGE}")),
+                    "--since" | "--until" => {
+                        let day = rest
+                            .next()
+                            .ok_or_else(|| anyhow!("{a} needs a date like 2026-01-31"))?;
+                        if a == "--since" {
+                            settings.date_from = day.into();
+                        } else {
+                            settings.date_until = day.into();
+                        }
+                    }
+                    other if other.starts_with("--") => {
+                        return Err(anyhow!("unknown flag {other:?}\n\n{USAGE}"))
+                    }
+                    title if want.is_none() && !title.trim().is_empty() => {
+                        want = Some(title.trim())
+                    }
+                    _ => {}
                 }
             }
-            let want = args
-                .iter()
-                .skip(1)
-                .map(String::as_str)
-                .map(str::trim)
-                .find(|w| !w.is_empty() && !w.starts_with("--"))
-                .ok_or_else(|| {
-                    anyhow!("usage: TelegramToolsexport [--db] [--full] <chat title>")
-                })?;
+            if settings.export_db
+                && !(settings.date_from.is_empty() && settings.date_until.is_empty())
+            {
+                return Err(anyhow!(
+                    "--since and --until are for a folder export; a database keeps \
+                     the whole chat"
+                ));
+            }
+            settings.date_range().map_err(|e| anyhow!(e))?;
+            let want = want.ok_or_else(|| anyhow!("usage: {EXPORT_USAGE}"))?;
             export(&settings, want).await
         }
         "compare" => {
@@ -689,6 +723,9 @@ async fn compare(
     Ok(())
 }
 
+const EXPORT_USAGE: &str =
+    "TelegramTools export [--db] [--full] [--since YYYY-MM-DD] [--until YYYY-MM-DD] <chat title>";
+
 pub const USAGE: &str = "\
 TelegramTools -- export Telegram chats, and report on what was exported
 
@@ -697,8 +734,14 @@ TelegramTools -- export Telegram chats, and report on what was exported
   program, and cmd does not wait for one unless told to.
 
   TelegramTools login            sign in (once; the session is saved)
+  TelegramTools logout           end the session at Telegram and delete it here
   TelegramTools chats            list every chat this account can see
-  TelegramTools export <title>   export the chat whose title matches
+  TelegramTools export [--db] [--full] [--since DAY] [--until DAY] <title>
+                       export the chat whose title matches; --db syncs its
+                       database instead of writing folders, --full re-reads
+                       the whole history rather than the newest few hundred;
+                       --since and --until (2026-01-31, both inclusive) limit
+                       a folder export to those days
   TelegramTools analyse <export> [options]
                        offline: write a report on an export or a database;
                        `TelegramTools analyse --help` for its options

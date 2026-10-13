@@ -143,8 +143,12 @@ pub struct ExportResult {
     /// chat's total. See [`Self::complete`] — this is the flag that keeps the
     /// two kinds of short run apart.
     pub windowed: bool,
+    /// **This folder export took in only a range of dates.** Short on purpose,
+    /// like a windowed sync, and judged the same way — see [`Self::complete`].
+    pub ranged: bool,
     /// The read loop ended because Telegram ran out of messages, rather than
-    /// because it was cancelled, stalled or failed.
+    /// because it was cancelled, stalled or failed — or, for a ranged run,
+    /// because it passed the range's last day.
     pub reached_end: bool,
 }
 
@@ -159,10 +163,17 @@ impl ExportResult {
     /// messages Telegram counted, which is the exact failure that warning was
     /// added for. So the two rules are alternatives, not alternatives-with-an-or.
     pub fn complete(&self) -> bool {
-        if self.windowed {
+        if self.short_by_design() {
             return self.reached_end;
         }
         self.expected == 0 || self.messages as i64 >= self.expected
+    }
+
+    /// Did this run set out to read less than the chat? A windowed sync and a
+    /// date-ranged export both do, and neither has the chat's size as its
+    /// denominator.
+    pub fn short_by_design(&self) -> bool {
+        self.windowed || self.ranged
     }
 }
 
@@ -246,6 +257,14 @@ fn worth_fetching(file_id: i64, already_queued: bool, already_stored: bool) -> b
 }
 
 /// A setting, spelled the way a log reader wants to read it.
+/// A date setting for the log: the day as typed, or what an empty one means.
+fn day_or<'a>(day: &'a str, open: &'a str) -> &'a str {
+    match day.trim() {
+        "" => open,
+        d => d,
+    }
+}
+
 fn on_off(v: bool) -> &'static str {
     if v {
         "on"
@@ -679,6 +698,11 @@ impl<'a> ChatExporter<'a> {
         let db = self.settings.export_db;
         let files = root.is_some();
         debug_assert_eq!(db, !files, "Classic and Database are exclusive");
+        // Before anything is opened or written: a date that does not parse is
+        // refused, not read as "the whole chat". `None` for every database run
+        // — see `Settings::date_range`.
+        let range = self.settings.date_range().map_err(ExportError::Settings)?;
+        result.ranged = range.is_some();
         // **This chat's own file, opened here rather than once per queue.**
         // The assignment drops the previous chat's connection, so exactly one
         // is open at a time and the file the last chat wrote is released before
@@ -1097,9 +1121,40 @@ impl<'a> ChatExporter<'a> {
             );
             store.begin_batch().await?;
         }
+        // **A date range starts the walk at its first day** rather than reading
+        // years of history to throw it away. The newest message *before* that
+        // day is asked for — `offset_date` returns what is older than it — and
+        // the oldest-first walk then reads every id after it, exactly as a
+        // windowed sync starts from its window. A probe that fails costs only
+        // speed: the walk starts at the beginning and the date check below
+        // drops what is outside.
+        if let Some(r) = range {
+            if let Some(from) = r.from {
+                let mut probe = self
+                    .client
+                    .iter_messages(peer)
+                    .offset_date(from.clamp(0, i32::MAX as i64) as i32)
+                    .limit(1);
+                match probe.next().await {
+                    Ok(Some(before)) => start = before.id() as i64,
+                    Ok(None) => {}
+                    Err(e) => progress(Progress::Log(format!(
+                        "could not find where the range starts ({}); reading from the \
+                         beginning and skipping what is earlier",
+                        classify(&e)
+                    ))),
+                }
+            }
+            progress(Progress::Log(format!(
+                "date range: {} to {}",
+                day_or(&self.settings.date_from, "the beginning"),
+                day_or(&self.settings.date_until, "now"),
+            )));
+        }
         // See the comment where `known` is computed: a windowed run has no
-        // denominator to publish.
-        if let (Some(n), false) = (known, result.windowed) {
+        // denominator to publish, and nor does a ranged one — the chat's size
+        // is not the size of a month of it.
+        if let (Some(n), false) = (known, result.short_by_design()) {
             progress(Progress::Total {
                 chat_id: chat.id,
                 total: n,
@@ -1107,7 +1162,7 @@ impl<'a> ChatExporter<'a> {
         }
         // What the read loop reports against. A windowed run has no total, so
         // its rows carry a counter and no bar.
-        let reported_total = if result.windowed { 0 } else { total };
+        let reported_total = if result.short_by_design() { 0 } else { total };
 
         // --- the single pass ------------------------------------------------
         progress(Progress::Log(format!(
@@ -1195,6 +1250,19 @@ impl<'a> ChatExporter<'a> {
                         // Progress: a wait that moved the cursor is not a stall.
                         stalled = 0;
                         offset_id = msg.id();
+                        // Past the range's last day is the end of this
+                        // export, by the same route Telegram running out is.
+                        // Before its first day only happens when the probe
+                        // above could not say where that was.
+                        if let Some(r) = range {
+                            let at = msg.date().timestamp();
+                            if r.until.is_some_and(|u| at > u) {
+                                break 'resume;
+                            }
+                            if !r.holds(at) {
+                                continue;
+                            }
+                        }
                         // **Learn the sender before converting the message.**
                         // The roster was the only source of names, so anyone
                         // who posted and then left the group had no name at
@@ -1524,7 +1592,7 @@ impl<'a> ChatExporter<'a> {
             // Not for a windowed run: reading the newest few hundred is what
             // it set out to do, and "14355 SHORT" over a sync that worked
             // reads as the failure this line exists to name.
-            if !result.windowed && total > 0 && (done as i64) < total {
+            if !result.short_by_design() && total > 0 && (done as i64) < total {
                 format!(" — {} SHORT of the {total} expected", total - done as i64)
             } else {
                 String::new()
@@ -2367,6 +2435,22 @@ mod tests {
         assert!(!r.complete());
         r.messages = 6643;
         assert!(r.complete());
+    }
+
+    /// A month of a chat is not an INCOMPLETE chat — but a ranged run that was
+    /// stopped or stalled before reaching the range's end still is.
+    #[test]
+    fn a_date_ranged_export_is_judged_by_the_walk_like_a_window() {
+        let mut r = ExportResult {
+            expected: 6643,
+            messages: 212,
+            ranged: true,
+            reached_end: true,
+            ..Default::default()
+        };
+        assert!(r.complete());
+        r.reached_end = false;
+        assert!(!r.complete());
     }
 
     #[test]

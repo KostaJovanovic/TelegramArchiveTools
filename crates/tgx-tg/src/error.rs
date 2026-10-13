@@ -150,6 +150,11 @@ pub enum ExportError {
 
     #[error("cancelled")]
     Cancelled,
+
+    /// A setting the run cannot honour, said as the setting's own sentence —
+    /// a date that does not parse, a range that ends before it starts.
+    #[error("{0}")]
+    Settings(String),
 }
 
 /// `tgx_archive::Error`, said the way the transcript needs it said.

@@ -167,6 +167,18 @@ pub struct Settings {
     /// beginning, which is not something to start unasked.
     pub sync_every_hours: u32,
 
+    /// A folder export of only the messages from this day on, `YYYY-MM-DD` in
+    /// local time. Empty is the beginning of the chat.
+    ///
+    /// **Folder mode only.** A database keeps a chat's whole record and judges
+    /// a message deleted by its absence from a finished walk, so a walk that
+    /// skipped everything before a date would mark all of it deleted. See
+    /// [`Self::date_range`], which is the one place this is read.
+    pub date_from: String,
+    /// The last day a folder export takes in, `YYYY-MM-DD`, inclusive. Empty
+    /// is up to now.
+    pub date_until: String,
+
     // Media
     pub media_kinds: Vec<String>,
     /// 0 == unlimited.
@@ -281,6 +293,46 @@ pub struct Settings {
     pub saved_selections: Vec<SavedSelection>,
 }
 
+/// What [`Settings::date_range`] limits a folder export to, in Unix seconds,
+/// both ends inclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DateRange {
+    pub from: Option<i64>,
+    pub until: Option<i64>,
+}
+
+impl DateRange {
+    /// Is a message sent at `at` inside the range?
+    pub fn holds(&self, at: i64) -> bool {
+        self.from.is_none_or(|f| at >= f) && self.until.is_none_or(|u| at <= u)
+    }
+}
+
+/// `YYYY-MM-DD`, or nothing. `which` names the field in the error.
+fn parse_day(raw: &str, which: &str) -> Result<Option<chrono::NaiveDate>, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+        .map(Some)
+        .map_err(|_| format!("{which} date {raw:?} is not a date like 2026-01-31"))
+}
+
+/// The first second of `day` on this machine's clock. A day whose midnight a
+/// DST change skips starts at the earliest moment it has.
+fn local_midnight(day: chrono::NaiveDate) -> i64 {
+    use chrono::TimeZone;
+    let naive = day.and_hms_opt(0, 0, 0).expect("midnight exists");
+    match chrono::Local.from_local_datetime(&naive) {
+        chrono::LocalResult::Single(t) | chrono::LocalResult::Ambiguous(t, _) => t.timestamp(),
+        chrono::LocalResult::None => chrono::Local
+            .from_local_datetime(&(naive + chrono::Duration::hours(1)))
+            .earliest()
+            .map_or(naive.and_utc().timestamp(), |t| t.timestamp()),
+    }
+}
+
 /// [`Settings::profile_photos`]: none kept.
 pub const USERPICS_OFF: &str = "off";
 /// [`Settings::profile_photos`]: the picture each person wears now. One small
@@ -311,6 +363,8 @@ impl Default for Settings {
             reread_window: 500,
             reread_all: false,
             sync_every_hours: 0,
+            date_from: String::new(),
+            date_until: String::new(),
             media_kinds: MEDIA_KINDS.iter().map(|s| s.to_string()).collect(),
             size_limit_mb: 20,
             download_media: true,
@@ -354,6 +408,39 @@ impl Settings {
     /// would read the whole chat and write nothing.
     pub fn writes_anything(&self) -> bool {
         self.export_db || self.writes_folders()
+    }
+
+    /// The dates a folder export is limited to, as Unix seconds — or `None`
+    /// when it is not limited, which includes every Database run.
+    ///
+    /// `Err` names the field that does not parse. It is an error and not a
+    /// fallback to "no limit", because someone who typed a date asked for a
+    /// smaller export, and quietly writing the whole chat instead is the
+    /// wrong answer at the cost of the whole chat.
+    pub fn date_range(&self) -> Result<Option<DateRange>, String> {
+        if self.export_db {
+            return Ok(None);
+        }
+        let from = parse_day(&self.date_from, "From")?;
+        let until = parse_day(&self.date_until, "Until")?;
+        if from.is_none() && until.is_none() {
+            return Ok(None);
+        }
+        let range = DateRange {
+            from: from.map(local_midnight),
+            // Inclusive: everything up to the end of that day.
+            until: until.map(|d| local_midnight(d + chrono::Days::new(1)) - 1),
+        };
+        if let (Some(f), Some(u)) = (range.from, range.until) {
+            if f > u {
+                return Err(format!(
+                    "From ({}) is after Until ({})",
+                    self.date_from.trim(),
+                    self.date_until.trim()
+                ));
+            }
+        }
+        Ok(Some(range))
     }
 
     pub fn size_limit_bytes(&self) -> Option<i64> {
@@ -559,6 +646,60 @@ use lockdown::{grantee, restrict_to_current_user, set_lockdown_error};
 mod tests {
     use super::*;
     use std::path::Path;
+
+    fn ranged(from: &str, until: &str) -> Settings {
+        Settings {
+            date_from: from.into(),
+            date_until: until.into(),
+            ..Settings::default()
+        }
+    }
+
+    #[test]
+    fn no_dates_is_no_range() {
+        assert_eq!(ranged("", " ").date_range(), Ok(None));
+    }
+
+    #[test]
+    fn a_database_run_is_never_ranged() {
+        // Its deletion sweep would mark everything outside the range deleted.
+        let mut s = ranged("2026-01-01", "");
+        s.export_db = true;
+        assert_eq!(s.date_range(), Ok(None));
+    }
+
+    #[test]
+    fn the_range_takes_in_the_whole_of_both_days() {
+        let r = ranged("2026-03-01", "2026-03-01")
+            .date_range()
+            .unwrap()
+            .unwrap();
+        let (from, until) = (r.from.unwrap(), r.until.unwrap());
+        // One local day, give or take an hour of DST.
+        assert!((23 * 3600..=25 * 3600).contains(&(until - from + 1)));
+        assert!(r.holds(from) && r.holds(until));
+        assert!(!r.holds(from - 1) && !r.holds(until + 1));
+    }
+
+    #[test]
+    fn an_open_end_holds_everything_on_that_side() {
+        let r = ranged("2026-03-01", "").date_range().unwrap().unwrap();
+        assert!(r.until.is_none());
+        assert!(r.holds(i64::MAX) && !r.holds(0));
+    }
+
+    #[test]
+    fn a_date_that_does_not_parse_is_an_error_not_the_whole_chat() {
+        let e = ranged("31/01/2026", "").date_range().unwrap_err();
+        assert!(e.contains("From"), "{e}");
+        let e = ranged("", "2026-02-30").date_range().unwrap_err();
+        assert!(e.contains("Until"), "{e}");
+    }
+
+    #[test]
+    fn a_range_that_ends_before_it_starts_is_refused() {
+        assert!(ranged("2026-03-02", "2026-03-01").date_range().is_err());
+    }
 
     /// The run record goes into the chat's own `Exports/<chat>/<chat>.sqlite`, which is
     /// not the ACL-restricted directory and is the file people copy off the

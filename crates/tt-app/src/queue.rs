@@ -279,6 +279,21 @@ impl Queue {
         }
     }
 
+    /// Messages read so far by every chat of this run, finished or in flight —
+    /// what [`crate::pace::Pace`] measures the speed on.
+    pub fn read_total(&self) -> usize {
+        self.jobs.iter().map(|j| j.messages).sum()
+    }
+
+    /// Messages the chat in flight still has to read, when its size is known.
+    pub fn remaining_in_flight(&self) -> Option<i64> {
+        let job = self.jobs.iter().find(|j| j.state == JobState::Exporting)?;
+        match job.expected {
+            Some(total) if total > 0 => Some((total - job.messages as i64).max(0)),
+            _ => None,
+        }
+    }
+
     pub fn failed(&mut self, chat_id: i64, why: String) {
         if let Some(job) = self.job_mut(chat_id) {
             job.state = JobState::Failed(why);

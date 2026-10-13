@@ -287,6 +287,7 @@ impl Shell {
             ) {
                 self.commit_settings();
             }
+            self.date_rows(ui);
         }
 
         if switch_row(
@@ -517,6 +518,48 @@ impl Shell {
         }
     }
 
+    /// **From and Until: a folder export of only those days.** Folder mode
+    /// only, so drawn only there: a database judges deletions by what a whole
+    /// walk saw. A date that does not parse is said under the fields at once,
+    /// and the run refuses it rather than exporting the whole chat.
+    fn date_rows(&mut self, ui: &mut Ui) {
+        let p = self.palette;
+        let mut commit = false;
+        for (label, why, which) in [
+            (
+                "From",
+                "Only messages from this day on, as 2026-01-31. Blank is the start.",
+                0,
+            ),
+            (
+                "Until",
+                "Up to and including this day. Blank is up to now.",
+                1,
+            ),
+        ] {
+            let form = &mut self.form;
+            let buffer = if which == 0 {
+                &mut form.date_from
+            } else {
+                &mut form.date_until
+            };
+            commit |= setting_row(ui, label, why, &p, |ui| {
+                ui.add(
+                    field(buffer, &p)
+                        .hint_text("YYYY-MM-DD")
+                        .desired_width(DATE_W),
+                )
+                .lost_focus()
+            });
+        }
+        if commit {
+            self.commit_settings();
+        }
+        if let Err(e) = self.settings.date_range() {
+            row(ui, |ui| ui.label(text(e, &p)));
+        }
+    }
+
     /// A label with a narrow number field on the right. Returns whether the
     /// field just lost focus, which is when the value is a decision.
     fn number_row(
@@ -567,6 +610,8 @@ type Flip = fn(&mut tgx_tg::config::Settings);
 /// How wide a number field is. Every value in this panel is at most five
 /// digits, and a field sized for a sentence invites one.
 const NUMBER_W: f32 = 80.0;
+/// How wide a date field is: `2026-01-31` and a little air.
+const DATE_W: f32 = 104.0;
 
 /// A two-cell [`segmented`] strip inside a [`setting_row`]'s control, which
 /// is laid out right to left: the cells are given reversed and the answer
