@@ -44,7 +44,7 @@ save.bat report <folder>    # write report.html beside an export
 save.bat run                # the window, from source
 save.bat clean              # report target\ and empty it
 save.bat save|commit        # test, then commit (+ push for save)
-save.bat release            # test + commit + push + build
+save.bat release            # test + commit + push + tag v<Cargo.toml version> + build
 save.bat push|pull          # current branch; --force = force-with-lease + if-includes
 ```
 

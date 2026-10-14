@@ -116,7 +116,7 @@ echo   2  commit   test + commit, no push
 echo   3  push     push current branch
 echo   4  pull     pull current branch
 echo   5  build    cargo build --release
-echo   6  release  test + commit + push + build
+echo   6  release  test + commit + push + tag + build
 echo   7  test     fmt + clippy + every suite
 echo   8  parity   diff against a real Desktop export
 echo   9  corpus   cut the 7.8 MB parity corpus out of that export
@@ -289,7 +289,55 @@ goto afterpush
 :pushed
 echo.
 echo [git]  pushed origin/%BRANCH%
+if "%DO_BUILD%"=="1" call :tagrelease
 goto afterpush
+
+rem A release page is made by release.yml, which runs on a pushed v<version>
+rem tag and fails one that disagrees with Cargo.toml. So the tag is read from
+rem Cargo.toml, not from VERLABEL, and a tag that already exists means the
+rem version was not bumped: that is a skip, not a second release. Only reached
+rem after a branch push succeeded, so the tag never names a commit GitHub lacks.
+:tagrelease
+set "CRATEVER="
+for /f "tokens=2 delims==" %%v in ('findstr /r /b /c:"version *=" Cargo.toml') do if not defined CRATEVER set "CRATEVER=%%v"
+set "CRATEVER=!CRATEVER: =!"
+set "CRATEVER=!CRATEVER:"=!"
+if "!CRATEVER!"=="" (
+  echo [err]  no version in Cargo.toml - not tagging
+  set SAVE_ERROR=1
+  exit /b 0
+)
+set "TAG=v!CRATEVER!"
+git rev-parse -q --verify "refs/tags/!TAG!" >nul 2>&1
+if not errorlevel 1 goto tagexists
+git ls-remote --exit-code --tags origin "refs/tags/!TAG!" >nul 2>&1
+if not errorlevel 1 goto tagexists
+echo.
+set /p DOTAG=tag !TAG! and push it? that publishes a GitHub release. (y/n):
+if /i not "!DOTAG!"=="y" goto tagskipped
+git tag -a !TAG! -m "TelegramTools !TAG!"
+if errorlevel 1 goto tagfailed
+git push origin !TAG!
+if errorlevel 1 goto tagfailed
+echo.
+echo [git]  pushed !TAG! - the release builds at
+echo        https://github.com/KostaJovanovic/TelegramArchiveTools/actions
+exit /b 0
+
+:tagexists
+echo.
+echo [skip] !TAG! is already tagged - bump version in Cargo.toml for a new release
+exit /b 0
+
+:tagskipped
+echo.
+echo [git]  tag skipped - no release published
+exit /b 0
+
+:tagfailed
+echo [err]  could not tag or push !TAG!
+set SAVE_ERROR=1
+exit /b 0
 
 :pushskipped
 echo.
