@@ -174,6 +174,8 @@ TelegramTools export "Dev Team"
 TelegramTools export --since 2026-01-01 "Dev Team"   # only from that day on
 TelegramTools export --db "Dev Team"          # database instead of folders
 TelegramTools export --db --full "Dev Team"   # walk the whole history
+TelegramTools sync                            # update every database in Exports
+TelegramTools sync --json                     # the same, with a JSON summary
 
 TelegramTools analyse "Exports\Dev Team"      # write report.html beside it
 TelegramTools analyse Exports --refresh       # every export whose report is behind
@@ -184,6 +186,9 @@ and `--out <path>`. From `cmd.exe`, use `start /wait TelegramTools …` — it i
 windowed exe, and cmd does not wait for one by itself. PowerShell does.
 
 `TG_API_ID` and `TG_API_HASH` work instead of the settings file.
+
+To have another program or an AI agent update the databases and read the
+chats, see [docs/AI.md](docs/AI.md).
 
 ## Building
 

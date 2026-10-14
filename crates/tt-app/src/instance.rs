@@ -27,6 +27,23 @@ pub fn claim(data_dir: &std::path::Path) -> bool {
     }
 }
 
+/// Is a window already open on this data folder? Asks without claiming, so a
+/// command run beside nothing does not stop a window opening afterwards.
+///
+/// For the command line's syncs: they would be a second writer into the
+/// databases the window may be merging into.
+pub fn window_open(data_dir: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    {
+        imp::exists(&name(data_dir))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = data_dir;
+        false
+    }
+}
+
 /// The mutex's name: `Local\` (this sign-in session only) and a hash of the
 /// folder, lowercased because Windows paths are case-insensitive and two
 /// spellings of one folder are one folder.
@@ -73,6 +90,23 @@ mod imp {
         !taken
     }
 
+    /// Whether the mutex `claim` makes exists. `OpenMutexW` never creates
+    /// one, so asking leaves nothing behind.
+    pub fn exists(name: &str) -> bool {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
+        let name = wide(name);
+        // SAFETY: a NUL-terminated name; the handle is closed straight away.
+        unsafe {
+            let handle = OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, 0, name.as_ptr());
+            if handle.is_null() {
+                return false;
+            }
+            CloseHandle(handle);
+        }
+        true
+    }
+
     /// Bring the window that is already open to the front. By title, which
     /// is the app's name and nothing else; finding nothing is fine.
     fn raise() {
@@ -110,6 +144,17 @@ mod tests {
             name(Path::new(r"C:\A\TelegramToolsData")),
             name(Path::new(r"D:\A\TelegramToolsData"))
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn asking_whether_a_window_is_open_does_not_claim_one() {
+        // A folder no real window uses, so the test cannot collide with one.
+        let dir = Path::new(r"Z:\tt-app-test\window-open-probe");
+        assert!(!window_open(dir));
+        assert!(!window_open(dir), "the first ask must not have created it");
+        assert!(claim(dir));
+        assert!(window_open(dir));
     }
 
     #[test]

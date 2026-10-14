@@ -596,13 +596,19 @@ every `report*.html` and `*.stats.json`. Phase 1 checks the merged
 - The scratch clone `_tt-import` is deleted; its last commit, `12ebea8`, is in
   master's history.
 - **The account holder's, by their choice:** archiving the TelegramAnalyser
-  repository on GitHub with a pointer here, and renaming this one to
-  TelegramTools. Both are public, and the account holder chose to do both
-  themselves. The pointer can be one line at the top of its README: *Merged
-  into TelegramTools — <url>. This repository is archived.*
+  repository on GitHub with a pointer here, and renaming this one. Both are
+  public, and the account holder chose to do both themselves. The rename is
+  done (2026-10-14): the repository is
+  `github.com/KostaJovanovic/TelegramArchiveTools`, not `TelegramTools` as
+  planned; the program and the workspace keep the name TelegramTools, and
+  `origin` and `save.bat`'s `REPO` point at the new URL. The pointer can be
+  one line at the top of TelegramAnalyser's README: *Merged into
+  TelegramTools — https://github.com/KostaJovanovic/TelegramArchiveTools.
+  This repository is archived.*
 - **The language handshake is closed: reports are English.** The account
   holder's decision on 2026-10-13. Recorded in `docs/analyser/PLAN.md`; it
   reopens only with named languages and someone to write the strings.
 
-**The plan is complete.** Every phase is done here. What remains is the two
-GitHub steps above, which the account holder is doing.
+**The plan is complete.** Every phase is done here. What remains is archiving
+TelegramAnalyser, the one GitHub step above still open, which the account
+holder is doing.

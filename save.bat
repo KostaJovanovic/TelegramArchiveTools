@@ -7,7 +7,7 @@ rem non-zero if anything failed, so it can be chained.
 
 rem TelegramTools: the exporter and the analyser, one repository since the merge
 rem recorded in TELEGRAMTOOLS.md. Only used when the checkout has no origin.
-set REPO=https://github.com/KostaJovanovic/TelegramTools.git
+set REPO=https://github.com/KostaJovanovic/TelegramArchiveTools.git
 
 rem One binary: the window with no arguments, the exporter's commands and
 rem `analyse` behind its argv. The two it replaced are listed so `build` can

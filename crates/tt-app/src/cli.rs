@@ -20,10 +20,10 @@
 use anyhow::{anyhow, Result};
 use std::io::Write;
 use tgx_tg::cancel::Cancel;
-use tgx_tg::client::{Migration, Session};
+use tgx_tg::client::{ChatInfo, Migration, Session};
 use tgx_tg::config::Settings;
 use tgx_tg::dialogs;
-use tgx_tg::engine::{ChatExporter, Progress};
+use tgx_tg::engine::{ChatExporter, ExportResult, Progress};
 
 /// Run one exporter command. `args` is argv with the program name dropped.
 pub fn run(args: Vec<String>) -> Result<()> {
@@ -82,7 +82,41 @@ async fn command(args: Vec<String>) -> Result<()> {
             println!("Signed out.");
             Ok(())
         }
-        "chats" => chats(&settings).await,
+        "chats" => match args.get(1).map(String::as_str) {
+            None => chats(&settings, false).await,
+            Some("--json") => chats(&settings, true).await,
+            Some(other) => Err(anyhow!("unknown flag {other:?}\n\n{USAGE}")),
+        },
+        "sync" => {
+            // A database sync and nothing else, whatever the settings file
+            // says about folders — see `export --db` below for why the flag
+            // does not rewrite the file.
+            settings.export_db = true;
+            settings.date_from.clear();
+            settings.date_until.clear();
+            let mut only = Vec::new();
+            let mut json = false;
+            let mut rest = args.iter().skip(1);
+            while let Some(a) = rest.next() {
+                match a.as_str() {
+                    "--full" => settings.reread_all = true,
+                    "--json" => json = true,
+                    "--only" => only.push(
+                        rest.next()
+                            .ok_or_else(|| anyhow!("--only needs a chat id or title"))?
+                            .clone(),
+                    ),
+                    f if f.starts_with("--") => {
+                        return Err(anyhow!("unknown flag {f:?}\n\n{USAGE}"))
+                    }
+                    // The folder to sync is the folder the run writes into:
+                    // reading the databases from one place and writing them
+                    // to another would start fresh files beside the old.
+                    folder => settings.output_dir = folder.into(),
+                }
+            }
+            sync(&settings, &only, json).await
+        }
         "export" => {
             // The flags are read off the whole tail rather than positionally,
             // so `export --db "Dev Team"` and `export "Dev Team" --db`
@@ -735,13 +769,22 @@ TelegramTools -- export Telegram chats, and report on what was exported
 
   TelegramTools login            sign in (once; the session is saved)
   TelegramTools logout           end the session at Telegram and delete it here
-  TelegramTools chats            list every chat this account can see
-  TelegramTools export [--db] [--full] [--since DAY] [--until DAY] <title>
-                       export the chat whose title matches; --db syncs its
-                       database instead of writing folders, --full re-reads
-                       the whole history rather than the newest few hundred;
-                       --since and --until (2026-01-31, both inclusive) limit
-                       a folder export to those days
+  TelegramTools chats [--json]   list every chat this account can see; --json
+                       prints id, title, kind and the database each already
+                       has, as one JSON array
+  TelegramTools export [--db] [--full] [--since DAY] [--until DAY] <id|title>
+                       export the chat with that id, or whose title matches;
+                       --db syncs its database instead of writing folders,
+                       --full re-reads the whole history rather than the
+                       newest few hundred; --since and --until (2026-01-31,
+                       both inclusive) limit a folder export to those days
+  TelegramTools sync [<folder>] [--only <id|title>]... [--full] [--json]
+                       bring every database already in the folder (default:
+                       the export destination) up to date, one chat after
+                       another; --only narrows it; --json prints one JSON
+                       summary on stdout and narrates on stderr. Exit code 1
+                       if any chat failed or came through incomplete. Needs
+                       the window closed
   TelegramTools analyse <export> [options]
                        offline: write a report on an export or a database;
                        `TelegramTools analyse --help` for its options
@@ -886,12 +929,36 @@ async fn connected(settings: &Settings) -> Result<Session> {
     Ok(session)
 }
 
-async fn chats(settings: &Settings) -> Result<()> {
+async fn chats(settings: &Settings, json: bool) -> Result<()> {
     let session = connected(settings).await?;
     let mut list = dialogs::list_chats(&session.client)
         .await
         .map_err(|e| anyhow!("listing chats: {e}"))?;
     list.sort_by_key(|c| -c.last_activity);
+    if json {
+        // With the database each chat already has, if any, so a caller can
+        // tell what `sync` will cover without a second command. A destination
+        // that does not exist yet is "none", not an error.
+        let archived = tgx_tg::engine::archived_chats(std::path::Path::new(&settings.output_dir))
+            .await
+            .unwrap_or_default();
+        let rows: Vec<_> = list
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id,
+                    "title": c.title,
+                    "kind": c.kind.label(),
+                    "forum": c.is_forum,
+                    "last_activity": c.last_activity,
+                    "messages": c.message_count,
+                    "database": archived.files.get(&c.id).map(|p| p.display().to_string()),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
     println!("{} chats", list.len());
     for c in &list {
         let migration = match &c.migration {
@@ -910,110 +977,79 @@ async fn chats(settings: &Settings) -> Result<()> {
     Ok(())
 }
 
-async fn export(settings: &Settings, want: &str) -> Result<()> {
-    // The window's "Nothing to write" guard, which the CLI did not have: a
-    // settings file with both Classic formats off would read the whole chat and
-    // produce nothing.
-    if !settings.writes_anything() {
-        return Err(anyhow!(
-            "nothing to write: settings.json has HTML and JSON off and Database off. \
-             Pass --db, or turn a format on."
-        ));
+/// The chat `want` names: its id exactly, then its title exactly, then the
+/// first title containing it, all case-folded.
+///
+/// The id comes first because it is the one a script can rely on — `chats
+/// --json` prints it, and two chats may share a title or a prefix.
+///
+/// The empty string is rejected before this is reached, because `"".contains`
+/// is true of every title: `export ""` would have exported whichever chat the
+/// dialog list happened to return first, and then said it was exporting it —
+/// which is not a usage error the user can see, it is the wrong chat done
+/// confidently.
+fn find_chat<'a>(list: &'a [ChatInfo], want: &str) -> Option<&'a ChatInfo> {
+    let needle = want.trim().to_lowercase();
+    if let Ok(id) = needle.parse::<i64>() {
+        if let Some(c) = list.iter().find(|c| c.id == id) {
+            return Some(c);
+        }
     }
-    let session = connected(settings).await?;
-    let list = dialogs::list_chats(&session.client)
-        .await
-        .map_err(|e| anyhow!("listing chats: {e}"))?;
-
-    // Exact title first, substring second. The empty string is rejected in
-    // `main` rather than here, because `"".contains` is true of every title:
-    // `export ""` would have exported whichever chat the dialog list
-    // happened to return first, and then said it was exporting it — which is
-    // not a usage error the user can see, it is the wrong chat done confidently.
-    let needle = want.to_lowercase();
-    let chat = list
-        .iter()
+    list.iter()
         .find(|c| c.title.to_lowercase() == needle)
         .or_else(|| {
             list.iter()
                 .find(|c| c.title.to_lowercase().contains(&needle))
         })
-        .ok_or_else(|| anyhow!("no chat matching {want:?}"))?;
+}
 
-    println!("exporting {} ({})", chat.title, chat.kind.label());
+/// Where a command's narration goes. `export` and plain `sync` print to
+/// stdout; `sync --json` keeps stdout for the one JSON document and narrates
+/// on stderr, so a caller can parse the first without filtering the second.
+#[derive(Clone, Copy)]
+enum Out {
+    Stdout,
+    Stderr,
+}
 
-    // Two failures, two messages: a chat that has left the dialog list is a
-    // fact about the account, a sweep that did not finish is a fact about the
-    // connection, and telling the user the first when the second happened sends
-    // them looking for a chat they still have.
-    let peer = dialogs::peer_ref_for(&session.client, chat.id)
-        .await
-        .map_err(|e| anyhow!("looking up {}: {e}", chat.title))?
-        .ok_or_else(|| anyhow!("{} is no longer in the dialog list", chat.title))?;
+impl Out {
+    fn line(self, s: &str) {
+        match self {
+            Out::Stdout => println!("{s}"),
+            Out::Stderr => eprintln!("{s}"),
+        }
+    }
 
-    let topics = if chat.is_forum && settings.split_topics {
-        let t = dialogs::list_topics(&session.client, peer)
-            .await
-            .map_err(|e| anyhow!("listing topics: {e}"))?;
-        println!("  {} topics", t.len());
-        t
-    } else {
-        vec![dialogs::Topic::general()]
-    };
+    /// The `\r` counter is for a person watching a console. Piped into
+    /// something that reads it — a script, a model — it is thousands of
+    /// overwritten lines in one, so it is left out.
+    fn is_terminal(self) -> bool {
+        use std::io::IsTerminal;
+        match self {
+            Out::Stdout => std::io::stdout().is_terminal(),
+            Out::Stderr => std::io::stderr().is_terminal(),
+        }
+    }
 
-    // **No folder when nothing is going into one.** A database-only run would
-    // otherwise reserve an export directory, write nothing into it, and leave
-    // an empty `Dev Team (3)` behind on every sync.
-    let root = if settings.writes_folders() {
-        let root =
-            tgx_tg::engine::unique_dir(std::path::Path::new(&settings.output_dir), &chat.title)?;
-        println!("  into {}", root.display());
-        Some(root)
-    } else {
-        println!("  into the database only");
-        None
-    };
-
-    let mut exporter = ChatExporter::new(&session.client, settings, session.session());
-    let mut last_line = String::new();
-    let mut on_progress = |p: Progress| match p {
-        Progress::Total { total, .. } => println!("  telegram counts {total} messages"),
-        Progress::Messages { done, total, .. } => {
-            let line = if total > 0 {
-                format!("  {done} of {total}")
-            } else {
-                format!("  {done}")
-            };
-            if line != last_line {
-                print!("\r{line}    ");
+    fn counter(self, s: &str) {
+        match self {
+            Out::Stdout => {
+                print!("\r{s}    ");
                 let _ = std::io::stdout().flush();
-                last_line = line;
+            }
+            Out::Stderr => {
+                eprint!("\r{s}    ");
+                let _ = std::io::stderr().flush();
             }
         }
-        Progress::FloodWait { seconds } => {
-            println!("\n  rate limited, waiting {seconds}s");
-        }
-        Progress::Topic { title, messages } => println!("\n  {title}: {messages}"),
-        Progress::Log(msg) => {
-            println!("\n  {msg}");
-            log::info!("{msg}");
-            // The progress line is redrawn with `\r`, so anything printed over
-            // it has to leave `last_line` empty or the next identical count is
-            // suppressed and the counter appears to stop.
-            last_line.clear();
-        }
-        // Only reaches here under `RUST_LOG=debug`, which is a request for it.
-        Progress::Detail(msg) => {
-            println!("{msg}");
-            log::debug!("{msg}");
-            last_line.clear();
-        }
-    };
+    }
+}
 
-    // Ctrl-C stops the export the way the window's Stop button does, rather
-    // than killing the process: the JSON is streamed, so a run torn down
-    // mid-write leaves a **zero-byte** file, not a partial one. Everything
-    // fetched up to the key press is closed and kept.
+/// Ctrl-C stops the export the way the window's Stop button does, rather
+/// than killing the process: the JSON is streamed, so a run torn down
+/// mid-write leaves a **zero-byte** file, not a partial one. Everything
+/// fetched up to the key press is closed and kept.
+fn stop_on_ctrl_c() -> Cancel {
     let cancel = Cancel::new();
     {
         let cancel = cancel.clone();
@@ -1043,25 +1079,165 @@ async fn export(settings: &Settings, want: &str) -> Result<()> {
             }
         });
     }
+    cancel
+}
 
-    let result = exporter
+/// The window, if one is open on this data folder, is a second writer: in
+/// Database mode it may be merging into the very `.sqlite` a sync here would.
+/// See `instance`.
+fn refuse_beside_the_window() -> Result<()> {
+    if crate::instance::window_open(&tgx_tg::config::data_dir()) {
+        return Err(anyhow!(
+            "the TelegramTools window is open on this data folder; close it first, \
+             so the two do not both write into the same databases"
+        ));
+    }
+    Ok(())
+}
+
+async fn export(settings: &Settings, want: &str) -> Result<()> {
+    // The window's "Nothing to write" guard, which the CLI did not have: a
+    // settings file with both Classic formats off would read the whole chat and
+    // produce nothing.
+    if !settings.writes_anything() {
+        return Err(anyhow!(
+            "nothing to write: settings.json has HTML and JSON off and Database off. \
+             Pass --db, or turn a format on."
+        ));
+    }
+    refuse_beside_the_window()?;
+    let session = connected(settings).await?;
+    let list = dialogs::list_chats(&session.client)
+        .await
+        .map_err(|e| anyhow!("listing chats: {e}"))?;
+    let chat = find_chat(&list, want).ok_or_else(|| anyhow!("no chat matching {want:?}"))?;
+    // A database this chat already has, found by the id inside it, so a
+    // renamed chat syncs into its old file instead of starting a new one.
+    // None yet, or a folder export: the title names the file, as before.
+    let into = if settings.export_db {
+        tgx_tg::engine::archived_chats(std::path::Path::new(&settings.output_dir))
+            .await
+            .ok()
+            .and_then(|a| a.files.get(&chat.id).cloned())
+    } else {
+        None
+    };
+    let cancel = stop_on_ctrl_c();
+    let result = export_one(&session, settings, chat, into, &cancel, Out::Stdout).await?;
+    summarise(settings, &result, Out::Stdout);
+    Ok(())
+}
+
+/// One chat, start to finish, narrated to `out`. What `export` and `sync`
+/// share; the summary is the caller's, because `sync --json` wants the numbers
+/// and not the sentences. `into` is the database to sync into, when the caller
+/// already knows which file holds this chat.
+async fn export_one(
+    session: &Session,
+    settings: &Settings,
+    chat: &ChatInfo,
+    into: Option<std::path::PathBuf>,
+    cancel: &Cancel,
+    out: Out,
+) -> Result<ExportResult> {
+    out.line(&format!("exporting {} ({})", chat.title, chat.kind.label()));
+
+    // Two failures, two messages: a chat that has left the dialog list is a
+    // fact about the account, a sweep that did not finish is a fact about the
+    // connection, and telling the user the first when the second happened sends
+    // them looking for a chat they still have.
+    let peer = dialogs::peer_ref_for(&session.client, chat.id)
+        .await
+        .map_err(|e| anyhow!("looking up {}: {e}", chat.title))?
+        .ok_or_else(|| anyhow!("{} is no longer in the dialog list", chat.title))?;
+
+    let topics = if chat.is_forum && settings.split_topics {
+        let t = dialogs::list_topics(&session.client, peer)
+            .await
+            .map_err(|e| anyhow!("listing topics: {e}"))?;
+        out.line(&format!("  {} topics", t.len()));
+        t
+    } else {
+        vec![dialogs::Topic::general()]
+    };
+
+    // **No folder when nothing is going into one.** A database-only run would
+    // otherwise reserve an export directory, write nothing into it, and leave
+    // an empty `Dev Team (3)` behind on every sync.
+    let root = if settings.writes_folders() {
+        let root =
+            tgx_tg::engine::unique_dir(std::path::Path::new(&settings.output_dir), &chat.title)?;
+        out.line(&format!("  into {}", root.display()));
+        Some(root)
+    } else {
+        out.line("  into the database only");
+        None
+    };
+
+    let mut exporter = ChatExporter::new(&session.client, settings, session.session());
+    if let Some(path) = into {
+        out.line(&format!("  database {}", path.display()));
+        exporter.sync_into(path);
+    }
+    let counting = out.is_terminal();
+    let mut last_line = String::new();
+    let mut on_progress = |p: Progress| match p {
+        Progress::Total { total, .. } => out.line(&format!("  telegram counts {total} messages")),
+        Progress::Messages { done, total, .. } => {
+            if !counting {
+                return;
+            }
+            let line = if total > 0 {
+                format!("  {done} of {total}")
+            } else {
+                format!("  {done}")
+            };
+            if line != last_line {
+                out.counter(&line);
+                last_line = line;
+            }
+        }
+        Progress::FloodWait { seconds } => {
+            out.line(&format!("\n  rate limited, waiting {seconds}s"));
+        }
+        Progress::Topic { title, messages } => out.line(&format!("\n  {title}: {messages}")),
+        Progress::Log(msg) => {
+            out.line(&format!("\n  {msg}"));
+            log::info!("{msg}");
+            // The progress line is redrawn with `\r`, so anything printed over
+            // it has to leave `last_line` empty or the next identical count is
+            // suppressed and the counter appears to stop.
+            last_line.clear();
+        }
+        // Only reaches here under `RUST_LOG=debug`, which is a request for it.
+        Progress::Detail(msg) => {
+            out.line(&msg);
+            log::debug!("{msg}");
+            last_line.clear();
+        }
+    };
+
+    Ok(exporter
         .run(
             chat,
             peer,
             &topics,
             root.as_deref(),
             &mut on_progress,
-            &cancel,
+            cancel,
         )
-        .await?;
+        .await?)
+}
 
-    println!();
-    println!(
+/// The sentences under a finished chat.
+fn summarise(settings: &Settings, result: &ExportResult, out: Out) {
+    out.line("");
+    out.line(&format!(
         "done: {} messages across {} topics ({} empty)",
         result.messages, result.topics, result.empty_topics
-    );
+    ));
     if settings.export_db {
-        println!(
+        out.line(&format!(
             "database: +{} new, {} changed, {} deleted on Telegram (kept), \
              {} files stored — {} archived",
             result.db_new,
@@ -1069,27 +1245,27 @@ async fn export(settings: &Settings, want: &str) -> Result<()> {
             result.db_deleted,
             result.db_blobs,
             result.db_archived
-        );
+        ));
     }
     if result.media_downloaded > 0 || result.media_missing > 0 {
         // The count that matches missing_media.txt, for the same reason the
         // window's warning uses it: a failed job costs more than one file.
-        println!(
+        out.line(&format!(
             "media: {} saved ({:.1} MB), {} could not be fetched",
             result.media_downloaded,
             result.bytes_downloaded as f64 / 1_048_576.0,
             result.media_missing
-        );
+        ));
     }
     // A short export must not read like a complete one.
     if !result.complete() {
-        println!(
+        out.line(&format!(
             "INCOMPLETE: Telegram counted {}; {} came through",
             result.expected, result.messages
-        );
+        ));
     }
     if result.members > 0 {
-        println!(
+        out.line(&format!(
             "members: {}{}",
             result.members,
             if result.members_complete {
@@ -1097,20 +1273,208 @@ async fn export(settings: &Settings, want: &str) -> Result<()> {
             } else {
                 " (INCOMPLETE — Telegram stopped serving the list)"
             }
-        );
+        ));
     }
     if result.enrich_deferred > 0 {
-        println!(
+        out.line(&format!(
             "{} optional requests were lost to rate limits or Telegram server errors \
              (the data was there)",
             result.enrich_deferred
-        );
+        ));
     }
     if !result.degraded.is_empty() {
-        println!(
+        out.line(&format!(
             "unmapped types written as text: {}",
             result.degraded.join(", ")
-        );
+        ));
+    }
+}
+
+/// `sync`: bring every database already in `settings.output_dir` up to date,
+/// one connection for the lot.
+///
+/// **Which chats is decided by the folder, not by a list of titles.** The ids
+/// come from inside the files — [`tgx_tg::engine::archived_chats`], which is
+/// how the window finds them too — so a chat renamed on Telegram
+/// since the last run is still found, and a caller that knows nothing about
+/// the account can still say "update what is there".
+///
+/// One chat failing does not stop the rest: with a file each, the next has
+/// every chance of working. The exit code says whether all of them made it.
+async fn sync(settings: &Settings, only: &[String], json: bool) -> Result<()> {
+    use serde_json::json;
+    let out = if json { Out::Stderr } else { Out::Stdout };
+    let dir = std::path::PathBuf::from(&settings.output_dir);
+    let archived = tgx_tg::engine::archived_chats(&dir)
+        .await
+        .map_err(|e| anyhow!("could not read {}: {e}", dir.display()))?;
+
+    // `--only` narrows by id or title, matched against what the files record —
+    // the same rule as `export`, but over the databases, not the dialog list.
+    let mut wanted: Vec<&(i64, String)> = archived.chats.iter().collect();
+    if !only.is_empty() {
+        wanted.retain(|(id, title)| {
+            only.iter().any(|w| {
+                let w = w.trim().to_lowercase();
+                w == id.to_string() || title.to_lowercase().contains(&w)
+            })
+        });
+        if wanted.is_empty() {
+            return Err(anyhow!(
+                "no database in {} matches {}",
+                dir.display(),
+                only.join(", ")
+            ));
+        }
+    }
+    if wanted.is_empty() {
+        return Err(anyhow!(
+            "no databases in {} to sync — make the first with \
+             `TelegramTools export --db <title>`",
+            dir.display()
+        ));
+    }
+
+    refuse_beside_the_window()?;
+    let session = connected(settings).await?;
+    let list = dialogs::list_chats(&session.client)
+        .await
+        .map_err(|e| anyhow!("listing chats: {e}"))?;
+    let cancel = stop_on_ctrl_c();
+
+    let mut rows = Vec::new();
+    let mut whole = 0usize;
+    for (n, (id, title)) in wanted.iter().enumerate() {
+        out.line(&format!("\n[{}/{}] {title} (id {id})", n + 1, wanted.len()));
+        let database = archived.files.get(id).map(|p| p.display().to_string());
+        // By id only: a title here is what the file recorded, and a substring
+        // match could land on a different chat that happens to contain it.
+        let Some(chat) = list.iter().find(|c| c.id == *id) else {
+            out.line("  not in this account's dialog list — left, removed or migrated; skipped");
+            rows.push(json!({
+                "chat_id": id, "title": title, "database": database,
+                "status": "not_in_dialogs",
+            }));
+            continue;
+        };
+        if cancel.is_cancelled() {
+            rows.push(json!({
+                "chat_id": id, "title": title, "database": database,
+                "status": "cancelled",
+            }));
+            continue;
+        }
+        // Into the file it was found in, never one worked out from the title.
+        let into = archived.files.get(id).cloned();
+        match export_one(&session, settings, chat, into, &cancel, out).await {
+            Ok(r) => {
+                summarise(settings, &r, out);
+                let status = if r.complete() { "synced" } else { "incomplete" };
+                if r.complete() {
+                    whole += 1;
+                }
+                rows.push(json!({
+                    "chat_id": id,
+                    "title": chat.title,
+                    "database": r.database.as_ref().map(|p| p.display().to_string()).or(database),
+                    "status": status,
+                    "new": r.db_new,
+                    "changed": r.db_changed,
+                    "deleted": r.db_deleted,
+                    "files_stored": r.db_blobs,
+                    "media_missing": r.media_missing,
+                    "messages_stored": r.db_archived,
+                    "messages_read": r.messages,
+                }));
+            }
+            Err(e) => {
+                out.line(&format!("  FAILED: {e:#}"));
+                rows.push(json!({
+                    "chat_id": id, "title": title, "database": database,
+                    "status": "failed", "error": format!("{e:#}"),
+                }));
+            }
+        }
+    }
+
+    let skipped: Vec<_> = archived
+        .unreadable
+        .iter()
+        .map(|(p, why)| json!({ "path": p.display().to_string(), "why": why }))
+        .collect();
+    for (p, why) in &archived.unreadable {
+        out.line(&format!("skipped {}: {why}", p.display()));
+    }
+    // A chat the account has left is reported but does not fail the run: it
+    // will be gone on every later sync too, and an exit code that is always 1
+    // teaches the caller to ignore it.
+    let gone = rows
+        .iter()
+        .filter(|r| r["status"] == "not_in_dialogs")
+        .count();
+    let short = rows.len() - whole - gone;
+    out.line(&format!(
+        "\n{whole} of {} database(s) synced whole under {}",
+        rows.len(),
+        dir.display()
+    ));
+    if json {
+        let doc = json!({
+            "folder": dir.display().to_string(),
+            "full": settings.reread_all,
+            "synced": whole,
+            "not_synced": short,
+            "chats": rows,
+            "unreadable": skipped,
+        });
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+    }
+    if short > 0 {
+        return Err(anyhow!(
+            "{short} of {} database(s) did not sync whole — see the status of each",
+            rows.len()
+        ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tgx_tg::client::ChatKind;
+
+    fn chat(id: i64, title: &str) -> ChatInfo {
+        ChatInfo {
+            id,
+            title: title.into(),
+            kind: ChatKind::Supergroup,
+            last_activity: 0,
+            is_forum: false,
+            public: false,
+            message_count: None,
+            migration: None,
+        }
+    }
+
+    #[test]
+    fn an_id_beats_a_title_that_contains_it() {
+        // A title with the digits in it must not win over the chat whose id
+        // they are: the id is what `chats --json` hands a script.
+        let list = [chat(1, "Room 1234"), chat(1234, "Ops")];
+        assert_eq!(find_chat(&list, "1234").map(|c| c.id), Some(1234));
+    }
+
+    #[test]
+    fn an_exact_title_beats_a_longer_one_and_case_does_not_matter() {
+        let list = [chat(1, "Dev Team archive"), chat(2, "Dev Team")];
+        assert_eq!(find_chat(&list, "dev team").map(|c| c.id), Some(2));
+        assert_eq!(find_chat(&list, "ARCHIVE").map(|c| c.id), Some(1));
+        assert!(find_chat(&list, "nobody").is_none());
+    }
+
+    #[test]
+    fn the_usage_names_sync_and_the_json_flags() {
+        assert!(USAGE.contains("TelegramTools sync"));
+        assert!(USAGE.contains("chats [--json]"));
+    }
 }

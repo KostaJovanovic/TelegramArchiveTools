@@ -24,7 +24,8 @@ it is. `docs/analyser/REFACTOR.md` is the log of the rewrite that gave the
 analyser its current shape. `AUDIT.md` holds
 what past reviews and live runs found. `DEFECTS.csv` is the register of known
 output differences against Desktop, with a `caught_by` column naming what would
-have found each — eleven are open, and several are invisible to every leg. Read
+have found each; its `status` column says which are open, and several are
+invisible to every leg. Read
 the relevant part before changing the area it covers.
 
 ## Commands
@@ -42,7 +43,13 @@ save.bat bless              # re-record the analyser's committed golden
 save.bat report <folder>    # write report.html beside an export
 save.bat run                # the window, from source
 save.bat clean              # report target\ and empty it
+save.bat save|commit        # test, then commit (+ push for save)
+save.bat release            # test + commit + push + build
+save.bat push|pull          # current branch; --force = force-with-lease + if-includes
 ```
+
+`save`, `commit`, `release`, `push` and `--force` are git actions: they commit
+or publish, so don't run them unless asked.
 
 Underneath it is plain cargo:
 
@@ -78,7 +85,8 @@ without it a suite that compared nothing reports as coverage. `save.bat` and CI
 both pass it.
 
 CI (`windows-latest`) runs fmt, clippy with `-D warnings`, `cargo test --all`,
-a release build, and fails if the binary exceeds 30 MB.
+a release build, and fails if the binary exceeds 30 MB. Every resolving step
+passes `--locked`, so a dependency change must ship with its `Cargo.lock`.
 
 `save.bat clean` exists because `target\` is a cache cargo never collects; it
 reached 45 GB once. `[profile.dev.package."*"] debug = false` in the root
@@ -183,7 +191,8 @@ incremental in name only.
 
 **One database per chat, named after the chat, in a folder of its own.**
 `ChatExporter::open_archive` opens `<output_dir>/<title>/<title>.sqlite`
-(sanitised) at the top of every `run` and the
+(sanitised) at the top of every `run`; `archive_path` moves an older flat
+`<output_dir>/<title>.sqlite` (and its `-wal`/`-shm`) into that folder. The
 assignment drops the previous chat's connection. The name has to be *stable* or
 a re-run would start a fresh archive instead of syncing, so it is deliberately
 not `unique_dir` — no `(2)` on a clash. The clash is caught inside the file
@@ -442,7 +451,7 @@ rename fails** rather than starting an empty one — an empty folder would sign
 the user out and strand their credential under a name nothing reads.
 
 **`Exports/` is not protected, and the databases live there.**
-`<output_dir>/<chat>.sqlite` holds every message of that chat, every earlier
+`<output_dir>/<chat>/<chat>.sqlite` holds every message of that chat, every earlier
 version, every participant and every media byte — other people's conversation,
 in the folder most likely to be copied to a drive, in the file most likely to be
 handed to somebody on its own. That is why it is one file per chat and not one

@@ -584,6 +584,9 @@ pub struct ChatExporter<'a> {
     /// has to name `tgx-archive` — the window may depend only on `tgx-ui` and
     /// `tgx-tg`, and `layering.rs` fails the build if that changes.
     store: Option<tgx_archive::Store>,
+    /// **A database the caller already found**, to sync into instead of the
+    /// one the title names. See [`Self::sync_into`].
+    archive_at: Option<PathBuf>,
     /// Everyone this chat's run met whose profile picture can be asked for:
     /// the roster and every sender. **This chat's**, cleared at the top of
     /// every run — a picture belongs in the database of a chat its owner is
@@ -603,8 +606,22 @@ impl<'a> ChatExporter<'a> {
             session,
             peers_tried: std::collections::HashSet::new(),
             store: None,
+            archive_at: None,
             faces: Default::default(),
         }
+    }
+
+    /// Sync the next run into this file rather than the one the chat's title
+    /// names.
+    ///
+    /// For a caller that found the database by what is **inside** it —
+    /// [`archived_chats`] — and so already knows which file is this chat's.
+    /// Worked out again from the title, a chat renamed on Telegram since the
+    /// last run, or a file whose name was never quite the title, would get a
+    /// fresh database beside the old one, and the old one would stop moving
+    /// without anything saying so.
+    pub fn sync_into(&mut self, path: PathBuf) {
+        self.archive_at = Some(path);
     }
 
     /// Open this chat's database, and **be sure it is this chat's**.
@@ -634,6 +651,21 @@ impl<'a> ChatExporter<'a> {
         &self,
         chat: &ChatInfo,
     ) -> Result<(tgx_archive::Store, PathBuf), ExportError> {
+        if let Some(path) = &self.archive_at {
+            let store = tgx_archive::Store::open(path).await?;
+            // The caller found this file holding this chat; one holding
+            // another is a mix-up, and writing into it is the one thing a
+            // file per chat exists to prevent.
+            if store.holds_another_chat(chat.id).await? {
+                return Err(ExportError::Settings(format!(
+                    "{} holds another chat, not {} (id {})",
+                    path.display(),
+                    chat.title,
+                    chat.id
+                )));
+            }
+            return Ok((store, path.clone()));
+        }
         let dir = Path::new(&self.settings.output_dir);
         let base = tgx_media::topics::sanitize_component(&chat.title, "chat");
         let path = archive_path(dir, &base)?;
