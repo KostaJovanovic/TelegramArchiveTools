@@ -61,10 +61,14 @@ fn name(data_dir: &std::path::Path) -> String {
 
 #[cfg(windows)]
 mod imp {
-    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
-    use windows_sys::Win32::System::Threading::CreateMutexW;
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HWND};
+    use windows_sys::Win32::System::Threading::{
+        CreateMutexW, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE,
+        FindWindowExW, GetWindowThreadProcessId, IsIconic, SetForegroundWindow, ShowWindow,
+        SW_RESTORE,
     };
 
     fn wide(s: &str) -> Vec<u16> {
@@ -107,21 +111,89 @@ mod imp {
         true
     }
 
-    /// Bring the window that is already open to the front. By title, which
-    /// is the app's name and nothing else; finding nothing is fine.
+    /// Bring the window that is already open to the front; finding nothing
+    /// is fine.
+    ///
+    /// **By title and by whose window it is.** The title alone is the app's
+    /// name, and so is this repository's folder: with it open in Explorer, a
+    /// second launch raised Explorer and left the app behind it. So every
+    /// top-level window with the title is asked which program owns it, and
+    /// the one this program owns wins — see [`super::rank`].
     fn raise() {
+        let Ok(ours) = std::env::current_exe() else {
+            return;
+        };
         let title = wide(crate::TITLE);
-        // SAFETY: a null class and a NUL-terminated title; the handle is
-        // checked before use.
+        let mut best: Option<(u8, HWND)> = None;
+        let mut after: HWND = std::ptr::null_mut();
+        // SAFETY: a null parent (top-level windows only), a null class and a
+        // NUL-terminated title; every handle is checked before use. Bounded,
+        // because a window list that changes under the walk must not loop.
         unsafe {
-            let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
-            if !hwnd.is_null() {
+            for _ in 0..64 {
+                after = FindWindowExW(
+                    std::ptr::null_mut(),
+                    after,
+                    std::ptr::null(),
+                    title.as_ptr(),
+                );
+                if after.is_null() {
+                    break;
+                }
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(after, &mut pid);
+                let rank = image(pid).map_or(0, |theirs| super::rank(&ours, &theirs));
+                if rank > best.map_or(0, |(r, _)| r) {
+                    best = Some((rank, after));
+                }
+            }
+            if let Some((_, hwnd)) = best {
                 if IsIconic(hwnd) != 0 {
                     ShowWindow(hwnd, SW_RESTORE);
                 }
                 SetForegroundWindow(hwnd);
             }
         }
+    }
+
+    /// The executable a process was started from.
+    fn image(pid: u32) -> Option<std::path::PathBuf> {
+        // SAFETY: a plain open with the least access that can name the image;
+        // the handle is closed below.
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return None;
+        }
+        let mut name = [0u16; 1024];
+        let mut len = name.len() as u32;
+        // SAFETY: the buffer's length is what is passed.
+        let ok = unsafe {
+            QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, name.as_mut_ptr(), &mut len)
+        };
+        // SAFETY: opened above, closed once.
+        unsafe { CloseHandle(handle) };
+        (ok != 0).then(|| std::path::PathBuf::from(String::from_utf16_lossy(&name[..len as usize])))
+    }
+}
+
+/// How surely a window owned by the program at `theirs` is this app's, given
+/// that this program is `ours`: 2 for the same executable, 1 for one of the same
+/// name elsewhere, 0 for anything else — Explorer showing a folder called
+/// TelegramTools, say.
+///
+/// A copy elsewhere still counts, below the exact one, because the claim is
+/// per data folder and not per file: a debug and a release build under
+/// `target\` share the workspace's.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn rank(ours: &std::path::Path, theirs: &std::path::Path) -> u8 {
+    let fold = |p: &std::path::Path| p.to_string_lossy().to_lowercase();
+    let name = |p: &std::path::Path| p.file_name().map(|n| n.to_string_lossy().to_lowercase());
+    if fold(ours) == fold(theirs) {
+        2
+    } else if name(ours).is_some() && name(ours) == name(theirs) {
+        1
+    } else {
+        0
     }
 }
 
@@ -155,6 +227,16 @@ mod tests {
         assert!(!window_open(dir), "the first ask must not have created it");
         assert!(claim(dir));
         assert!(window_open(dir));
+    }
+
+    #[test]
+    fn a_window_titled_like_the_app_is_raised_only_if_the_app_owns_it() {
+        let ours = Path::new(r"C:\Tools\TelegramTools.exe");
+        // Explorer showing a folder named TelegramTools has the same title.
+        assert_eq!(rank(ours, Path::new(r"C:\Windows\explorer.exe")), 0);
+        assert_eq!(rank(ours, Path::new(r"c:\tools\telegramtools.EXE")), 2);
+        // A debug and a release build share the workspace's data folder.
+        assert_eq!(rank(ours, Path::new(r"C:\Other\TelegramTools.exe")), 1);
     }
 
     #[test]

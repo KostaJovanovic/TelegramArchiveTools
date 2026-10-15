@@ -5,7 +5,7 @@
 //! [`Event`](crate::bridge::Event)s, which wake the window rather than waiting
 //! to be found on its next frame.
 
-use crate::bridge::{Activity, Event, Events};
+use crate::bridge::{on_panic, Activity, Event, Events};
 use crate::pending::Pending;
 use tgx_tg::cancel::Cancel;
 use tgx_tg::client::{LoginStep, Session};
@@ -20,6 +20,7 @@ use tgx_tg::error::EnrichError;
 /// dialogs on top of each other, which a user experiences as the app freezing
 /// the moment it logs them in.
 pub async fn sign_in(settings: Settings, tx: Events) {
+    on_panic(|why| Activity::SignIn.ending(why));
     let _ = tx.send(Event::Status("Connecting…".into()));
     let session = match Session::connect(&settings).await {
         Ok(s) => s,
@@ -130,16 +131,71 @@ pub fn report_data_dir_protection(tx: &Events) {
 /// nowhere else is the login token, and after a two-factor prompt the password
 /// token: both are half-finished credentials, so this is cleared the moment the
 /// sign-in ends, either way.
-static PENDING: std::sync::OnceLock<tokio::sync::Mutex<Option<Session>>> =
+static PENDING: std::sync::OnceLock<tokio::sync::Mutex<LoginSlot<Session>>> =
     std::sync::OnceLock::new();
 
-fn pending() -> &'static tokio::sync::Mutex<Option<Session>> {
-    PENDING.get_or_init(|| tokio::sync::Mutex::new(None))
+fn pending() -> &'static tokio::sync::Mutex<LoginSlot<Session>> {
+    PENDING.get_or_init(|| tokio::sync::Mutex::new(LoginSlot::default()))
+}
+
+/// Where a half-finished sign-in waits between steps.
+///
+/// **A step takes the session out; it does not hold the lock.** It used to keep
+/// the guard across `sign_in`, `check_password` and `me` — network calls with
+/// deliberately long timeouts — so Cancel on the dialog, or Sign out, queued
+/// behind a step stuck on a bad link: "Signing out…" for the whole timeout,
+/// and an abandoned login token alive in memory all that while.
+///
+/// So a step [`take`](Self::take)s the session with the generation it belongs
+/// to, runs unlocked, and [`put_back`](Self::put_back) refuses it if the
+/// sign-in was forgotten or started over in the meantime. Generic so the rule
+/// can be tested without a connection.
+struct LoginSlot<T> {
+    held: Option<T>,
+    /// Moves on every new sign-in and every forget, so a step that finishes
+    /// late cannot bring back a credential the user has already thrown away.
+    generation: u64,
+}
+
+impl<T> Default for LoginSlot<T> {
+    fn default() -> Self {
+        Self {
+            held: None,
+            generation: 0,
+        }
+    }
+}
+
+impl<T> LoginSlot<T> {
+    /// A new sign-in, superseding any step still in flight.
+    fn start(&mut self, held: T) {
+        self.generation += 1;
+        self.held = Some(held);
+    }
+
+    fn forget(&mut self) {
+        self.generation += 1;
+        self.held = None;
+    }
+
+    fn take(&mut self) -> Option<(T, u64)> {
+        self.held.take().map(|held| (held, self.generation))
+    }
+
+    /// Keep a session a step left usable — unless the sign-in it belongs to
+    /// is over. `false` means it was dropped.
+    fn put_back(&mut self, held: T, generation: u64) -> bool {
+        if generation != self.generation || self.held.is_some() {
+            return false;
+        }
+        self.held = Some(held);
+        true
+    }
 }
 
 /// Drop any half-finished sign-in.
 pub async fn forget_pending_login() {
-    *pending().lock().await = None;
+    pending().lock().await.forget();
 }
 
 /// Sign out: end the session at Telegram and delete the session file.
@@ -158,6 +214,7 @@ pub async fn sign_out(settings: Settings, tx: Events) {
 
 /// Ask Telegram to send a login code.
 pub async fn request_code(settings: Settings, tx: Events) {
+    on_panic(|why| Activity::SignIn.ending(why));
     let mut session = match Session::connect(&settings).await {
         Ok(s) => s,
         Err(e) => {
@@ -177,7 +234,7 @@ pub async fn request_code(settings: Settings, tx: Events) {
         Ok(_) => {
             // Held for the next step. The code Telegram just sent is only
             // usable with the token on this session.
-            *pending().lock().await = Some(session);
+            pending().lock().await.start(session);
             let _ = tx.send(Event::LoginStage(crate::login::Stage::Code));
         }
         Err(e) => {
@@ -192,8 +249,11 @@ pub async fn request_code(settings: Settings, tx: Events) {
 /// re-request the code: that starts the authorisation over and invalidates the
 /// one the user just typed.
 pub async fn finish_login(secret: String, is_code: bool, tx: Events) {
-    let mut held = pending().lock().await;
-    let Some(session) = held.as_mut() else {
+    on_panic(|why| Activity::SignIn.ending(why));
+    // Out of the slot for the length of the step, so nothing that wants the
+    // lock waits on Telegram. See `LoginSlot`.
+    let taken = pending().lock().await.take();
+    let Some((mut session, generation)) = taken else {
         // Nothing to continue: the dialog was reopened, or the app restarted
         // between the code arriving and it being typed.
         let _ = tx.send(Event::LoginFailed(
@@ -202,27 +262,34 @@ pub async fn finish_login(secret: String, is_code: bool, tx: Events) {
         let _ = tx.send(Event::LoginStage(crate::login::Stage::Phone));
         return;
     };
+    let keep = |session| async move {
+        pending().lock().await.put_back(session, generation);
+    };
     if is_code {
         match session.sign_in(&secret).await {
             Ok(LoginStep::Ready) => {}
             Ok(LoginStep::NeedPassword) => {
                 // Kept: the password token `sign_in` stashed lives on this
                 // session and there is no way to obtain another.
+                keep(session).await;
                 let _ = tx.send(Event::LoginStage(crate::login::Stage::Password));
                 return;
             }
             Ok(LoginStep::NeedCode) => {
+                keep(session).await;
                 let _ = tx.send(Event::LoginFailed("Telegram wanted another code.".into()));
                 return;
             }
             // Kept as well. A mistyped code does not spend the token, so the
             // user retypes rather than starting the whole sign-in again.
             Err(e) => {
+                keep(session).await;
                 let _ = tx.send(Event::LoginFailed(e.to_string()));
                 return;
             }
         }
     } else if let Err(e) = session.check_password(&secret).await {
+        keep(session).await;
         let _ = tx.send(Event::LoginFailed(e.to_string()));
         return;
     }
@@ -232,11 +299,12 @@ pub async fn finish_login(secret: String, is_code: bool, tx: Events) {
             // action is about to want it — but the login and password tokens
             // this `Session` is carrying are spent, and a spent credential
             // left in memory for the rest of the run is a credential left in
-            // memory for the rest of the run.
-            *held = None;
+            // memory for the rest of the run. So it is not put back.
+            drop(session);
             let _ = tx.send(Event::SignedIn(name));
         }
         Err(e) => {
+            keep(session).await;
             let _ = tx.send(Event::LoginFailed(e.to_string()));
         }
     }
@@ -244,6 +312,7 @@ pub async fn finish_login(secret: String, is_code: bool, tx: Events) {
 
 /// Load the chat list.
 pub async fn refresh_chats(settings: Settings, tx: Events) {
+    on_panic(|why| Activity::Chats.ending(why));
     let _ = tx.send(Event::Status("Loading chats…".into()));
     let session = match Session::connect(&settings).await {
         Ok(s) => s,
@@ -276,6 +345,9 @@ pub async fn refresh_chats(settings: Settings, tx: Events) {
 /// **No connection.** It reads the folder and the files, nothing else, so it
 /// cannot hang on a network and does not need one. The run it leads to does.
 pub async fn find_archives(settings: Settings, tx: Events) {
+    // Every one-shot tool below declares the event that brings its button
+    // back, carrying the reason, the same way the long runs do.
+    on_panic(|why| vec![Event::Archived(Err(format!("Looking for databases {why}")))]);
     let dir = std::path::Path::new(&settings.output_dir);
     let _ = tx.send(Event::Status(format!(
         "Looking for databases in {}…",
@@ -296,6 +368,7 @@ pub async fn unpack(
     settings: Settings,
     tx: Events,
 ) {
+    on_panic(|why| vec![Event::Unpacked(Err(format!("Export as folder {why}")))]);
     let done = tgx_tg::unpack::write_classic(&db, &out_dir, &settings)
         .await
         .map(|chats| {
@@ -340,6 +413,7 @@ pub async fn check_volume(settings: Settings, tx: Events) {
 /// Check folder: what is wrong with the destination, as log lines. Changes
 /// nothing — see `tgx_tg::doctor`.
 pub async fn check_folder(settings: Settings, tx: Events) {
+    on_panic(|why| vec![Event::Checked(Err(format!("Check folder {why}")))]);
     let dir = std::path::Path::new(&settings.output_dir);
     let lines = tgx_tg::doctor::examine(dir)
         .await
@@ -351,6 +425,11 @@ pub async fn check_folder(settings: Settings, tx: Events) {
 /// Find duplicate media: what is stored more than once in the destination,
 /// as log lines. Changes nothing — see `tgx_tg::doctor::duplicates`.
 pub async fn find_dupes(settings: Settings, tx: Events) {
+    on_panic(|why| {
+        vec![Event::Dupes(Err(format!(
+            "Looking for duplicate media {why}"
+        )))]
+    });
     let dir = std::path::Path::new(&settings.output_dir);
     let _ = tx.send(Event::Status(format!(
         "Looking for duplicate media in {}…",
@@ -369,20 +448,36 @@ const DUPE_GROUPS_SHOWN: usize = 20;
 
 /// Which chats the destination already holds, for the marks in the list.
 ///
-/// **Quiet on failure.** A destination that does not exist yet is the normal
-/// state before a first export, and a warning on every launch for it would
-/// teach the user to ignore warnings. It answers "nothing there" instead.
+/// **Quiet when the folder is simply not there yet.** That is the normal state
+/// before a first export, and a warning on every launch for it would teach the
+/// user to ignore warnings. It answers "nothing there" instead.
+///
+/// **Anything else is said, and the marks are left alone.** Every failure used
+/// to answer "nothing there" too, and that answer replaces the last good one:
+/// an unplugged drive or a refused read re-marked every chat "Not exported
+/// yet" and blanked the sizes, with nothing on screen saying the destination
+/// had only gone out of reach.
 pub async fn scan_destination(settings: Settings, tx: Events) {
     use crate::list::OnDisk;
     use std::collections::HashMap;
     let dir = std::path::PathBuf::from(&settings.output_dir);
-    let archived = tgx_tg::engine::archived_chats(&dir)
-        .await
-        .unwrap_or_default();
+    let unreadable = |e: &dyn std::fmt::Display| {
+        let _ = tx.send(Event::Warn(format!(
+            "Could not read {} ({e}); the Exported marks are left as they were",
+            dir.display()
+        )));
+    };
+    let archived = match tgx_tg::engine::archived_chats(&dir).await {
+        Ok(archived) => archived,
+        Err(e) if not_made_yet(&dir, &e) => Default::default(),
+        Err(e) => return unreadable(&e),
+    };
     // Off the async worker's own thread: it reads the head of a file per
     // folder and walks every folder for its size, and a destination of a few
     // hundred thousand media files on a network drive makes that slow.
-    let disk = tokio::task::spawn_blocking(move || {
+    let walk_dir = dir.clone();
+    let walked = tokio::task::spawn_blocking(move || {
+        let dir = walk_dir;
         let mut disk: HashMap<i64, OnDisk> = HashMap::new();
         for (id, path) in &archived.files {
             let entry = disk.entry(*id).or_default();
@@ -405,7 +500,12 @@ pub async fn scan_destination(settings: Settings, tx: Events) {
                     .sum(),
             };
         }
-        for (id, folders) in tgx_tg::engine::exported_folders(&dir).unwrap_or_default() {
+        let folders = match tgx_tg::engine::exported_folders(&dir) {
+            Ok(folders) => folders,
+            Err(e) if not_made_yet(&dir, &e) => Default::default(),
+            Err(e) => return Err(e),
+        };
+        for (id, folders) in folders {
             let entry = disk.entry(id).or_default();
             entry.folder = true;
             for folder in folders {
@@ -417,14 +517,35 @@ pub async fn scan_destination(settings: Settings, tx: Events) {
                 }
             }
         }
-        disk
+        Ok(disk)
     })
-    .await
-    .unwrap_or_default();
+    .await;
+    let disk = match walked {
+        Ok(Ok(disk)) => disk,
+        Ok(Err(e)) => return unreadable(&e),
+        Err(e) => {
+            log::warn!("scanning {}: {e}", dir.display());
+            return unreadable(&e);
+        }
+    };
     let _ = tx.send(Event::OnDisk {
         output_dir: settings.output_dir,
         disk,
     });
+}
+
+/// Is this a destination that does not exist *yet*, rather than one out of
+/// reach?
+///
+/// The parent is the difference. A folder the first export has not made sits
+/// in one that exists; a destination on a drive that has been unplugged reads
+/// as "not found" just the same, and its parent is gone with it — as is a
+/// drive's root, which has no parent to ask.
+fn not_made_yet(dir: &std::path::Path, e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::NotFound
+        && dir
+            .parent()
+            .is_some_and(|p| p.as_os_str().is_empty() || p.is_dir())
 }
 
 /// Ask Telegram how many messages each chat holds.
@@ -434,6 +555,7 @@ pub async fn scan_destination(settings: Settings, tx: Events) {
 /// two-minute rate-limit wait. Both facts are the user's to know before they
 /// press it, and both are why it has to be stoppable.
 pub async fn count_chats(settings: Settings, chat_ids: Vec<i64>, cancel: Cancel, tx: Events) {
+    on_panic(|why| Activity::Count.ending(why));
     let session = match Session::connect(&settings).await {
         Ok(s) => s,
         Err(e) => {
@@ -750,6 +872,96 @@ mod tests {
             !events.iter().any(|e| matches!(e, Event::ChatFailed { .. })),
             "got {events:?}"
         );
+    }
+
+    /// What `scan_destination` sends for `dir`.
+    async fn scanned(dir: &std::path::Path) -> Vec<Event> {
+        let (raw, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = crate::bridge::Events::detached(raw);
+        let settings = Settings {
+            output_dir: dir.display().to_string(),
+            ..Settings::default()
+        };
+        scan_destination(settings, tx).await;
+        let mut events = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        events
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("tt-scan-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn a_destination_not_made_yet_is_quietly_empty() {
+        // Before a first export this is every launch; a warning here would be
+        // a warning on every launch.
+        let parent = scratch("fresh");
+        let events = scanned(&parent.join("Exports")).await;
+        assert!(
+            matches!(events.as_slice(), [Event::OnDisk { disk, .. }] if disk.is_empty()),
+            "got {events:?}"
+        );
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[tokio::test]
+    async fn a_destination_out_of_reach_warns_and_keeps_the_marks() {
+        // The unplugged drive: the folder and its parent are both gone. An
+        // empty `OnDisk` here would re-mark every chat "Not exported yet".
+        let parent = scratch("gone");
+        let _ = std::fs::remove_dir_all(&parent);
+        let events = scanned(&parent.join("Exports")).await;
+        assert!(
+            matches!(events.as_slice(), [Event::Warn(m)] if m.contains("left as they were")),
+            "got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_destination_that_is_not_a_folder_warns_and_keeps_the_marks() {
+        let parent = scratch("file");
+        let file = parent.join("Exports");
+        std::fs::write(&file, b"").unwrap();
+        let events = scanned(&file).await;
+        assert!(
+            matches!(events.as_slice(), [Event::Warn(_)]),
+            "got {events:?}"
+        );
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn a_login_step_puts_its_session_back_only_into_the_sign_in_it_came_from() {
+        let mut slot = LoginSlot::default();
+        slot.start("first");
+        // A step in flight holds it; the slot is empty, so nothing waits.
+        let (held, generation) = slot.take().unwrap();
+        assert!(slot.take().is_none());
+        assert!(
+            slot.put_back(held, generation),
+            "a wrong code keeps the token"
+        );
+        assert_eq!(slot.held, Some("first"));
+
+        // Cancel pressed while a step is out: the step must not bring the
+        // abandoned credential back when it finishes.
+        let (held, generation) = slot.take().unwrap();
+        slot.forget();
+        assert!(!slot.put_back(held, generation));
+        assert!(slot.held.is_none());
+
+        // Nor may it overwrite a sign-in started over in the meantime.
+        slot.start("second");
+        let (_, generation) = slot.take().unwrap();
+        slot.start("third");
+        assert!(!slot.put_back("second", generation));
+        assert_eq!(slot.held, Some("third"));
     }
 
     #[test]

@@ -118,6 +118,9 @@ where
 pub async fn export(settings: Settings, pending: Pending, cancel: Cancel, tx: Events) {
     use tgx_tg::engine::{ChatExporter, Progress};
 
+    // A panic in the engine ends the queue the way a failed start does: the
+    // interrupted chat is marked paused, not left reading "Exporting".
+    on_panic(|why| Activity::Export.ending(why));
     let session = match Session::connect(&settings).await {
         Ok(s) => s,
         Err(e) => {
@@ -335,35 +338,7 @@ pub async fn export(settings: Settings, pending: Pending, cancel: Cancel, tx: Ev
             .await
         {
             Ok(result) => {
-                let _ = tx.send(Event::ChatDone {
-                    chat_id,
-                    messages: result.messages,
-                    // **A windowed run reports no expected count and no
-                    // measured one.** It read the newest few hundred messages
-                    // on purpose; handing that up would make the row read
-                    // "500 of 6,643" with an 8% bar, and `set_count` would then
-                    // overwrite the chat list's size with 500. See
-                    // `ExportResult::complete`, which draws the same
-                    // distinction for the INCOMPLETE warning. A date-ranged
-                    // export is short on purpose in the same way.
-                    expected: if result.short_by_design() {
-                        0
-                    } else {
-                        result.expected
-                    },
-                    messages_measured: !result.short_by_design(),
-                    // `result.topics` counts output folders, and an unsplit
-                    // chat has exactly one. Only a chat that really was split
-                    // has a topic count to report.
-                    topics: split.then_some(result.topics),
-                    media_downloaded: result.media_downloaded,
-                    media_failed: result.media_failed,
-                    root: result.root.clone(),
-                    database: result
-                        .database
-                        .clone()
-                        .map(std::path::PathBuf::into_boxed_path),
-                });
+                let _ = tx.send(chat_done(chat_id, &result, split));
                 report_result(&tx, &chat.title, &result, split);
             }
             Err(tgx_tg::ExportError::Cancelled) => {
@@ -384,6 +359,44 @@ pub async fn export(settings: Settings, pending: Pending, cancel: Cancel, tx: Ev
     let _ = tx.send(Event::Finished {
         stopped: cancel.is_cancelled(),
     });
+}
+
+/// The event a finished chat sends: what the queue's row and the chat list
+/// learn from the run.
+///
+/// Pulled out of the loop so a hand-built `ExportResult` can drive it. This is
+/// where a short-by-design run stops being a measurement, and nothing tested
+/// that before: a swapped condition here would let a 500-message sync
+/// overwrite the list's 6,643 with the suite still green.
+fn chat_done(chat_id: i64, result: &tgx_tg::engine::ExportResult, split: bool) -> Event {
+    Event::ChatDone {
+        chat_id,
+        messages: result.messages,
+        // **A windowed run reports no expected count and no measured one.** It
+        // read the newest few hundred messages on purpose; handing that up
+        // would make the row read "500 of 6,643" with an 8% bar, and
+        // `set_count` would then overwrite the chat list's size with 500. See
+        // `ExportResult::complete`, which draws the same distinction for the
+        // INCOMPLETE warning. A date-ranged export is short on purpose in the
+        // same way.
+        expected: if result.short_by_design() {
+            0
+        } else {
+            result.expected
+        },
+        messages_measured: !result.short_by_design(),
+        // `result.topics` counts output folders, and an unsplit chat has
+        // exactly one. Only a chat that really was split has a topic count to
+        // report.
+        topics: split.then_some(result.topics),
+        media_downloaded: result.media_downloaded,
+        media_failed: result.media_failed,
+        root: result.root.clone(),
+        database: result
+            .database
+            .clone()
+            .map(std::path::PathBuf::into_boxed_path),
+    }
 }
 
 /// Everything a finished chat has to admit to.
@@ -483,5 +496,167 @@ fn report_result(tx: &Events, title: &str, result: &tgx_tg::engine::ExportResult
              text: {}",
             result.degraded.join(", ")
         )));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tgx_tg::engine::ExportResult;
+
+    /// The warnings `report_result` sends for `result`, as plain lines.
+    fn warnings(result: &ExportResult, split: bool) -> Vec<String> {
+        let (raw, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = Events::detached(raw);
+        report_result(&tx, "Dev Team", result, split);
+        let mut out = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            if let Event::Warn(m) = e {
+                out.push(m);
+            }
+        }
+        out
+    }
+
+    /// `(expected, messages_measured, topics)` off the `ChatDone`.
+    fn done(result: &ExportResult, split: bool) -> (i64, bool, Option<usize>) {
+        match chat_done(7, result, split) {
+            Event::ChatDone {
+                chat_id: 7,
+                expected,
+                messages_measured,
+                topics,
+                ..
+            } => (expected, messages_measured, topics),
+            other => panic!("not a ChatDone: {other:?}"),
+        }
+    }
+
+    fn whole() -> ExportResult {
+        ExportResult {
+            messages: 6_643,
+            expected: 6_643,
+            topics: 1,
+            reached_end: true,
+            root: Some("Exports/Dev Team".into()),
+            ..ExportResult::default()
+        }
+    }
+
+    #[test]
+    fn a_whole_export_is_a_measurement_and_admits_nothing() {
+        assert_eq!(done(&whole(), false), (6_643, true, None));
+        assert!(warnings(&whole(), false).is_empty());
+    }
+
+    #[test]
+    fn a_short_export_says_incomplete() {
+        let short = ExportResult {
+            messages: 5_609,
+            ..whole()
+        };
+        // Still a measurement: the run walked the whole history and this is
+        // what came through, short or not.
+        assert_eq!(done(&short, false), (6_643, true, None));
+        let warned = warnings(&short, false);
+        assert!(
+            warned
+                .iter()
+                .any(|m| m.contains("INCOMPLETE") && m.contains("6643")),
+            "got {warned:?}"
+        );
+    }
+
+    #[test]
+    fn a_windowed_sync_is_not_the_size_of_the_chat() {
+        // The newest 500 of 6,643, on purpose. Handed up as a measurement it
+        // would overwrite the list's count with 500.
+        let windowed = ExportResult {
+            messages: 500,
+            windowed: true,
+            root: None,
+            database: Some("Exports/Dev Team/Dev Team.sqlite".into()),
+            ..whole()
+        };
+        assert_eq!(done(&windowed, false), (0, false, None));
+        assert!(warnings(&windowed, false).is_empty(), "short by design");
+
+        // A window that did not reach the end of what it set out to read is
+        // still incomplete — `reached_end`, not the count, is the test.
+        let cut = ExportResult {
+            reached_end: false,
+            ..windowed
+        };
+        assert!(warnings(&cut, false)
+            .iter()
+            .any(|m| m.contains("INCOMPLETE")));
+    }
+
+    #[test]
+    fn a_date_ranged_export_is_short_on_purpose_too() {
+        let ranged = ExportResult {
+            messages: 120,
+            ranged: true,
+            ..whole()
+        };
+        assert_eq!(done(&ranged, false), (0, false, None));
+        assert!(warnings(&ranged, false).is_empty());
+    }
+
+    #[test]
+    fn only_a_split_chat_reports_topics() {
+        let forum = ExportResult {
+            topics: 4,
+            ..whole()
+        };
+        assert_eq!(done(&forum, true).2, Some(4));
+        assert_eq!(done(&forum, false).2, None);
+    }
+
+    #[test]
+    fn missing_media_points_at_the_file_that_lists_it() {
+        let folder = ExportResult {
+            media_missing: 42,
+            media_failed: 21,
+            ..whole()
+        };
+        let warned = warnings(&folder, false);
+        assert!(
+            warned
+                .iter()
+                .any(|m| m.contains("42 files") && m.contains("missing_media.txt")),
+            "got {warned:?}"
+        );
+
+        // A database-only run has no folder to hold that file.
+        let database = ExportResult {
+            root: None,
+            ..folder
+        };
+        let warned = warnings(&database, false);
+        assert!(
+            warned
+                .iter()
+                .any(|m| m.contains("42 files") && m.contains("tgx.log")),
+            "got {warned:?}"
+        );
+        assert!(!warned.iter().any(|m| m.contains("missing_media.txt")));
+    }
+
+    #[test]
+    fn a_partial_roster_says_so_and_a_whole_one_does_not() {
+        let partial = ExportResult {
+            members: 200,
+            members_complete: false,
+            ..whole()
+        };
+        assert!(warnings(&partial, false)
+            .iter()
+            .any(|m| m.contains("member list is INCOMPLETE")));
+        let complete = ExportResult {
+            members_complete: true,
+            ..partial
+        };
+        assert!(warnings(&complete, false).is_empty());
     }
 }

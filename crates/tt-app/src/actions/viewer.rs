@@ -97,15 +97,19 @@ pub async fn pictures(path: PathBuf, chat_id: i64, ids: Vec<i64>, tx: Events) {
     let found = match found {
         Ok(found) => found,
         // Nothing could be read: every bubble falls back to its card rather
-        // than waiting on a picture that is not coming.
-        Err(_) => ids
-            .into_iter()
-            .map(|id| viewer::Pictured {
-                id,
-                candidates: Vec::new(),
-                has_file: false,
-            })
-            .collect(),
+        // than waiting on a picture that is not coming. The reason goes to the
+        // log — a file name and a database error, never a message — or a
+        // Viewer with no pictures at all leaves nothing to go on.
+        Err(e) => {
+            log::warn!("viewer pictures: {}: {e}", path.display());
+            ids.into_iter()
+                .map(|id| viewer::Pictured {
+                    id,
+                    candidates: Vec::new(),
+                    has_file: false,
+                })
+                .collect()
+        }
     };
     for found in found {
         let viewer::Pictured {
@@ -136,8 +140,13 @@ pub const USERPIC_SIDE: u32 = 96;
 /// blocking pool. A database that cannot be read, or holds none, sends none —
 /// the bubbles keep their initials.
 pub async fn userpics(path: PathBuf, chat_id: i64, tx: Events) {
-    let Ok(found) = viewer::userpics(&path, chat_id).await else {
-        return;
+    let found = match viewer::userpics(&path, chat_id).await {
+        Ok(found) => found,
+        // Logged for the same reason as the pictures above.
+        Err(e) => {
+            log::warn!("viewer userpics: {}: {e}", path.display());
+            return;
+        }
     };
     if found.is_empty() {
         return;
@@ -203,9 +212,9 @@ pub async fn open_message_media(path: PathBuf, chat_id: i64, id: i64, tx: Events
 /// shortcut, a macro document somebody posted — would run with this
 /// account's rights on one click, so its folder opens instead.
 const OPENABLE: [&str; 27] = [
-    "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "heic", "mp4", "mov", "m4v",
-    "webm", "mkv", "avi", "mp3", "m4a", "ogg", "oga", "opus", "wav", "flac", "pdf", "txt",
-    "docx", "xlsx", "pptx",
+    "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "heic", "mp4", "mov", "m4v", "webm",
+    "mkv", "avi", "mp3", "m4a", "ogg", "oga", "opus", "wav", "flac", "pdf", "txt", "docx", "xlsx",
+    "pptx",
 ];
 
 /// Whether a file of this name is opened, rather than shown in its folder.

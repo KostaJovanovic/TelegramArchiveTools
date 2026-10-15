@@ -67,6 +67,10 @@ async fn command(args: Vec<String>) -> Result<()> {
         settings.api_hash = v;
     }
 
+    if writes_beside_the_window(&args) {
+        refuse_beside_the_window()?;
+    }
+
     match cmd {
         "login" => login(&settings).await,
         "logout" => {
@@ -199,9 +203,7 @@ async fn command(args: Vec<String>) -> Result<()> {
                 }
             }
             if roots.is_empty() {
-                return Err(anyhow!(
-                    "usage: TelegramToolscompare <export folder>... [--db <folder>] [--csv <file>]"
-                ));
+                return Err(anyhow!("usage: {COMPARE_USAGE}"));
             }
             compare(&roots, &db, csv.as_deref()).await
         }
@@ -251,9 +253,7 @@ async fn command(args: Vec<String>) -> Result<()> {
                     path => file = Some(std::path::PathBuf::from(path)),
                 }
             }
-            let file = file.ok_or_else(|| {
-                anyhow!("usage: TelegramToolssplit <file.sqlite> [--into <folder>] [--dry-run]")
-            })?;
+            let file = file.ok_or_else(|| anyhow!("usage: {SPLIT_USAGE}"))?;
             // Beside the file by default: that is where its chats' databases
             // already are, when there are any.
             let into = match into {
@@ -290,11 +290,7 @@ async fn command(args: Vec<String>) -> Result<()> {
             let (dir, needle) = match words.as_slice() {
                 [text] => (std::path::PathBuf::from(&settings.output_dir), text.clone()),
                 [dir, text] => (std::path::PathBuf::from(dir), text.clone()),
-                _ => {
-                    return Err(anyhow!(
-                        "usage: TelegramToolssearch [<folder>] <text> [--limit N] — quote text with spaces"
-                    ))
-                }
+                _ => return Err(anyhow!("usage: {SEARCH_USAGE}")),
             };
             if needle.trim().is_empty() {
                 return Err(anyhow!("nothing to search for"));
@@ -315,11 +311,8 @@ async fn command(args: Vec<String>) -> Result<()> {
                     path => paths.push(std::path::PathBuf::from(path)),
                 }
             }
-            let [db, out] = <[_; 2]>::try_from(paths).map_err(|_| {
-                anyhow!(
-                    "usage: TelegramToolsunpack <file.sqlite> <out folder> [--no-html] [--no-json]"
-                )
-            })?;
+            let [db, out] =
+                <[_; 2]>::try_from(paths).map_err(|_| anyhow!("usage: {UNPACK_USAGE}"))?;
             unpack(&db, &out, &settings).await
         }
         "import" => {
@@ -343,9 +336,7 @@ async fn command(args: Vec<String>) -> Result<()> {
                 }
             }
             if roots.is_empty() {
-                return Err(anyhow!(
-                    "usage: TelegramToolsimport <export folder>... [--db <folder>] [--dry-run]"
-                ));
+                return Err(anyhow!("usage: {IMPORT_USAGE}"));
             }
             import(&roots, &db, dry_run).await
         }
@@ -757,8 +748,19 @@ async fn compare(
     Ok(())
 }
 
+// Each command's one line, for the error a missing argument gets. Kept here
+// together, and tested, because five of them once lost the space after the
+// program's name in a rename and told people to run `TelegramToolssplit`.
 const EXPORT_USAGE: &str =
     "TelegramTools export [--db] [--full] [--since YYYY-MM-DD] [--until YYYY-MM-DD] <chat title>";
+const COMPARE_USAGE: &str =
+    "TelegramTools compare <export folder>... [--db <folder>] [--csv <file>]";
+const SPLIT_USAGE: &str = "TelegramTools split <file.sqlite> [--into <folder>] [--dry-run]";
+const SEARCH_USAGE: &str =
+    "TelegramTools search [<folder>] <text> [--limit N] — quote text with spaces";
+const UNPACK_USAGE: &str =
+    "TelegramTools unpack <file.sqlite> <out folder> [--no-html] [--no-json]";
+const IMPORT_USAGE: &str = "TelegramTools import <export folder>... [--db <folder>] [--dry-run]";
 
 pub const USAGE: &str = "\
 TelegramTools -- export Telegram chats, and report on what was exported
@@ -1087,15 +1089,35 @@ fn stop_on_ctrl_c() -> Cancel {
 
 /// The window, if one is open on this data folder, is a second writer: in
 /// Database mode it may be merging into the very `.sqlite` a sync here would.
-/// See `instance`.
+/// See `instance`, and [`writes_beside_the_window`] for the commands besides
+/// export and sync that ask.
 fn refuse_beside_the_window() -> Result<()> {
     if crate::instance::window_open(&tgx_tg::config::data_dir()) {
         return Err(anyhow!(
             "the TelegramTools window is open on this data folder; close it first, \
-             so the two do not both write into the same databases"
+             so the two do not both write into the same files"
         ));
     }
     Ok(())
+}
+
+/// The offline commands that write into what the window may have open:
+/// `import` merges recovered messages into the chats' databases, `split`
+/// merges into them and renames the file it read, and `doctor --fix` moves and
+/// deletes. Their dry runs and reports write nothing and run anywhere.
+///
+/// **Only export and sync were guarded**, which left the commands that write
+/// the same files without a network free to do it under a sync. Those two
+/// still ask at their own point, after the checks that make a better first
+/// error. `login`, `logout` and `chats` touch only the session file, and
+/// `chats --json` beside the window is a reasonable thing to want.
+fn writes_beside_the_window(args: &[String]) -> bool {
+    let has = |flag: &str| args.iter().skip(1).any(|a| a == flag);
+    match args.first().map(String::as_str) {
+        Some("import" | "split") => !has("--dry-run"),
+        Some("doctor") => has("--fix"),
+        _ => false,
+    }
 }
 
 async fn export(settings: &Settings, want: &str) -> Result<()> {
@@ -1126,25 +1148,6 @@ async fn export(settings: &Settings, want: &str) -> Result<()> {
         None
     };
     let cancel = stop_on_ctrl_c();
-    let result = export_one(&session, settings, chat, into, &cancel, Out::Stdout).await?;
-    summarise(settings, &result, Out::Stdout);
-    Ok(())
-}
-
-/// One chat, start to finish, narrated to `out`. What `export` and `sync`
-/// share; the summary is the caller's, because `sync --json` wants the numbers
-/// and not the sentences. `into` is the database to sync into, when the caller
-/// already knows which file holds this chat.
-async fn export_one(
-    session: &Session,
-    settings: &Settings,
-    chat: &ChatInfo,
-    into: Option<std::path::PathBuf>,
-    cancel: &Cancel,
-    out: Out,
-) -> Result<ExportResult> {
-    out.line(&format!("exporting {} ({})", chat.title, chat.kind.label()));
-
     // Two failures, two messages: a chat that has left the dialog list is a
     // fact about the account, a sweep that did not finish is a fact about the
     // connection, and telling the user the first when the second happened sends
@@ -1153,6 +1156,30 @@ async fn export_one(
         .await
         .map_err(|e| anyhow!("looking up {}: {e}", chat.title))?
         .ok_or_else(|| anyhow!("{} is no longer in the dialog list", chat.title))?;
+    let result = export_one(&session, settings, chat, peer, into, &cancel, Out::Stdout).await?;
+    summarise(settings, &result, Out::Stdout);
+    Ok(())
+}
+
+/// One chat, start to finish, narrated to `out`. What `export` and `sync`
+/// share; the summary is the caller's, because `sync --json` wants the numbers
+/// and not the sentences. `into` is the database to sync into, when the caller
+/// already knows which file holds this chat.
+///
+/// **The peer is the caller's to find**, because `sync` finds them all in one
+/// sweep of the dialog list. Looking each one up here paged the list again for
+/// every database — sixty-three sweeps for a nightly sync of sixty-three
+/// chats, which is how a run earns a flood wait before it has synced a byte.
+async fn export_one(
+    session: &Session,
+    settings: &Settings,
+    chat: &ChatInfo,
+    peer: dialogs::ChatRef,
+    into: Option<std::path::PathBuf>,
+    cancel: &Cancel,
+    out: Out,
+) -> Result<ExportResult> {
+    out.line(&format!("exporting {} ({})", chat.title, chat.kind.label()));
 
     let topics = if chat.is_forum && settings.split_topics {
         let t = dialogs::list_topics(&session.client, peer)
@@ -1230,6 +1257,14 @@ async fn export_one(
             cancel,
         )
         .await?)
+}
+
+/// Did this chat's run end because the user stopped it?
+fn was_cancelled(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<tgx_tg::ExportError>(),
+        Some(tgx_tg::ExportError::Cancelled)
+    )
 }
 
 /// The sentences under a finished chat.
@@ -1344,6 +1379,17 @@ async fn sync(settings: &Settings, only: &[String], json: bool) -> Result<()> {
         .await
         .map_err(|e| anyhow!("listing chats: {e}"))?;
     let cancel = stop_on_ctrl_c();
+    // **One sweep for every database**, the window's rule for its queue — see
+    // `export_one`. A sweep that did not finish fails the run here rather
+    // than every chat in turn: the connection is what failed, not the chats.
+    let ids: Vec<i64> = wanted
+        .iter()
+        .map(|(id, _)| *id)
+        .filter(|id| list.iter().any(|c| c.id == *id))
+        .collect();
+    let peers = dialogs::peer_refs_for(&session.client, &ids, &cancel)
+        .await
+        .map_err(|e| anyhow!("looking up the chats: {e}"))?;
 
     let mut rows = Vec::new();
     let mut whole = 0usize;
@@ -1369,7 +1415,11 @@ async fn sync(settings: &Settings, only: &[String], json: bool) -> Result<()> {
         }
         // Into the file it was found in, never one worked out from the title.
         let into = archived.files.get(id).cloned();
-        match export_one(&session, settings, chat, into, &cancel, out).await {
+        let ran = match peers.get(id).copied() {
+            Some(peer) => export_one(&session, settings, chat, peer, into, &cancel, out).await,
+            None => Err(anyhow!("{} is no longer in the dialog list", chat.title)),
+        };
+        match ran {
             Ok(r) => {
                 summarise(settings, &r, out);
                 let status = if r.complete() { "synced" } else { "incomplete" };
@@ -1388,6 +1438,17 @@ async fn sync(settings: &Settings, only: &[String], json: bool) -> Result<()> {
                     "media_missing": r.media_missing,
                     "messages_stored": r.db_archived,
                     "messages_read": r.messages,
+                }));
+            }
+            // **Ctrl-C is not a failure.** The chat it interrupted reads
+            // "cancelled" like the ones after it, so a wrapper that retries
+            // what failed does not retry the user's own stop. Everything
+            // fetched up to the key press is closed and kept.
+            Err(e) if was_cancelled(&e) => {
+                out.line("  stopped");
+                rows.push(json!({
+                    "chat_id": id, "title": title, "database": database,
+                    "status": "cancelled",
                 }));
             }
             Err(e) => {
@@ -1479,5 +1540,70 @@ mod tests {
     fn the_usage_names_sync_and_the_json_flags() {
         assert!(USAGE.contains("TelegramTools sync"));
         assert!(USAGE.contains("chats [--json]"));
+    }
+
+    #[test]
+    fn every_one_line_usage_names_a_command_that_exists() {
+        // Five of these once read `TelegramToolssplit` and the like, telling
+        // people to run a program that does not exist.
+        for usage in [
+            EXPORT_USAGE,
+            COMPARE_USAGE,
+            SPLIT_USAGE,
+            SEARCH_USAGE,
+            UNPACK_USAGE,
+            IMPORT_USAGE,
+        ] {
+            let command = usage
+                .strip_prefix("TelegramTools ")
+                .and_then(|rest| rest.split_whitespace().next())
+                .unwrap_or_else(|| panic!("{usage:?} does not start with the program"));
+            assert!(
+                USAGE.contains(&format!("TelegramTools {command} ")),
+                "{usage:?} names {command:?}, which the full usage does not"
+            );
+        }
+    }
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn the_commands_that_write_the_windows_files_ask_whether_it_is_open() {
+        for writes in [
+            &["import", r"C:\old export"][..],
+            &["split", "big.sqlite"],
+            &["split", "big.sqlite", "--into", r"C:\out"],
+            &["doctor", "--fix"],
+            &["doctor", r"C:\Exports", "--fix"],
+        ] {
+            assert!(writes_beside_the_window(&argv(writes)), "{writes:?}");
+        }
+        // Dry runs and reports write nothing; the session-only commands are
+        // left alone on purpose (`chats --json` beside the window is wanted).
+        // Export and sync ask at their own point, after their own checks.
+        for reads in [
+            &["import", r"C:\old export", "--dry-run"][..],
+            &["split", "big.sqlite", "--dry-run"],
+            &["doctor"],
+            &["doctor", "--dupes"],
+            &["compare", r"C:\old export"],
+            &["search", "word"],
+            &["unpack", "a.sqlite", "out"],
+            &["login"],
+            &["logout"],
+            &["chats", "--json"],
+            &[],
+        ] {
+            assert!(!writes_beside_the_window(&argv(reads)), "{reads:?}");
+        }
+    }
+
+    #[test]
+    fn a_stopped_chat_is_cancelled_and_a_failed_one_is_not() {
+        let stopped: anyhow::Error = tgx_tg::ExportError::Cancelled.into();
+        assert!(was_cancelled(&stopped));
+        assert!(!was_cancelled(&anyhow!("listing topics: FLOOD_WAIT")));
     }
 }

@@ -345,6 +345,11 @@ pub async fn count_all(
     (counted, failed)
 }
 
+/// What [`peer_refs_for`] resolves a chat to, under a name a caller can write
+/// without depending on grammers — the command line's `sync` carries one from
+/// its single sweep to each chat's export.
+pub type ChatRef = PeerRef;
+
 /// Resolve many chat ids in a single pass over the dialog list.
 ///
 /// **Public because an export queue needs this and not [`peer_ref_for`].**

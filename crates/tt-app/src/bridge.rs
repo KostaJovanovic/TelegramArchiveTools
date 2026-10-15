@@ -317,6 +317,84 @@ pub enum Activity {
     Export,
 }
 
+impl Activity {
+    /// What the window has to hear when this activity's worker panicked: the
+    /// failure, and whatever event ends the activity on an ordinary run.
+    ///
+    /// **The terminator is the point.** `Failed` alone switches the activity
+    /// off, but the queue's rows only leave "Exporting" on a `Finished`, and
+    /// the count's progress only clears on a `CountFinished` — so each is sent
+    /// as the worker's own early returns send it, in the order the shell reads
+    /// them: `Failed` before `Finished`, because `Finished` writes the failure
+    /// into its summary; `CountFinished` before `Failed`, or "Counted 0 chats"
+    /// lands on top of the reason.
+    ///
+    /// `why` is the predicate [`Bridge::spawn`] hands every ending; the subject
+    /// is the activity's.
+    pub fn ending(self, why: String) -> Vec<Event> {
+        let subject = match self {
+            Activity::SignIn => "Signing in",
+            Activity::Chats => "Loading the chat list",
+            Activity::Count => "The count",
+            Activity::Export => "The export",
+        };
+        let why = format!("{subject} {why}");
+        let failed = Event::Failed {
+            activity: self,
+            message: why.clone(),
+        };
+        match self {
+            Activity::Export => vec![failed, Event::Finished { stopped: true }],
+            Activity::Count => vec![
+                Event::CountFinished {
+                    counted: 0,
+                    failed: 0,
+                },
+                failed,
+            ],
+            // The dialog's busy state is cleared by `LoginFailed` and nothing
+            // else; the startup probe has no dialog and reads `Failed`.
+            Activity::SignIn => vec![Event::LoginFailed(why), failed],
+            Activity::Chats => vec![failed],
+        }
+    }
+}
+
+/// What a worker sends if it panics, given the predicate of the sentence
+/// saying so ([`PANICKED`]); the worker supplies the subject.
+type Ending = Box<dyn FnOnce(String) -> Vec<Event> + Send>;
+
+tokio::task_local! {
+    /// The ending the running job declared with [`on_panic`]. Filled in by the
+    /// job, read by [`Bridge::spawn`] after the job has died — which is why it
+    /// is shared rather than owned by the task that panics.
+    static ENDING: Arc<Mutex<Option<Ending>>>;
+}
+
+/// Declare what the window must be told if this job panics.
+///
+/// **One line at the top of a worker, because only the worker knows.**
+/// `Bridge::spawn` catches the panic, but it is handed an anonymous future and
+/// cannot tell an export from a viewer load; a guess at which state to clear is
+/// the global switch [`Event::Failed`] carries its activity to avoid. Outside a
+/// bridge job — a test driving the worker directly — this does nothing.
+pub fn on_panic(ending: impl FnOnce(String) -> Vec<Event> + Send + 'static) {
+    let _ = ENDING.try_with(|slot| {
+        if let Ok(mut slot) = slot.lock() {
+            *slot = Some(Box::new(ending));
+        }
+    });
+}
+
+/// The sentence a panicked worker leaves in the window.
+///
+/// **Not the panic's own text.** That goes to `tgx.log` through the panic
+/// hook in `main`, and it can quote the data being handled — a string sliced
+/// on a bad boundary prints the string — so it does not belong in a transcript
+/// that is copied into bug reports.
+const PANICKED: &str = "was stopped by an internal error — a bug, not Telegram or your \
+                        files; tgx.log has the details";
+
 pub struct Bridge {
     runtime: Option<Runtime>,
     tx: UnboundedSender<Event>,
@@ -380,6 +458,14 @@ impl Bridge {
     /// That count is the only thing [`shutdown`](Self::shutdown) can actually
     /// wait on — see the note there for why the runtime's own timeout is not
     /// enough.
+    ///
+    /// **A panic becomes events, not silence.** tokio catches a panicking task
+    /// and hands the panic to its `JoinHandle`, and a dropped handle discards
+    /// it: an export that panicked on one odd message left its row reading
+    /// "Exporting", Start disabled and Stop the only control, with nothing in
+    /// the transcript saying why. So the job runs as a task of its own and this
+    /// one awaits it; a panic sends what the job declared with [`on_panic`], or
+    /// a warning when it declared nothing.
     pub fn spawn<F>(&self, future: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
@@ -387,6 +473,7 @@ impl Bridge {
         if let Some(rt) = &self.runtime {
             let in_flight = self.in_flight.clone();
             in_flight.fetch_add(1, Ordering::SeqCst);
+            let tx = self.sender();
             rt.spawn(async move {
                 // A guard, not a decrement after the `await`: a task dropped at
                 // a suspension point never reaches the line after it, and an
@@ -399,7 +486,22 @@ impl Bridge {
                     }
                 }
                 let _done = Done(in_flight);
-                future.await;
+                let ending: Arc<Mutex<Option<Ending>>> = Arc::default();
+                let job = tokio::spawn(ENDING.scope(ending.clone(), future));
+                // Cancelled is the runtime going away at shutdown, which is
+                // not a failure of the job and has nobody left to tell.
+                if let Err(e) = job.await {
+                    if e.is_panic() {
+                        let declared = ending.lock().ok().and_then(|mut slot| slot.take());
+                        let events = match declared {
+                            Some(ending) => ending(PANICKED.to_string()),
+                            None => vec![Event::Warn(format!("A background task {PANICKED}"))],
+                        };
+                        for event in events {
+                            let _ = tx.send(event);
+                        }
+                    }
+                }
             });
         }
     }
@@ -641,6 +743,100 @@ mod tests {
         // read as a fresh drain.
         bridge.shutdown(std::time::Duration::from_millis(50));
         assert!(bridge.is_stopped());
+    }
+
+    /// Everything that arrives before the bridge's job count reaches zero.
+    fn settle(bridge: &mut Bridge) -> Vec<Event> {
+        for _ in 0..400 {
+            if bridge.in_flight() == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(bridge.in_flight(), 0, "the job never ended");
+        bridge.drain()
+    }
+
+    #[test]
+    fn a_panicking_job_that_declared_nothing_still_says_so() {
+        // tokio catches the panic and hands it to the `JoinHandle`; dropped,
+        // that handle used to be the end of it, with nothing in the window.
+        let mut bridge = Bridge::new().unwrap();
+        bridge.spawn(async { panic!("boom") });
+        let events = settle(&mut bridge);
+        assert!(
+            matches!(events.as_slice(), [Event::Warn(m)] if m.contains("internal error")),
+            "got {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_export_ends_the_queue_with_its_reason() {
+        // Without the `Finished` the row stays "Exporting", Start stays
+        // disabled, and Stop is the only control left.
+        let mut bridge = Bridge::new().unwrap();
+        bridge.spawn(async {
+            on_panic(|why| Activity::Export.ending(why));
+            tokio::task::yield_now().await;
+            panic!("boom");
+        });
+        let events = settle(&mut bridge);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    Event::Failed { activity: Activity::Export, message },
+                    Event::Finished { stopped: true },
+                ] if message.starts_with("The export") && !message.contains("boom")
+            ),
+            "got {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_count_ends_the_count_before_naming_the_reason() {
+        // The other order lets "Counted 0 chats" overwrite the reason.
+        let mut bridge = Bridge::new().unwrap();
+        bridge.spawn(async {
+            on_panic(|why| Activity::Count.ending(why));
+            panic!("boom");
+        });
+        let events = settle(&mut bridge);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    Event::CountFinished { .. },
+                    Event::Failed {
+                        activity: Activity::Count,
+                        ..
+                    },
+                ]
+            ),
+            "got {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_job_that_ends_normally_sends_no_ending() {
+        let mut bridge = Bridge::new().unwrap();
+        let tx = bridge.sender();
+        bridge.spawn(async move {
+            on_panic(|why| Activity::Export.ending(why));
+            let _ = tx.send(Event::Status("done".into()));
+        });
+        let events = settle(&mut bridge);
+        assert!(
+            matches!(events.as_slice(), [Event::Status(_)]),
+            "got {events:?}"
+        );
+    }
+
+    #[test]
+    fn declaring_an_ending_outside_a_bridge_job_is_harmless() {
+        // The action tests drive workers straight at a channel, with no
+        // bridge around them.
+        on_panic(|why| Activity::Chats.ending(why));
     }
 
     #[test]
