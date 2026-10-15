@@ -69,7 +69,8 @@ const DEPTH_CAP: i64 = 8;
 /// cycle guard below catches the common shape; this catches the rest.
 const MAX_CHAIN: usize = 10_000;
 
-pub fn compute(export: &Export, people: &People) -> Dynamics {
+/// `index` is [`Export::by_id`], built once by the caller.
+pub fn compute(export: &Export, people: &People, index: &HashMap<i64, usize>) -> Dynamics {
     let msgs: Vec<&Msg> = export.said().collect();
     if msgs.is_empty() {
         return Dynamics {
@@ -77,15 +78,14 @@ pub fn compute(export: &Export, people: &People) -> Dynamics {
             ..Default::default()
         };
     }
-    let index = export.by_id();
 
     Dynamics {
         empty: false,
-        pairs: pairs(&msgs, export, &index, people),
-        answer: answer(&msgs, export, &index),
+        pairs: pairs(&msgs, export, index, people),
+        answer: answer(&msgs, export, index),
         tenure: tenure(&msgs, people),
         retention: retention(&msgs, people),
-        depth: depth(&msgs, export, &index),
+        depth: depth(&msgs, export, index),
     }
 }
 
@@ -115,66 +115,7 @@ fn parent_of<'a>(msg: &Msg, export: &'a Export, index: &HashMap<i64, usize>) -> 
 mod tests {
     use super::*;
 
-    use chrono::NaiveDate;
-    use tga_read::{Msg, Topic};
-
-    fn at(day: u32, hour: u32, minute: u32) -> chrono::NaiveDateTime {
-        NaiveDate::from_ymd_opt(2025, 1, day)
-            .unwrap()
-            .and_hms_opt(hour, minute, 0)
-            .unwrap()
-    }
-
-    fn msg(id: i64, who: &str, when: chrono::NaiveDateTime, reply_to: Option<i64>) -> Msg {
-        Msg {
-            id,
-            topic: 0,
-            when,
-            unix: when.and_utc().timestamp(),
-            service: false,
-            action: String::new(),
-            sender: who.to_string(),
-            name: who.to_string(),
-            text: "hello".into(),
-            chars: 5,
-            words: 1,
-            reply_to,
-            forward_from: String::new(),
-            forward_id: String::new(),
-            media: String::new(),
-            file: String::new(),
-            file_name: String::new(),
-            file_size: 0,
-            media_saved: false,
-            sticker_emoji: String::new(),
-            emoji: Vec::new(),
-            domains: Vec::new(),
-            mentions: Vec::new(),
-            hashtags: Vec::new(),
-            reactions: Vec::new(),
-            edited: false,
-            members: Vec::new(),
-            grouped: None,
-        }
-    }
-
-    fn export(msgs: Vec<Msg>) -> Export {
-        Export {
-            name: "test".into(),
-            topics: vec![Topic {
-                index: 0,
-                name: "General".into(),
-                folder: Default::default(),
-                chat_id: None,
-                chat_type: String::new(),
-                created: None,
-                messages: msgs.len(),
-                root: None,
-            }],
-            msgs,
-            ..Default::default()
-        }
-    }
+    use crate::testing::{at, export, msg, on};
 
     /// Two people answering each other, and one person answering into the void.
     fn conversation() -> Export {
@@ -192,7 +133,7 @@ mod tests {
     fn a_pair_is_ranked_on_the_direction_that_answered_least() {
         let export = conversation();
         let people = People::new(&export);
-        let out = compute(&export, &people);
+        let out = compute(&export, &people, &export.by_id());
         let rows = &out.pairs.rows;
 
         // user1<->user2 exchanged three replies, two one way and one the
@@ -212,7 +153,7 @@ mod tests {
             msg(2, "user1", at(1, 10, 1), Some(1)),
         ]);
         let people = People::new(&export);
-        let out = compute(&export, &people);
+        let out = compute(&export, &people, &export.by_id());
         assert!(out.pairs.rows.is_empty());
         assert_eq!(out.pairs.directed, 0);
     }
@@ -221,7 +162,7 @@ mod tests {
     fn latency_is_bucketed_by_the_hour_the_parent_was_posted() {
         let export = conversation();
         let people = People::new(&export);
-        let out = compute(&export, &people);
+        let out = compute(&export, &people, &export.by_id());
         let counts = out.answer.counts;
         // Four replies answer messages posted at 10:00, one answers 10:09, and
         // none answers anything posted at 11:00 — the two 11:00 messages are
@@ -240,7 +181,7 @@ mod tests {
             msg(3, "user1", at(31, 10, 0), None),
         ]);
         let people = People::new(&export);
-        let out = compute(&export, &people);
+        let out = compute(&export, &people, &export.by_id());
         let rows = &out.tenure.rows;
         assert_eq!(out.tenure.as_of, "2025-01-31");
         assert_eq!(rows[0].dormant_days, 0);
@@ -260,34 +201,59 @@ mod tests {
             msg(1, "user1", at(1, 10, 0), None),
             msg(2, "user2", at(2, 10, 0), None),
             // March, after a silent February.
-            msg(
-                3,
-                "user1",
-                NaiveDate::from_ymd_opt(2025, 3, 4)
-                    .unwrap()
-                    .and_hms_opt(9, 0, 0)
-                    .unwrap(),
-                None,
-            ),
+            msg(3, "user1", on(2025, 3, 4, 9, 0), None),
         ]);
         let people = People::new(&export);
-        let out = compute(&export, &people);
+        let out = compute(&export, &people, &export.by_id());
         let ret = &out.retention;
         assert_eq!(ret.months, ["2025-01", "2025-02", "2025-03"]);
         assert_eq!(ret.active, [2, 0, 1]);
         assert_eq!(ret.new, [2, 0, 0]);
-        // Nobody returned in March, because February is what March is measured
-        // against and February was empty. Collapsing the gap would have called
-        // this a return.
+        // Nobody *stayed* into March, because February is what March is
+        // measured against and February was empty. Collapsing the gap would
+        // have called user1 one who stayed.
         assert_eq!(ret.returning, [0, 0, 0]);
+        // user1 came back after it, which is what this test used to assert
+        // nobody did.
+        assert_eq!(ret.came_back, [0, 0, 1]);
         assert_eq!(ret.lost, [0, 2, 0]);
+    }
+
+    #[test]
+    fn everybody_who_spoke_in_a_month_is_new_or_stayed_or_came_back() {
+        // user1 every month; user2 in January and March; user3 from February.
+        let export = export(vec![
+            msg(1, "user1", on(2025, 1, 5, 9, 0), None),
+            msg(2, "user2", on(2025, 1, 6, 9, 0), None),
+            msg(3, "user1", on(2025, 2, 5, 9, 0), None),
+            msg(4, "user3", on(2025, 2, 6, 9, 0), None),
+            msg(5, "user1", on(2025, 3, 5, 9, 0), None),
+            msg(6, "user2", on(2025, 3, 6, 9, 0), None),
+            msg(7, "user3", on(2025, 3, 7, 9, 0), None),
+        ]);
+        let people = People::new(&export);
+        let ret = compute(&export, &people, &export.by_id()).retention;
+        assert_eq!(ret.active, [2, 2, 3]);
+        assert_eq!(ret.new, [2, 1, 0]);
+        // Somebody who posts every month stayed; they did not come back.
+        assert_eq!(ret.returning, [0, 1, 2]);
+        assert_eq!(ret.came_back, [0, 0, 1]);
+        assert_eq!(ret.lost, [0, 1, 0]);
+        for at in 0..ret.months.len() {
+            assert_eq!(
+                ret.active[at],
+                ret.new[at] + ret.returning[at] + ret.came_back[at],
+                "{}",
+                ret.months[at]
+            );
+        }
     }
 
     #[test]
     fn depth_counts_the_chain_not_the_hop() {
         let export = conversation();
         let people = People::new(&export);
-        let out = compute(&export, &people);
+        let out = compute(&export, &people, &export.by_id());
         let depth = &out.depth;
         // 1 <- 2 <- 3 <- 4 is a chain of four; 5 and 6 both sit at two.
         assert_eq!(depth.max, 4);
@@ -308,7 +274,7 @@ mod tests {
             msg(2, "user2", at(1, 10, 1), Some(1)),
         ]);
         let people = People::new(&export);
-        let out = compute(&export, &people);
+        let out = compute(&export, &people, &export.by_id());
         assert!(out.depth.max >= 1);
     }
 
@@ -316,7 +282,7 @@ mod tests {
     fn an_export_with_nothing_said_says_so() {
         let export = export(vec![]);
         let people = People::new(&export);
-        let out = compute(&export, &people);
+        let out = compute(&export, &people, &export.by_id());
         assert!(out.empty);
         assert!(out.pairs.rows.is_empty());
         assert!(out.tenure.rows.is_empty());

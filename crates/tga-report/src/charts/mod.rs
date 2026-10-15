@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn an_event_rail_with_no_events_draws_nothing_at_all() {
-        assert_eq!(event_rail(&[], &series(&[1, 2]), 100.0, 34.0), "");
+        assert_eq!(rail(&[], &series(&[1, 2]), 100.0, 34.0, &[]), "");
     }
 
     #[test]
@@ -290,7 +290,13 @@ mod tests {
             who: vec![],
             tags: vec![],
         };
-        let moment = event_rail(std::slice::from_ref(&base), &series(&[1; 10]), 100.0, 34.0);
+        let moment = rail(
+            std::slice::from_ref(&base),
+            &series(&[1; 10]),
+            100.0,
+            34.0,
+            &[],
+        );
         assert!(!moment.contains("ev-span"));
         assert!(moment.contains("ev-dot"));
 
@@ -298,7 +304,7 @@ mod tests {
             end: Some(day(2025, 1, 6)),
             ..base
         };
-        let svg = event_rail(&[span], &series(&[1; 10]), 100.0, 34.0);
+        let svg = rail(&[span], &series(&[1; 10]), 100.0, 34.0, &[]);
         assert!(svg.contains("ev-span"));
     }
 
@@ -319,7 +325,7 @@ mod tests {
             who: vec![],
             tags: vec![],
         };
-        let svg = event_rail(&[event], &series(&[1; 10]), 100.0, 34.0);
+        let svg = rail(&[event], &series(&[1; 10]), 100.0, 34.0, &[]);
         assert!(svg.contains("class=\"ev conf-low\""), "{svg}");
     }
 

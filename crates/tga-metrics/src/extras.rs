@@ -10,7 +10,8 @@ use std::collections::{HashMap, HashSet};
 use chrono::{Datelike, NaiveDate, Timelike};
 use tga_read::{Export, Msg};
 use tga_stats::{
-    Activity, Award, Busiest, Churn, ChurnEvent, Figure, Person, Streak, Superlative, Topic,
+    human_bytes, Activity, Award, Busiest, Churn, ChurnEvent, Figure, Person, Streak, Superlative,
+    Topic,
 };
 
 use crate::identity::People;
@@ -28,22 +29,6 @@ const LEAVE_ACTIONS: &[&str] = &["remove_members"];
 /// reader can disagree with the boundary rather than guess at it.
 const NIGHT: std::ops::Range<usize> = 0..5;
 const MORNING: std::ops::Range<usize> = 5..9;
-
-/// Truncating, like Desktop's own writer — 1,940,744 B is `1.8 MB`.
-pub fn human_bytes(size: i64) -> String {
-    let step = 1024.0f64;
-    let mut value = size as f64;
-    for unit in ["B", "KB", "MB", "GB"] {
-        if value < step || unit == "GB" {
-            if unit == "B" {
-                return format!("{} B", value.trunc() as i64);
-            }
-            return format!("{:.1} {}", (value * 10.0).trunc() / 10.0, unit);
-        }
-        value /= step;
-    }
-    format!("{value:.1} GB")
-}
 
 fn snippet(msg: &Msg) -> String {
     const LIMIT: usize = 140;
@@ -77,7 +62,13 @@ fn record(title: &str, msg: &Msg, people: &People, value: Figure, unit: &str) ->
     }
 }
 
-pub fn superlatives(export: &Export, people: &People, activity: &Activity) -> Vec<Superlative> {
+/// `index` is [`Export::by_id`], built once by the caller.
+pub fn superlatives(
+    export: &Export,
+    people: &People,
+    activity: &Activity,
+    index: &HashMap<i64, usize>,
+) -> Vec<Superlative> {
     let msgs: Vec<&Msg> = export.said().collect();
     if msgs.is_empty() {
         return Vec::new();
@@ -135,7 +126,7 @@ pub fn superlatives(export: &Export, people: &People, activity: &Activity) -> Ve
         let (target_id, count) = replied.most_common(Some(1))[0];
         // Spans every message, service entries included — a reply can point at
         // one.
-        if let Some(&at) = export.by_id().get(&target_id) {
+        if let Some(&at) = index.get(&target_id) {
             out.push(record(
                 "Most replied to",
                 &export.msgs[at],
@@ -383,9 +374,19 @@ pub fn churn(export: &Export, people: &People, activity: &Activity) -> Churn {
 
 /// Every metric that fits in a row, cut per topic.
 pub fn topics(export: &Export, people: &People) -> Vec<Topic> {
+    // Every topic's messages in one walk, in archive order. Filtering the
+    // whole archive once per topic is topics times messages, which for a
+    // forum of two hundred topics is ninety million visits to say the same
+    // thing.
+    let mut by_topic: HashMap<usize, Vec<&Msg>> = HashMap::new();
+    for msg in export.said() {
+        by_topic.entry(msg.topic).or_default().push(msg);
+    }
+    let nothing: Vec<&Msg> = Vec::new();
+
     let mut out = Vec::new();
     for topic in &export.topics {
-        let stream: Vec<&Msg> = export.said().filter(|m| m.topic == topic.index).collect();
+        let stream = by_topic.get(&topic.index).unwrap_or(&nothing);
         if stream.is_empty() {
             // No `avg_words` at all rather than a zero: there is no average of
             // nothing, and 0.0 would read as "they wrote empty messages".
@@ -399,7 +400,7 @@ pub fn topics(export: &Export, people: &People) -> Vec<Topic> {
         let mut voices: Counter<String> = Counter::new();
         let mut per_hour = [0i64; 24];
         let mut per_day: HashMap<NaiveDate, i64> = HashMap::new();
-        for msg in &stream {
+        for msg in stream {
             let key = people.key_of(msg);
             if !key.is_empty() {
                 voices.bump(key);
@@ -444,4 +445,114 @@ pub fn topics(export: &Export, people: &People) -> Vec<Topic> {
         });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{at, export, msg};
+
+    /// A person who sent `messages`, `night` of them between midnight and 5.
+    fn person(key: &str, messages: i64, night: i64) -> Person {
+        let mut hours = [0i64; 24];
+        hours[2] = night;
+        hours[12] = messages - night;
+        Person {
+            key: key.into(),
+            name: key.into(),
+            messages,
+            hours,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_award_needs_the_floor_and_a_tie_goes_to_fewer_messages() {
+        let rows = [
+            // All of them at night, and one short of the floor.
+            person("user1", 39, 39),
+            // Half at night each, on different totals.
+            person("user2", 40, 20),
+            person("user3", 80, 40),
+        ];
+        let out = awards(&rows, 40);
+        // The other three find nobody above zero, and an award of nothing is
+        // not given.
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, "Night owl");
+        assert_eq!(
+            out[0].key, "user2",
+            "an even score goes to the smaller total"
+        );
+        assert_eq!(out[0].value, "50%");
+
+        assert!(awards(&rows, 81).is_empty(), "nobody clears the floor");
+    }
+
+    #[test]
+    fn a_streak_is_consecutive_days_and_one_day_is_not_one() {
+        let lone = export(vec![
+            msg(1, "user1", at(1, 10, 0), None),
+            msg(2, "user2", at(3, 10, 0), None),
+        ]);
+        assert!(streaks(&lone, &People::new(&lone)).is_none());
+
+        let export = export(vec![
+            msg(1, "user1", at(1, 10, 0), None),
+            msg(2, "user1", at(2, 10, 0), None),
+            msg(3, "user1", at(2, 11, 0), None),
+            msg(4, "user1", at(3, 10, 0), None),
+            // The same length later: the first to reach it keeps it.
+            msg(5, "user2", at(5, 10, 0), None),
+            msg(6, "user2", at(6, 10, 0), None),
+            msg(7, "user2", at(7, 10, 0), None),
+        ]);
+        let run = streaks(&export, &People::new(&export)).expect("a streak");
+        assert_eq!((run.name.as_str(), run.days), ("user1", 3));
+        assert_eq!(run.ended, "2025-01-03");
+    }
+
+    #[test]
+    fn each_topic_counts_its_own_messages_and_an_empty_one_has_no_average() {
+        let mut second = msg(3, "user2", at(1, 11, 0), None);
+        second.topic = 1;
+        let mut export = export(vec![
+            msg(1, "user1", at(1, 10, 0), None),
+            msg(2, "user1", at(2, 10, 0), None),
+            second,
+        ]);
+        for index in [1, 2] {
+            let mut topic = export.topics[0].clone();
+            topic.index = index;
+            topic.name = format!("topic {index}");
+            export.topics.push(topic);
+        }
+        let out = topics(&export, &People::new(&export));
+        let counts: Vec<usize> = out.iter().map(|t| t.messages).collect();
+        assert_eq!(counts, [2, 1, 0]);
+        assert_eq!(out[0].active_days, 2);
+        assert_eq!(out[0].top, "user1");
+        assert_eq!(out[1].first, "2025-01-01");
+        assert_eq!(out[2].avg_words, None);
+    }
+
+    #[test]
+    fn the_most_replied_to_message_is_named_by_its_id() {
+        let export = export(vec![
+            msg(1, "user1", at(1, 10, 0), None),
+            msg(2, "user2", at(1, 10, 1), Some(1)),
+            msg(3, "user3", at(1, 10, 2), Some(1)),
+            msg(4, "user3", at(1, 10, 3), Some(2)),
+        ]);
+        let people = People::new(&export);
+        let activity = crate::activity::compute(&export, &people);
+        let out = superlatives(&export, &people, &activity, &export.by_id());
+        let record = out
+            .iter()
+            .find(|s| s.title == "Most replied to")
+            .expect("a record");
+        assert_eq!(record.id, Some(1));
+        assert_eq!(record.value, Figure::Count(2));
+        assert_eq!(record.who, "user1");
+    }
 }

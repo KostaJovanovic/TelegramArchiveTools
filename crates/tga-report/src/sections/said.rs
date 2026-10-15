@@ -1,8 +1,8 @@
 //! What the messages were made of: length, attachments, emoji, links.
 
-use crate::stats::{human_bytes, number};
+use crate::stats::number;
 use std::fmt::Write as _;
-use tga_stats::Stats;
+use tga_stats::{human_bytes, Stats};
 
 use super::*;
 use crate::charts::{self, esc, thousands};

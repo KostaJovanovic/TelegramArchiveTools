@@ -213,7 +213,19 @@ pub fn compute(export: &Export, people: &People) -> PeopleStats {
             .filter(|m| seen.insert(m.key.as_str()) && spoke.contains(m.key.as_str()))
             .count()
     };
-    let silent_members = ranked.iter().filter(|r| r.messages == 0).count();
+    // Who never posted, split by whether the member list has them. The People
+    // section points at the Members table for the first, and that table lists
+    // the member list and nothing else; a reactor who left before the export
+    // was counted here and then appeared nowhere it pointed. (`silent` is only
+    // ever set on a member-list row, so `listed` covers it.)
+    let silent_members = ranked
+        .iter()
+        .filter(|r| r.messages == 0 && r.listed)
+        .count();
+    let quiet_unlisted = ranked
+        .iter()
+        .filter(|r| r.messages == 0 && !r.listed)
+        .count();
     // What share of the conversation the loudest few carry. A single number
     // for "is this a group or a broadcast".
     let top3: i64 = speakers.iter().take(3).map(|r| r.messages).sum();
@@ -236,10 +248,75 @@ pub fn compute(export: &Export, people: &People) -> PeopleStats {
         roster_capped: export.roster_capped,
         members_who_spoke,
         silent_members,
+        quiet_unlisted,
         total_messages: total,
         top3_share,
         votes_named: named_votes,
         votes_total: total_votes,
         votes_anonymous: (total_votes - named_votes).max(0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{at, export, member, msg, reaction};
+
+    fn run(export: &Export) -> PeopleStats {
+        compute(export, &People::new(export))
+    }
+
+    /// user1 posts and is reacted to by user2, who is on the member list and
+    /// never posts, and by user9, who is on neither.
+    fn reacted() -> Export {
+        let mut said = msg(1, "user1", at(1, 10, 0), None);
+        said.reactions.push(reaction(3, &["user2", "user9"]));
+        export(vec![said])
+    }
+
+    #[test]
+    fn a_reactor_off_the_member_list_is_not_a_silent_member() {
+        // The People section sends the reader to the Members table for every
+        // silent member, and that table lists the member list alone.
+        let mut export = reacted();
+        export.roster = vec![member("user1", "Ana"), member("user2", "Bob")];
+        let out = run(&export);
+        assert_eq!(out.speakers, 1);
+        assert_eq!(out.members_who_spoke, 1);
+        assert_eq!(out.silent_members, 1, "Bob, who is listed");
+        assert_eq!(out.quiet_unlisted, 1, "user9, who is not");
+        assert_eq!(out.rows.len(), 3);
+    }
+
+    #[test]
+    fn with_no_member_list_everybody_quiet_is_unlisted() {
+        let out = run(&reacted());
+        assert_eq!(out.silent_members, 0);
+        assert_eq!(out.quiet_unlisted, 2);
+    }
+
+    #[test]
+    fn reactions_given_are_a_floor_and_the_rest_are_anonymous() {
+        let out = run(&reacted());
+        assert_eq!(out.votes_named, 2);
+        assert_eq!(out.votes_total, 3);
+        assert_eq!(out.votes_anonymous, 1);
+        let bob = out.rows.iter().find(|r| r.key == "user2").expect("a row");
+        assert_eq!((bob.messages, bob.votes_given), (0, 1));
+    }
+
+    #[test]
+    fn rows_rank_on_messages_then_name_and_the_loudest_three_carry_a_share() {
+        let export = export(vec![
+            msg(1, "user2", at(1, 10, 0), None),
+            msg(2, "user1", at(1, 10, 1), None),
+            msg(3, "user3", at(1, 10, 2), None),
+            msg(4, "user3", at(1, 10, 3), None),
+            msg(5, "user4", at(1, 10, 4), None),
+        ]);
+        let out = run(&export);
+        let order: Vec<&str> = out.rows.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(order, ["user3", "user1", "user2", "user4"]);
+        assert_eq!(out.top3_share, 4.0 / 5.0);
     }
 }

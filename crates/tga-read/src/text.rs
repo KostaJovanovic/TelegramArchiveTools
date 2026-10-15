@@ -3,7 +3,8 @@
 //! Ported from `analyser/read.py`. The ranges and the joiner list are that
 //! file's, unchanged — they were chosen there and the reason is worth keeping:
 //! the report *counts* emoji, it never has to name or classify one, so the
-//! alternative is shipping a Unicode table that goes stale.
+//! alternative is shipping a Unicode table that goes stale. Where one emoji
+//! ends and the next begins is *not* that file's; see [`emoji_runs`].
 
 /// Code-point ranges that carry pictographic emoji.
 ///
@@ -43,30 +44,63 @@ fn in_ranges(ranges: &[(u32, u32)], code: u32) -> bool {
         .any(|&(low, high)| low <= code && code <= high)
 }
 
+/// The regional indicators, which make a flag two at a time.
+const REGIONAL: (u32, u32) = (0x1F1E6, 0x1F1FF);
+
+const ZWJ: char = '\u{200D}';
+
 /// Every emoji sequence in `text`, joined runs kept whole.
 ///
 /// A skin-toned or ZWJ-joined sequence is one emoji to the person who typed
 /// it, so it counts once rather than once per code point.
+///
+/// **Two emoji side by side are two.** The Python appended every pictograph
+/// to the run it was in, so `😂😂😂` counted as one emoji whose name was three
+/// of them, `👍❤` as a third kind that was neither, and two flags as one. The
+/// top list then ranked the repeated string apart from the single one, in
+/// exactly the chats that use emoji most. A pictograph now starts a new emoji
+/// unless a zero-width joiner asked for it to join the last; regional
+/// indicators pair off, two to a flag.
 pub fn emoji_runs(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut run = String::new();
-    let mut has_base = false;
+    // The run ends on a joiner, so the next pictograph belongs to it.
+    let mut joined = false;
+    // The run is one regional indicator waiting for the other half of a flag.
+    let mut half_flag = false;
     for ch in text.chars() {
         let code = ch as u32;
-        if in_ranges(EMOJI_RANGES, code) {
-            run.push(ch);
-            has_base = true;
-        } else if !run.is_empty() && in_ranges(EMOJI_JOINERS, code) {
-            run.push(ch);
-        } else {
-            if !run.is_empty() && has_base {
+        if (REGIONAL.0..=REGIONAL.1).contains(&code) {
+            if !half_flag && !joined && !run.is_empty() {
                 out.push(std::mem::take(&mut run));
             }
-            run.clear();
-            has_base = false;
+            run.push(ch);
+            half_flag = !half_flag;
+            joined = false;
+        } else if !run.is_empty() && in_ranges(EMOJI_JOINERS, code) {
+            // A skin tone, a variation selector, a keycap or the joiner itself
+            // modifies what came before it rather than standing alone.
+            run.push(ch);
+            joined = ch == ZWJ;
+            half_flag = false;
+        } else if in_ranges(EMOJI_RANGES, code) {
+            if !joined && !run.is_empty() {
+                out.push(std::mem::take(&mut run));
+            }
+            run.push(ch);
+            joined = false;
+            half_flag = false;
+        } else {
+            // A run only ever opens on a pictograph or an indicator, so
+            // anything in it is an emoji.
+            if !run.is_empty() {
+                out.push(std::mem::take(&mut run));
+            }
+            joined = false;
+            half_flag = false;
         }
     }
-    if !run.is_empty() && has_base {
+    if !run.is_empty() {
         out.push(run);
     }
     out
@@ -105,6 +139,48 @@ mod tests {
         assert_eq!(emoji_runs("\u{1F468}\u{200D}\u{1F4BB}").len(), 1);
         // Two separated by a space are two.
         assert_eq!(emoji_runs("\u{1F600} \u{1F600}").len(), 2);
+    }
+
+    #[test]
+    fn two_emoji_side_by_side_are_two() {
+        // Three laughs are three of the same emoji, not one emoji called
+        // "three laughs".
+        assert_eq!(
+            emoji_runs("\u{1F602}\u{1F602}\u{1F602}"),
+            ["\u{1F602}", "\u{1F602}", "\u{1F602}"]
+        );
+        // A thumbs-up and a heart are two kinds, not a third.
+        assert_eq!(
+            emoji_runs("\u{1F44D}\u{2764}\u{FE0F}"),
+            ["\u{1F44D}", "\u{2764}\u{FE0F}"]
+        );
+        // A skin tone still belongs to the hand before it.
+        assert_eq!(
+            emoji_runs("\u{1F44D}\u{1F3FD}\u{1F44D}"),
+            ["\u{1F44D}\u{1F3FD}", "\u{1F44D}"]
+        );
+    }
+
+    #[test]
+    fn flags_pair_off_two_indicators_at_a_time() {
+        // Serbia then Ukraine: four indicators, two flags.
+        assert_eq!(
+            emoji_runs("\u{1F1F7}\u{1F1F8}\u{1F1FA}\u{1F1E6}"),
+            ["\u{1F1F7}\u{1F1F8}", "\u{1F1FA}\u{1F1E6}"]
+        );
+        assert_eq!(
+            emoji_runs("\u{1F600}\u{1F1F7}\u{1F1F8}\u{1F600}"),
+            ["\u{1F600}", "\u{1F1F7}\u{1F1F8}", "\u{1F600}"]
+        );
+    }
+
+    #[test]
+    fn a_zwj_sequence_built_of_pictographs_is_still_one() {
+        // The rainbow flag: white flag, VS16, ZWJ, rainbow.
+        assert_eq!(
+            emoji_runs("\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}\u{1F308}"),
+            ["\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}", "\u{1F308}"]
+        );
     }
 
     #[test]

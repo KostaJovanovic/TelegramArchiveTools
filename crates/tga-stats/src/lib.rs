@@ -75,28 +75,33 @@ pub enum Figure {
     Text(String),
 }
 
-impl Figure {
-    /// How the report prints it. A float keeps the trailing `.0` it was
-    /// rounded to, which is why this is not `to_string` on the number.
-    pub fn display(&self) -> String {
-        match self {
-            Figure::Count(n) => n.to_string(),
-            Figure::Text(text) => text.clone(),
-        }
-    }
-
-    pub fn as_i64(&self) -> Option<i64> {
-        match self {
-            Figure::Count(n) => Some(*n),
-            Figure::Text(_) => None,
-        }
-    }
-}
-
 impl Default for Figure {
     fn default() -> Self {
         Figure::Count(0)
     }
+}
+
+/// A byte count the way the report writes one: truncating, like Desktop's own
+/// writer — 1,940,744 B is `1.8 MB`.
+///
+/// **Here because both halves write one.** The metrics put a size into the
+/// "Largest file" record as text and the report prints the media totals, and
+/// the two used to carry a copy each, under a comment claiming a test held them
+/// to the same answers that could only see one of them. This is the one crate
+/// both reach.
+pub fn human_bytes(size: i64) -> String {
+    let step = 1024.0f64;
+    let mut value = size as f64;
+    for unit in ["B", "KB", "MB", "GB"] {
+        if value < step || unit == "GB" {
+            if unit == "B" {
+                return format!("{} B", value.trunc() as i64);
+            }
+            return format!("{:.1} {}", (value * 10.0).trunc() / 10.0, unit);
+        }
+        value /= step;
+    }
+    format!("{value:.1} GB")
 }
 
 /// A sparse `{day: count}` series, one per person or per topic.
@@ -128,6 +133,12 @@ pub struct Stats {
     pub topics: Vec<Topic>,
     pub superlatives: Vec<Superlative>,
     pub awards: Vec<Award>,
+    /// The messages somebody needed before they could win one of `awards`.
+    ///
+    /// Carried so the report states the floor the metrics used instead of a
+    /// copy of it. `None` in a dump recorded before it was, which the report
+    /// words without a number rather than guessing one.
+    pub award_minimum: Option<i64>,
     /// Absent when nobody posted on two consecutive days.
     pub streak: Option<Streak>,
     pub churn: Churn,
@@ -230,7 +241,21 @@ pub struct People {
     /// same group. A roster of 43 against 45 speakers sounds like a match until
     /// you notice only 41 appear in both.
     pub members_who_spoke: usize,
+    /// People on the member list who never posted: the rows the Members table
+    /// says "never posted" beside.
+    ///
+    /// **Not every row with no messages.** A reaction names its reactor whether
+    /// or not they are on the list, and counting those here pointed the reader
+    /// at a table they are not in. They are [`quiet_unlisted`](Self::quiet_unlisted).
+    /// A dump recorded before the split has both in this one.
     pub silent_members: usize,
+    /// People the history names — a reaction, a join, a rename — who never
+    /// posted and are not on the member list.
+    ///
+    /// With no member list at all this is everybody who never posted, and the
+    /// Members section lists them by name; with one, no table on the page has a
+    /// row for them.
+    pub quiet_unlisted: usize,
     pub total_messages: usize,
     /// What share of the conversation the loudest three carry. One number for
     /// "is this a group or a broadcast".
@@ -700,12 +725,27 @@ pub struct TenureRow {
 /// ends. The axis is every month between the first and the last, silent ones
 /// included — taking only the months that appear closes a six-month gap into a
 /// single step and reports the return after it as ordinary retention.
+///
+/// Everybody who spoke in a month is in exactly one of `new`, `returning` and
+/// `came_back`, so `active` is their sum.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Retention {
     pub months: Vec<String>,
     pub active: Vec<i64>,
     pub new: Vec<i64>,
+    /// Spoke this month *and* the month before: people who **stayed**.
+    ///
+    /// The name is older than the understanding of it — this was charted as
+    /// "came back", which is the one thing these people did not do. It stays
+    /// because every recorded dump carries it under this key.
     pub returning: Vec<i64>,
+    /// Spoke this month, not the month before, and in some month before that:
+    /// back after a gap of their own.
+    ///
+    /// Empty in a dump recorded before it existed. It is `active` less `new`
+    /// less `returning` there too, which is how the report reads one.
+    #[serde(default)]
+    pub came_back: Vec<i64>,
     pub lost: Vec<i64>,
     pub people: usize,
     /// The mean of the monthly rates, not the ratio of the totals: every month
@@ -893,5 +933,48 @@ mod tests {
         let back: Stats = serde_json::from_str(&write(&stats).unwrap()).unwrap();
         assert_eq!(back.activity.per_day, stats.activity.per_day);
         assert_eq!(back.activity.per_hour, stats.activity.per_hour);
+    }
+
+    #[test]
+    fn a_dump_from_before_the_newer_fields_still_loads() {
+        // `came_back`, `quiet_unlisted` and `award_minimum` were added after
+        // dumps had been recorded, and a recording must keep rendering.
+        let old = r#"{
+            "people": { "silent_members": 3 },
+            "dynamics": { "empty": false,
+                "pairs": { "rows": [], "shown": 0, "mutual": 0, "one_way": 0, "directed": 0 },
+                "answer": { "counts": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                            "medians": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                            "counted": 0, "minimum": 20, "cap": 86400,
+                            "fastest_hour": null, "slowest_hour": null },
+                "tenure": { "rows": [], "as_of": "", "active": 0, "fading": 0, "gone": 0,
+                            "active_within": 30, "fading_within": 90 },
+                "retention": { "months": ["2025-01"], "active": [2], "new": [2],
+                               "returning": [0], "lost": [0], "people": 2,
+                               "kept_mean": 0.0, "months_counted": 0 },
+                "depth": { "buckets": [], "cap": 8, "chained": 0, "max": 0, "median": 0,
+                           "mean": 0.0, "longest": null } }
+        }"#;
+        let stats: Stats = serde_json::from_str(old).expect("an older dump loads");
+        assert_eq!(stats.people.silent_members, 3);
+        assert_eq!(stats.people.quiet_unlisted, 0);
+        assert_eq!(stats.award_minimum, None);
+        assert!(stats
+            .dynamics
+            .expect("dynamics")
+            .retention
+            .came_back
+            .is_empty());
+    }
+
+    #[test]
+    fn a_byte_count_truncates_rather_than_rounds() {
+        // The number in the docs, and the reason it is not `{:.1}` alone:
+        // 1.85 MB rounds up to 1.9 and Desktop writes 1.8.
+        assert_eq!(human_bytes(1_940_744), "1.8 MB");
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(1023), "1023 B");
+        assert_eq!(human_bytes(1024), "1.0 KB");
+        assert_eq!(human_bytes(1024 * 1024 * 1024 * 3), "3.0 GB");
     }
 }

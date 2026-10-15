@@ -40,13 +40,6 @@ use tgx_archive::Store;
 /// writes `<title>/<title>.sqlite` per chat; see [`find`].
 pub const FILE_NAME: &str = "telegram.sqlite";
 
-/// The only shape this build knows how to read — the writer's own constant.
-///
-/// Refused rather than guessed at, matching the exporter's own rule: a file
-/// from a later build may have moved a column this reader depends on, and a
-/// report drawn from a misread table is worse than no report.
-pub const SCHEMA_VERSION: i64 = tgx_archive::SCHEMA_VERSION;
-
 /// One chat in the file.
 #[derive(Debug, Clone)]
 pub struct Chat {
@@ -185,10 +178,13 @@ fn is_sqlite(path: &Path) -> bool {
 /// a worker thread or the command line; a caller living on an async runtime
 /// reaches here through `spawn_blocking`.
 fn block<T>(work: impl Future<Output = Result<T>>) -> Result<T> {
+    runtime()?.block_on(work)
+}
+
+fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_current_thread()
         .build()
-        .context("starting the database reader")?
-        .block_on(work)
+        .context("starting the database reader")
 }
 
 /// Open read-only.
@@ -205,9 +201,80 @@ async fn open(path: &Path) -> Result<Store> {
         .with_context(|| format!("{} is not a database this build can read", path.display()))
 }
 
+/// One database, open for as long as its caller keeps asking it things.
+///
+/// **The free functions below each start a runtime and open the file**, which
+/// is right for one question and wrong for ten thousand. A digest or a photo
+/// pass asks for one blob per attachment, and paid a runtime, a libsql open and
+/// a schema check for every one of them; one `analyse` opened the same file
+/// five times. This holds one of each for its lifetime, and the free functions
+/// are this, opened for a single call.
+///
+/// The same rule as [`block`]: not for use from inside an async task.
+pub struct Reader {
+    runtime: tokio::runtime::Runtime,
+    store: Store,
+    path: PathBuf,
+}
+
+impl Reader {
+    /// Open read-only; see [`open`].
+    pub fn open(path: &Path) -> Result<Self> {
+        let runtime = runtime()?;
+        let store = runtime.block_on(open(path))?;
+        Ok(Reader {
+            runtime,
+            store,
+            path: path.to_path_buf(),
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// [`chats`].
+    pub fn chats(&self) -> Result<Vec<Chat>> {
+        self.runtime.block_on(chats_in(&self.store))
+    }
+
+    /// [`load`].
+    pub fn load(&self, wanted: Option<&str>, progress: Option<Progress<'_>>) -> Result<Export> {
+        self.runtime
+            .block_on(load_from(&self.store, &self.path, wanted, progress))
+    }
+
+    /// [`deleted`].
+    pub fn deleted(&self, chat_id: i64) -> Result<usize> {
+        let (all, alive) = self.runtime.block_on(self.store.message_count(chat_id))?;
+        Ok((all - alive).max(0) as usize)
+    }
+
+    /// [`edits`].
+    pub fn edits(&self, chat_id: i64) -> Result<(usize, usize)> {
+        let (msgs, rows) = self.runtime.block_on(self.store.edit_counts(chat_id))?;
+        Ok((msgs.max(0) as usize, rows.max(0) as usize))
+    }
+
+    /// [`blob`].
+    pub fn blob(&self, file_id: i64, kind: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.runtime.block_on(self.store.blob(file_id, kind))?)
+    }
+
+    /// [`media_index`].
+    pub fn media_index(&self, chat_id: i64) -> Result<HashMap<(i64, String), (i64, String)>> {
+        Ok(self
+            .runtime
+            .block_on(self.store.media_rows_of(chat_id))?
+            .into_iter()
+            .map(|r| ((r.message_id, r.role), (r.file_id, r.kind)))
+            .collect())
+    }
+}
+
 /// Every chat in the file, most messages first.
 pub fn chats(path: &Path) -> Result<Vec<Chat>> {
-    block(async { chats_in(&open(path).await?).await })
+    Reader::open(path)?.chats()
 }
 
 /// Just the names, without counting anything.
@@ -241,16 +308,16 @@ async fn chats_in(store: &Store) -> Result<Vec<Chat>> {
 /// file with exactly one and no argument; a file with several is read as its
 /// largest, and the caller is expected to say which others it passed over.
 pub fn load(path: &Path, wanted: Option<&str>, progress: Option<Progress<'_>>) -> Result<Export> {
-    block(load_async(path, wanted, progress))
+    Reader::open(path)?.load(wanted, progress)
 }
 
-async fn load_async(
+async fn load_from(
+    store: &Store,
     path: &Path,
     wanted: Option<&str>,
     mut progress: Option<Progress<'_>>,
 ) -> Result<Export> {
-    let store = open(path).await?;
-    let all = chats_in(&store).await?;
+    let all = chats_in(store).await?;
     anyhow::ensure!(!all.is_empty(), "{} holds no chats", path.display());
 
     let chat = match wanted {
@@ -332,7 +399,7 @@ async fn load_async(
     }
 
     export.roster_complete = head_flag(&heads, "members_complete");
-    export.roster = roster(&store, chat.id).await;
+    export.roster = roster(store, chat.id).await;
     // **`capped` is always `None` here, and that is the honest answer.** The
     // exporter writes `complete` and `capped` into `participants.json`, but
     // only `members_complete` reaches the topic head, so a database has no
@@ -366,11 +433,12 @@ async fn roster(store: &Store, chat_id: i64) -> Vec<tga_read::Member> {
 ///
 /// Any of them: the exporter writes the same roster block into every topic's
 /// head of a chat, so the first that carries the key answers for all.
+///
+/// Read by [`tga_read::flag`], the rule `participants.json` is read by. This
+/// had its own, under which `0` was yes, so one export said its member list was
+/// complete from a database and incomplete from a folder.
 fn head_flag(heads: &[tgx_archive::StoredTopic], key: &str) -> Option<bool> {
-    heads.iter().find_map(|t| match t.head.get(key) {
-        None | Some(Value::Null) => None,
-        Some(v) => Some(v != &Value::Bool(false)),
-    })
+    heads.iter().find_map(|t| tga_read::flag(t.head.get(key)))
 }
 
 /// What the file says about messages Telegram no longer returns.
@@ -380,27 +448,22 @@ fn head_flag(heads: &[tgx_archive::StoredTopic], key: &str) -> Option<bool> {
 /// rather than let it pass unmentioned, because "17 of these were deleted and
 /// kept" is the one thing this format knows that a folder never could.
 pub fn deleted(path: &Path, chat_id: i64) -> Result<usize> {
-    block(async {
-        let (all, alive) = open(path).await?.message_count(chat_id).await?;
-        Ok((all - alive).max(0) as usize)
-    })
+    Reader::open(path)?.deleted(chat_id)
 }
 
 /// How many stored messages have an earlier version kept, and how many
 /// versions there are in total.
 pub fn edits(path: &Path, chat_id: i64) -> Result<(usize, usize)> {
-    block(async {
-        let (msgs, rows) = open(path).await?.edit_counts(chat_id).await?;
-        Ok((msgs.max(0) as usize, rows.max(0) as usize))
-    })
+    Reader::open(path)?.edits(chat_id)
 }
 
 /// The bytes of one stored file, if the database has them.
 ///
 /// Keyed `(file_id, kind)` because that is the shipped schema's primary key on
-/// `blobs`; `media` is what maps a message to the pair.
+/// `blobs`; `media` is what maps a message to the pair. Once per file is
+/// [`Reader::blob`]'s job; this opens the database for the one.
 pub fn blob(path: &Path, file_id: i64, kind: &str) -> Result<Option<Vec<u8>>> {
-    block(async { Ok(open(path).await?.blob(file_id, kind).await?) })
+    Reader::open(path)?.blob(file_id, kind)
 }
 
 /// `(message_id, role) -> (file_id, kind)` for one chat.
@@ -414,15 +477,7 @@ pub fn blob(path: &Path, file_id: i64, kind: &str) -> Result<Option<Vec<u8>>> {
 /// kind)` — the shipped schema's, which is *not* the `(family, file_id)` the
 /// exporter's own `DATABASE.md` specifies.
 pub fn media_index(path: &Path, chat_id: i64) -> Result<HashMap<(i64, String), (i64, String)>> {
-    block(async {
-        Ok(open(path)
-            .await?
-            .media_rows_of(chat_id)
-            .await?
-            .into_iter()
-            .map(|r| ((r.message_id, r.role), (r.file_id, r.kind)))
-            .collect())
-    })
+    Reader::open(path)?.media_index(chat_id)
 }
 
 #[cfg(test)]
@@ -591,6 +646,57 @@ mod tests {
             "the @ strip"
         );
         assert_eq!(from_db.roster_complete, from_folder.roster_complete);
+    }
+
+    #[test]
+    fn one_reader_answers_what_the_one_shot_functions_answer() {
+        let both = build("reader");
+        let reader = Reader::open(&both.db).expect("open");
+        let once = load(&both.db, None, None).expect("load");
+        let held = reader.load(None, None).expect("load");
+        assert_eq!(
+            held.msgs.iter().map(|m| m.id).collect::<Vec<_>>(),
+            once.msgs.iter().map(|m| m.id).collect::<Vec<_>>()
+        );
+        assert_eq!(held.name, once.name);
+        assert_eq!(reader.chats().expect("chats").len(), 1);
+        assert_eq!(
+            reader.media_index(CHAT).expect("index"),
+            media_index(&both.db, CHAT).expect("index")
+        );
+        assert_eq!(reader.deleted(CHAT).expect("deleted"), 0);
+        assert_eq!(
+            reader.edits(CHAT).expect("edits"),
+            edits(&both.db, CHAT).expect("edits")
+        );
+        assert_eq!(reader.blob(1, "document").expect("blob"), None);
+        assert_eq!(reader.path(), both.db.as_path());
+    }
+
+    #[test]
+    fn a_zero_complete_flag_reads_as_no_from_a_database_as_from_a_folder() {
+        // `members_complete: 0` was yes here and no from `participants.json`.
+        let base = std::env::temp_dir().join("tga-db-test-flag");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("temp dir");
+        let db = base.join(FILE_NAME);
+        run(async {
+            let store = Store::open(&db).await.expect("create database");
+            store
+                .upsert_chat(CHAT, "UA KOLAB", "private_supergroup", 0)
+                .await
+                .expect("chat");
+            let head = json!({"topic_id": 12, "members_complete": 0});
+            store
+                .upsert_topic(CHAT, 12, "t", head.as_object().expect("head"), 0)
+                .await
+                .expect("topic");
+        });
+        assert_eq!(
+            load(&db, None, None).expect("database").roster_complete,
+            Some(false)
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

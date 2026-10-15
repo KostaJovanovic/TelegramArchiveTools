@@ -1,9 +1,28 @@
 //! `.docx`: a zip holding `word/document.xml`, which holds the prose.
 
-use std::io::{BufReader, Cursor};
+use std::io::{BufReader, Cursor, Read};
 
 use quick_xml::events::Event;
 use quick_xml::Reader;
+
+/// The most of `word/document.xml` inflated, in bytes.
+///
+/// **`MAX_BYTES` bounds the zip, not what is in it.** A 60 MB archive can
+/// declare an entry of many gigabytes, and the whole of it used to be inflated
+/// and its text gathered into one string before [`crate::MAX_CHARS`] cut it.
+/// Word's XML runs to a few hundred bytes of markup per sentence; this is
+/// thousands of times what the longest zapisnik needs, and a truncated entry
+/// is read as far as it goes, like any truncated `.docx`.
+const MAX_XML: u64 = 256 * 1024 * 1024;
+
+/// The most text gathered before the read stops, in bytes.
+///
+/// [`crate::MAX_CHARS`] is applied to the squeezed text, after blank lines and
+/// indentation are gone, so the stop has to sit well past it or a document
+/// padded with empty paragraphs would come out shorter than the cap allows.
+/// Sixty-four bytes per character kept is more padding than any document
+/// carries, and still bounds what one attachment can cost.
+const MAX_TEXT: usize = crate::MAX_CHARS * 64;
 
 /// The prose of a Word document, paragraph per line.
 ///
@@ -16,7 +35,9 @@ pub fn extract(bytes: &[u8]) -> Option<String> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).ok()?;
     let entry = archive.by_name("word/document.xml").ok()?;
 
-    let mut reader = Reader::from_reader(BufReader::new(entry));
+    // `take` and not `entry.size()`: the size is what the archive *says*, and
+    // an archive built to be inflated is the one that would lie about it.
+    let mut reader = Reader::from_reader(BufReader::new(entry.take(MAX_XML)));
     let mut buf = Vec::new();
     let mut out = String::new();
     // `w:t` is the only element whose text is the document's text. Everything
@@ -78,6 +99,9 @@ pub fn extract(bytes: &[u8]) -> Option<String> {
             Err(_) => break,
         }
         buf.clear();
+        if out.len() > MAX_TEXT {
+            break;
+        }
     }
 
     Some(out)
@@ -146,6 +170,34 @@ mod tests {
                </w:p></w:body></w:document>"#,
         );
         assert_eq!(extract(&path).as_deref(), Some("RJMM & RJIL — predlog\n"));
+    }
+
+    #[test]
+    fn a_document_far_past_the_cap_stops_being_read_rather_than_filling_memory() {
+        // Three million characters of prose, deflated to almost nothing: the
+        // shape of an archive built to be inflated. Read whole, it is all held
+        // in one string before anything cuts it.
+        let line = "a".repeat(100);
+        let mut xml = String::from(r#"<w:document xmlns:w="x"><w:body>"#);
+        for _ in 0..30_000 {
+            xml.push_str(&format!("<w:p><w:r><w:t>{line}</w:t></w:r></w:p>"));
+        }
+        xml.push_str("</w:body></w:document>");
+        let bytes = docx(&xml);
+        assert!(bytes.len() < 1024 * 1024, "the fixture should be small");
+
+        let text = extract(&bytes).expect("still read");
+        assert!(text.len() <= MAX_TEXT + line.len() + 1, "{}", text.len());
+        assert!(text.starts_with(&format!("{line}\n{line}\n")));
+        // And what comes out is still cut at the cap and says so.
+        let doc = crate::read_bytes(
+            &bytes,
+            "big.docx",
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        )
+        .expect("a document");
+        assert!(doc.cut);
+        assert_eq!(doc.text.chars().count(), crate::MAX_CHARS);
     }
 
     #[test]

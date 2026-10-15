@@ -310,15 +310,6 @@ pub fn time_axis(series: &[Day], width: f64, height: f64) -> String {
     frame(width, height, &parts, "axis-strip", "")
 }
 
-/// Event markers pinned to the same axis as the ribbon below them.
-///
-/// A span draws as a bar with a marker at its start; a moment draws as a marker
-/// alone. The marker is 9px so it can be hit, and it carries the surface ring
-/// that keeps it legible where two events nearly collide.
-pub fn event_rail(events: &[Event], series: &[Day], width: f64, height: f64) -> String {
-    rail(events, series, width, height, &[])
-}
-
 /// The four marker shapes, in the order kinds are first seen.
 ///
 /// **Shape, not hue, and that is not a preference.** `_timeline` colour-codes
@@ -374,6 +365,10 @@ fn marker(shape: usize, r: f64) -> String {
 }
 
 /// Event markers pinned to the same axis as the ribbon below them.
+///
+/// A span draws as a bar with a marker at its start; a moment draws as a marker
+/// alone. The marker is 9px so it can be hit, and it carries the surface ring
+/// that keeps it legible where two events nearly collide.
 ///
 /// `kinds` is the vocabulary the notes file actually used, in first-seen order.
 /// Non-empty shape-codes each kind and adds the `k<n>` class the filter row

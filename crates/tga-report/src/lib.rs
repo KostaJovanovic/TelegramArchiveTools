@@ -395,6 +395,124 @@ mod tests {
     }
 
     #[test]
+    fn the_pair_table_heads_its_directions_with_arrows_not_entity_names() {
+        let mut stats = drifted();
+        if let Some(dynamics) = stats.dynamics.as_mut() {
+            dynamics.pairs.rows = vec![tga_stats::Pair {
+                a: "user1".into(),
+                b: "user2".into(),
+                a_name: "Ana".into(),
+                b_name: "Bob".into(),
+                a_to_b: 3,
+                b_to_a: 2,
+                both: 2,
+                replies: 5,
+                balance: 0.8,
+            }];
+        }
+        let html = render(&stats, &Names::new(), &Notes::default(), &options());
+        assert!(html.contains("<th class=\"n\">\u{2192}</th><th class=\"n\">\u{2190}</th>"));
+        assert!(!html.contains("&amp;rarr;") && !html.contains("&amp;larr;"));
+    }
+
+    #[test]
+    fn who_came_back_is_read_from_an_older_dump_as_well() {
+        // An older dump has no `came_back`; it is what is left of `active`
+        // once the new and the people who stayed are taken out.
+        let mut stats = drifted();
+        if let Some(dynamics) = stats.dynamics.as_mut() {
+            dynamics.retention = tga_stats::Retention {
+                months: vec!["2025-01".into(), "2025-02".into(), "2025-03".into()],
+                active: vec![2, 2, 3],
+                new: vec![2, 1, 0],
+                returning: vec![0, 1, 2],
+                lost: vec![0, 1, 0],
+                people: 3,
+                ..Default::default()
+            };
+        }
+        let old = render(&stats, &Names::new(), &Notes::default(), &options());
+        assert!(old.contains("<th class=\"n\">Stayed</th><th class=\"n\">Came back</th>"));
+        assert!(old.contains(
+            "<td>2025-03</td><td class=\"n\">3</td><td class=\"n\">0</td>\
+             <td class=\"n\">2</td><td class=\"n\">1</td>"
+        ));
+        if let Some(dynamics) = stats.dynamics.as_mut() {
+            dynamics.retention.came_back = vec![0, 0, 1];
+        }
+        let new = render(&stats, &Names::new(), &Notes::default(), &options());
+        assert_eq!(old, new, "the stored series and the derived one agree");
+    }
+
+    #[test]
+    fn a_reactor_off_the_member_list_is_not_sent_to_the_members_table() {
+        let person = |key: &str, messages: i64, listed: bool| tga_stats::Person {
+            key: key.into(),
+            name: key.into(),
+            messages,
+            listed,
+            ..Default::default()
+        };
+        let mut stats = bare();
+        stats.activity = dated();
+        stats.people.rows = vec![
+            person("user1", 6, true),
+            person("user2", 0, true),
+            person("user9", 0, false),
+        ];
+        stats.people.speakers = 1;
+        stats.people.known_members = 2;
+        stats.people.members_who_spoke = 1;
+        stats.people.silent_members = 1;
+        stats.people.quiet_unlisted = 1;
+        let html = render(&stats, &Names::new(), &Notes::default(), &options());
+        assert!(html.contains("1 more person appears in this archive without ever posting"));
+
+        // With no member list, everybody quiet is in the Members section.
+        stats.people.known_members = 0;
+        stats.people.silent_members = 0;
+        stats.people.quiet_unlisted = 2;
+        let html = render(&stats, &Names::new(), &Notes::default(), &options());
+        assert!(html.contains("2 more people appear in this archive without ever posting"));
+        assert!(html.contains("<section id=\"members\">"));
+    }
+
+    #[test]
+    fn the_award_caption_states_the_floor_the_metrics_used() {
+        let mut stats = bare();
+        stats.awards = vec![tga_stats::Award {
+            title: "Night owl".into(),
+            name: "Ana".into(),
+            key: "user1".into(),
+            value: "50%".into(),
+            note: String::new(),
+            messages: 80,
+        }];
+        stats.people.rows = vec![tga_stats::Person {
+            key: "user1".into(),
+            name: "Ana".into(),
+            messages: 80,
+            ..Default::default()
+        }];
+        stats.activity = dated();
+        stats.award_minimum = Some(25);
+        let html = render(&stats, &Names::new(), &Notes::default(), &options());
+        assert!(html.contains("Restricted to people with 25 messages or more"));
+        stats.award_minimum = None;
+        let html = render(&stats, &Names::new(), &Notes::default(), &options());
+        assert!(html.contains("Restricted to people who posted often enough to mean it"));
+    }
+
+    #[test]
+    fn the_burst_gap_is_the_one_the_metrics_recorded() {
+        let mut stats = bare();
+        stats.conversation.session_gap = 45 * 60;
+        let html = render(&stats, &Names::new(), &Notes::default(), &options());
+        assert!(html.contains("no gap longer than 45 min,"));
+        assert!(!html.contains("half an hour"));
+    }
+
+    #[test]
     fn a_report_rendered_from_a_dump_without_dynamics_is_still_whole() {
         // Every `--from-stats` dump recorded before the branch existed has this
         // shape, and a re-render of one must not lose a section or a nav entry

@@ -164,3 +164,40 @@ pub fn compute(export: &Export, people: &People) -> Activity {
             .collect::<BTreeMap<_, _>>(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{at, export, msg};
+
+    #[test]
+    fn the_day_series_is_dense_and_the_longest_silence_is_named() {
+        let export = export(vec![
+            msg(1, "user1", at(1, 10, 0), None),
+            msg(2, "user2", at(1, 23, 0), None),
+            msg(3, "user1", at(4, 9, 0), None),
+            msg(4, "user1", at(4, 9, 5), None),
+            msg(5, "user2", at(5, 9, 0), None),
+        ]);
+        let out = compute(&export, &People::new(&export));
+        let days: Vec<i64> = out.per_day.iter().map(|d| d.n).collect();
+        assert_eq!(days, [2, 0, 0, 2, 1], "silent days stay on the axis");
+        assert_eq!((out.span_days, out.active_days), (5, 3));
+        let quiet = out.quietest.expect("a silence");
+        assert_eq!(
+            (quiet.days, quiet.from.as_str(), quiet.to.as_str()),
+            (2, "2025-01-02", "2025-01-03")
+        );
+        // Two days of two: the later one is the busiest.
+        assert_eq!(out.busiest_day.date, "2025-01-04");
+        assert_eq!(out.per_hour[9], 3);
+        // 2025-01-01 was a Wednesday.
+        assert_eq!(out.per_weekday[2], 2);
+    }
+
+    #[test]
+    fn an_export_with_nothing_said_is_empty_rather_than_a_panic() {
+        let export = export(vec![]);
+        assert!(compute(&export, &People::new(&export)).empty);
+    }
+}

@@ -41,29 +41,6 @@ pub use digest::{write_brief, write_digest, Attachment, Row, BRIEF};
 /// Where the analyser looks, in order. The first that exists wins.
 pub const CANDIDATES: &[&str] = &["events.json", "analysis/events.json"];
 
-pub const SCHEMA_VERSION: i64 = 1;
-
-/// Kinds the report has names for. Anything else is kept and shown under its
-/// own name — the vocabulary belongs to whoever writes the file, not to this
-/// module. Both projects' sets are here, because a reader may use either.
-pub const KNOWN_KINDS: &[&str] = &[
-    // `_timeline`'s, which is the vocabulary with 42 notes written in it.
-    "pokret",
-    "organizacija",
-    "drama",
-    "produkcija",
-    // The Python analyser's.
-    "milestone",
-    "decision",
-    "conflict",
-    "action",
-    "arrival",
-    "topic",
-];
-
-/// How much an event is claimed to matter. `_timeline`'s `w`.
-pub const WEIGHTS: &[&str] = &["major", "medium", "minor"];
-
 /// The most message ids one event may cite. Past this the citation line stops
 /// being a citation and becomes a data dump.
 const MAX_CITED: usize = 40;
@@ -102,11 +79,6 @@ impl Event {
     /// Whether this draws as a bar rather than as a single marker.
     pub fn spans(&self) -> bool {
         matches!(self.end, Some(end) if end > self.start)
-    }
-
-    /// The kind, if the report has a name for it.
-    pub fn known_kind(&self) -> bool {
-        KNOWN_KINDS.contains(&self.kind.as_str())
     }
 }
 
@@ -148,10 +120,10 @@ impl Notes {
 
     /// Every distinct `kind` present, in first-seen order.
     ///
-    /// The report builds its filter row from this rather than from
-    /// [`KNOWN_KINDS`], so a file using a vocabulary nobody anticipated still
-    /// gets filters — and a file using three of the four does not get a dead
-    /// control for the fourth.
+    /// The report builds its filter row from this rather than from a fixed
+    /// vocabulary, so a file using words nobody anticipated still gets filters
+    /// — and a file using three of the four does not get a dead control for
+    /// the fourth.
     pub fn kinds(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for event in &self.events {
@@ -437,15 +409,6 @@ pub fn load_file(path: &Path) -> Notes {
     }
 }
 
-/// Events grouped by the day they start on.
-pub fn by_day(events: &[Event]) -> std::collections::BTreeMap<NaiveDate, Vec<&Event>> {
-    let mut out: std::collections::BTreeMap<NaiveDate, Vec<&Event>> = Default::default();
-    for event in events {
-        out.entry(event.start).or_default().push(event);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,7 +457,6 @@ mod tests {
         assert_eq!(event.weight, "major");
         assert_eq!(event.who, vec!["kosta kosta mašinski"]);
         assert_eq!(event.tags, vec!["osnivanje", "kanali"]);
-        assert!(event.known_kind());
     }
 
     #[test]

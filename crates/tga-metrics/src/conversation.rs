@@ -111,9 +111,9 @@ fn session(
     }
 }
 
-pub fn compute(export: &Export, people: &People) -> Conversation {
+/// `index` is [`Export::by_id`], built once by the caller.
+pub fn compute(export: &Export, people: &People, index: &HashMap<i64, usize>) -> Conversation {
     let msgs: Vec<&Msg> = export.said().collect();
-    let index = export.by_id();
 
     let mut edges: Counter<(String, String)> = Counter::new();
     let mut latencies: Vec<i64> = Vec::new();
@@ -300,5 +300,88 @@ pub fn compute(export: &Export, people: &People) -> Conversation {
                 count: n,
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{at, export, msg};
+
+    fn run(export: &Export) -> Conversation {
+        let people = People::new(export);
+        compute(export, &people, &export.by_id())
+    }
+
+    #[test]
+    fn a_pause_of_exactly_the_gap_does_not_end_the_burst() {
+        // The rule is "longer than", and the boundary is the thing worth
+        // pinning: an off-by-one here moves every burst count in the report.
+        let export = export(vec![
+            msg(1, "user1", at(1, 10, 0), None),
+            msg(2, "user2", at(1, 10, 30), None),
+            msg(3, "user1", at(1, 11, 1), None),
+        ]);
+        let out = run(&export);
+        assert_eq!(SESSION_GAP, 30 * 60, "the test is written for half an hour");
+        assert_eq!(out.sessions, 2);
+        assert_eq!(out.session_gap, SESSION_GAP);
+        assert_eq!(out.session_longest.expect("a burst").messages, 2);
+        // user1 opened both.
+        assert_eq!(out.starters.len(), 1);
+        assert_eq!(
+            (out.starters[0].key.as_str(), out.starters[0].count),
+            ("user1", 2)
+        );
+    }
+
+    #[test]
+    fn a_burst_is_cut_per_topic() {
+        // Two topics running at once are two conversations.
+        let mut other = msg(2, "user2", at(1, 10, 1), None);
+        other.topic = 1;
+        let export = export(vec![msg(1, "user1", at(1, 10, 0), None), other]);
+        assert_eq!(run(&export).sessions, 2);
+    }
+
+    #[test]
+    fn a_reply_a_day_later_is_timed_and_one_a_second_past_that_is_not() {
+        let mut later = msg(4, "user3", at(2, 10, 0), Some(1));
+        later.unix += 1;
+        let export = export(vec![
+            msg(1, "user1", at(1, 10, 0), None),
+            msg(2, "user1", at(1, 10, 5), None),
+            msg(3, "user2", at(2, 10, 0), Some(1)),
+            later,
+            // Stamped before its parent: a clock problem, not a response time.
+            msg(5, "user2", at(1, 9, 0), Some(2)),
+        ]);
+        let out = run(&export);
+        assert_eq!(out.replies, 3, "every one of them is still a reply");
+        assert_eq!(out.latency_counted, 1);
+        assert_eq!(out.latency_median, LATENCY_CAP);
+        assert_eq!(out.latency_cap, LATENCY_CAP);
+    }
+
+    #[test]
+    fn a_reply_to_yourself_is_a_reply_and_draws_no_edge() {
+        let export = export(vec![
+            msg(1, "user1", at(1, 10, 0), None),
+            msg(2, "user1", at(1, 10, 1), Some(1)),
+            msg(3, "user2", at(1, 10, 2), Some(1)),
+            // Its parent is not in the export.
+            msg(4, "user2", at(1, 10, 3), Some(99)),
+        ]);
+        let out = run(&export);
+        assert_eq!(out.replies, 3);
+        assert_eq!(out.self_replies, 1);
+        assert_eq!(out.orphan_replies, 1);
+        assert_eq!(out.edges.len(), 1);
+        assert_eq!(
+            (out.edges[0].from.as_str(), out.edges[0].to.as_str()),
+            ("user2", "user1")
+        );
+        // A self-reply is still a response time; it is only off the graph.
+        assert_eq!(out.latency_counted, 2);
     }
 }

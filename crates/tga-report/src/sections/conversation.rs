@@ -7,6 +7,9 @@ use crate::charts::{self, esc, thousands};
 
 pub fn conversation(stats: &Stats, names: &Names) -> String {
     let talk = &stats.conversation;
+    // The gap the metrics cut bursts on, as they recorded it. Spelled out here
+    // as "half an hour" once, and true only until somebody changed the number.
+    let gap = esc(&duration(talk.session_gap as f64));
     let stat_line = figures(&[
         (thousands(talk.replies), "replies"),
         (pct(talk.reply_share), "of messages are replies"),
@@ -154,7 +157,7 @@ pub fn conversation(stats: &Stats, names: &Names) -> String {
             .collect();
         format!(
             "<h3>Who breaks the silence</h3>{}\
-             <p class=\"caption\">First message after a gap of half an hour or more.</p>",
+             <p class=\"caption\">First message after a gap of more than {gap}.</p>",
             charts::bars_h(&rows, WIDTH, 22.0, 210.0, 64.0)
         )
     };
@@ -170,8 +173,8 @@ pub fn conversation(stats: &Stats, names: &Names) -> String {
     };
 
     format!(
-        "{}<p class=\"lede\">A burst is talk with no gap longer than half an \
-         hour, counted per topic &#8212; two topics running at once are two \
+        "{}<p class=\"lede\">A burst is talk with no gap longer than {gap}, \
+         counted per topic &#8212; two topics running at once are two \
          conversations.</p>{stat_line}{fast}{starters}{matrix_html}{network_html}{orphan}</section>",
         head(
             "Conversation",

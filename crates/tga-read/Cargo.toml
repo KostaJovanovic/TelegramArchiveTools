@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+# For the visitor that walks `messages` one element at a time; see `load`.
+serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 anyhow.workspace = true

@@ -3,7 +3,8 @@
 //! This module used to be fifteen accessors that dug values out of a
 //! `serde_json::Value` with a fallback for every one. The shape has names now —
 //! see `tga-stats` — so the fallbacks are gone with the guessing that needed
-//! them, and what is left is three conversions and one formatter.
+//! them, and what is left is two conversions and one formatter. The byte
+//! formatter the metrics share lives in `tga-stats`, where both halves reach it.
 
 use std::collections::BTreeMap;
 
@@ -50,41 +51,9 @@ pub fn every_count(branch: &BTreeMap<String, Sparse>) -> Vec<i64> {
         .collect()
 }
 
-/// Truncating, like Desktop's own writer — 1,940,744 B is `1.8 MB`.
-///
-/// Mirrors `tga_metrics::extras::human_bytes`; duplicated rather than imported
-/// because this crate must not depend on `tga-metrics` (see `Cargo.toml`). Ten
-/// lines is a cheaper price than the layering rule, and the test below pins the
-/// two to the same answers.
-pub fn human_bytes(size: i64) -> String {
-    let step = 1024.0f64;
-    let mut value = size as f64;
-    for unit in ["B", "KB", "MB", "GB"] {
-        if value < step || unit == "GB" {
-            if unit == "B" {
-                return format!("{} B", value.trunc() as i64);
-            }
-            return format!("{:.1} {}", (value * 10.0).trunc() / 10.0, unit);
-        }
-        value /= step;
-    }
-    format!("{value:.1} GB")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn human_bytes_truncates_rather_than_rounds() {
-        // The number in the docs, and the reason it is not `{:.1}` alone:
-        // 1.85 MB rounds up to 1.9 and Desktop writes 1.8.
-        assert_eq!(human_bytes(1_940_744), "1.8 MB");
-        assert_eq!(human_bytes(0), "0 B");
-        assert_eq!(human_bytes(1023), "1023 B");
-        assert_eq!(human_bytes(1024), "1.0 KB");
-        assert_eq!(human_bytes(1024 * 1024 * 1024 * 3), "3.0 GB");
-    }
 
     #[test]
     fn a_rounded_float_keeps_its_trailing_zero() {

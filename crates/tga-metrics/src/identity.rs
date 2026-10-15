@@ -203,15 +203,70 @@ impl People {
         self.order.iter()
     }
 
-    pub fn len(&self) -> usize {
-        self.order.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.order.is_empty()
-    }
-
     pub fn renamed(&self) -> impl Iterator<Item = &Person> {
         self.order.iter().filter(|p| !p.aliases.is_empty())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{at, export, member, msg, reaction};
+
+    fn named(id: i64, key: &str, name: &str, day: u32) -> Msg {
+        let mut m = msg(id, key, at(day, 10, 0), None);
+        m.name = name.into();
+        m
+    }
+
+    #[test]
+    fn the_newest_name_wins_and_the_older_ones_are_kept_newest_first() {
+        let export = export(vec![
+            named(1, "user1", "Ana", 1),
+            named(2, "user1", "Ana K", 2),
+            named(3, "user1", "Ana", 3),
+        ]);
+        let ana = People::new(&export).get("user1");
+        assert_eq!(ana.name, "Ana");
+        assert_eq!(ana.aliases, ["Ana K"]);
+    }
+
+    #[test]
+    fn the_member_list_names_somebody_now_and_their_last_message_becomes_an_alias() {
+        let mut export = export(vec![
+            named(1, "user1", "Ana K", 1),
+            named(2, "user1", "Ana", 2),
+        ]);
+        export.msgs[1].reactions.push(reaction(1, &["user3"]));
+        export.roster = vec![member("user1", "Ana Kovač"), member("user2", "Bob")];
+        let people = People::new(&export);
+
+        let ana = people.get("user1");
+        assert_eq!(ana.name, "Ana Kovač");
+        assert_eq!(ana.aliases, ["Ana", "Ana K"]);
+        assert!(!ana.silent);
+
+        // On the list and never seen: silent, and named by the list.
+        let bob = people.get("user2");
+        assert!(bob.silent);
+        assert_eq!(bob.name, "Bob");
+
+        // Seen only on a reaction: a person, not silent, and with no name to
+        // show but the key.
+        let reactor = people.get("user3");
+        assert!(!reactor.silent);
+        assert_eq!(reactor.label(), "user3");
+    }
+
+    #[test]
+    fn a_message_with_no_sender_key_is_somebody_by_name_and_never_a_real_key() {
+        let mut signed = msg(1, "", at(1, 10, 0), None);
+        signed.name = "user1".into();
+        let export = export(vec![signed]);
+        let people = People::new(&export);
+        assert_eq!(people.key_of(&export.msgs[0]), "name:user1");
+        let mut nobody = msg(2, "", at(1, 10, 0), None);
+        nobody.name = String::new();
+        assert_eq!(people.key_of(&nobody), "");
     }
 }

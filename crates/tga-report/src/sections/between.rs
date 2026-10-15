@@ -122,12 +122,27 @@ pub fn between(stats: &Stats) -> String {
 
     // -- month over month ---------------------------------------------------
     let months = &retention.months;
-    let (active, fresh, back, lost) = (
+    let (active, fresh, stayed, lost) = (
         &retention.active,
         &retention.new,
+        // `returning` is the old key for people who spoke two months running;
+        // see `tga_stats::Retention`.
         &retention.returning,
         &retention.lost,
     );
+    // Who came back after a silence of their own. A dump recorded before the
+    // series existed has the three it is the remainder of, so it is read the
+    // same from either.
+    let back: Vec<i64> = if retention.came_back.len() == months.len() {
+        retention.came_back.clone()
+    } else {
+        (0..months.len())
+            .map(|at| {
+                let of = |series: &[i64]| series.get(at).copied().unwrap_or(0);
+                (of(active) - of(fresh) - of(stayed)).max(0)
+            })
+            .collect()
+    };
     let label_every = (months.len() / 12).max(1);
     let ret_chart = if months.is_empty() {
         String::new()
@@ -137,7 +152,7 @@ pub fn between(stats: &Stats) -> String {
                 .iter()
                 .map(|m| m[2..].to_string())
                 .collect::<Vec<_>>(),
-            back,
+            &back,
             WIDTH,
             170.0,
             label_every,
@@ -154,7 +169,8 @@ pub fn between(stats: &Stats) -> String {
                 esc(month),
                 cell(active),
                 cell(fresh),
-                cell(back),
+                cell(stayed),
+                cell(&back),
                 cell(lost),
             ]
         })
@@ -234,11 +250,14 @@ pub fn between(stats: &Stats) -> String {
             data_view(
                 "Correspondents, as numbers",
                 &table(
+                    // The arrows as characters: `table` escapes every
+                    // header, so an entity here reached the page as the
+                    // literal text `&rarr;`.
                     &[
                         ("Person", false),
                         ("Person", false),
-                        ("&rarr;", true),
-                        ("&larr;", true),
+                        ("\u{2192}", true),
+                        ("\u{2190}", true),
                         ("Balance", true),
                     ],
                     &pair_rows,
@@ -286,11 +305,12 @@ pub fn between(stats: &Stats) -> String {
         let _ = write!(
             out,
             "<h3>Who came back</h3>{ret_chart}\
-             <p class=\"caption\">People who spoke in a month <em>and</em> in the \
-             month before it. Silent months stay on the axis: closing a gap would \
-             report the first month after it as an ordinary return. Nobody is \
-             announced for going quiet, which is why this is not in Coming and \
-             going.</p>{}",
+             <p class=\"caption\">People who spoke in a month after a silence of \
+             their own: they had spoken before, but not in the month before it. \
+             Silent months stay on the axis, so a gap in the group is a gap here \
+             too. Everybody who spoke in a month is new, stayed from the month \
+             before, or came back. Nobody is announced for going quiet, which is \
+             why this is not in Coming and going.</p>{}",
             data_view(
                 "Month by month, as numbers",
                 &table(
@@ -298,7 +318,8 @@ pub fn between(stats: &Stats) -> String {
                         ("Month", false),
                         ("Spoke", true),
                         ("New", true),
-                        ("Returning", true),
+                        ("Stayed", true),
+                        ("Came back", true),
                         ("Lost", true),
                     ],
                     &ret_rows,

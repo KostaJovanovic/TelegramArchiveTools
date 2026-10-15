@@ -85,15 +85,24 @@ pub fn people(stats: &Stats) -> String {
     // nonsense and wrong about where those people came from: with no roster
     // they are reactors and joiners picked out of the history. Both real
     // archives hit that branch.
-    let silent = if folk.silent_members == 0 {
+    //
+    // Counted against what Members will actually list: the member list's
+    // quiet rows when there is one, and everybody quiet when there is none.
+    // A reactor who is not on the list has no row there to be sent to.
+    let quiet = if folk.known_members != 0 {
+        folk.silent_members
+    } else {
+        folk.silent_members + folk.quiet_unlisted
+    };
+    let silent = if quiet == 0 {
         String::new()
     } else {
         format!(
             "<p class=\"note\">{} more {} in this archive without ever posting, \
              so they are not in the table above &#8212; see \
              <a href=\"#members\">Members</a>.</p>",
-            folk.silent_members,
-            if folk.silent_members == 1 {
+            quiet,
+            if quiet == 1 {
                 "person appears"
             } else {
                 "people appear"
@@ -116,9 +125,15 @@ pub fn people(stats: &Stats) -> String {
                 )
             })
             .collect();
+        // The floor the metrics used, not a copy of it. A dump recorded
+        // before the floor was carried says so without a number.
+        let floor = match stats.award_minimum {
+            Some(n) => format!("with {} messages or more", thousands(n)),
+            None => "who posted often enough to mean it".to_string(),
+        };
         format!(
             "<h3>Who does what</h3><ul class=\"figures\">{cells}</ul>\
-             <p class=\"caption\">Restricted to people with 40 messages or more; \
+             <p class=\"caption\">Restricted to people {floor}; \
              below that every one of these is won by somebody who posted four \
              times, all of them at 4am.</p>"
         )

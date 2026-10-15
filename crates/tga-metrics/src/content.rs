@@ -100,17 +100,21 @@ pub fn compute(export: &Export, people: &People) -> Content {
         if !msg.sticker_emoji.is_empty() {
             stickers.bump(msg.sticker_emoji.clone());
         }
-        for run in &msg.emoji {
-            emoji.bump(run.clone());
+        if !msg.emoji.is_empty() {
+            // Once per message, not once per emoji in it: it is a fresh string
+            // each time.
             let key = people.key_of(msg);
-            if !key.is_empty() {
-                emoji_person_counts
-                    .entry(key.clone())
-                    .or_insert_with(|| {
-                        emoji_by_person.push(key.clone());
-                        Counter::new()
-                    })
-                    .bump(run.clone());
+            for run in &msg.emoji {
+                emoji.bump(run.clone());
+                if !key.is_empty() {
+                    emoji_person_counts
+                        .entry(key.clone())
+                        .or_insert_with(|| {
+                            emoji_by_person.push(key.clone());
+                            Counter::new()
+                        })
+                        .bump(run.clone());
+                }
             }
         }
         for host in &msg.domains {
@@ -228,5 +232,57 @@ pub fn compute(export: &Export, people: &People) -> Content {
         mentions: mention_rows,
         forwards: forward_sources.total(),
         forward_sources: forward_rows,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{at, export, msg};
+
+    #[test]
+    fn every_emoji_in_a_message_is_counted_and_credited_to_its_sender() {
+        let laugh = "\u{1F602}".to_string();
+        let thumb = "\u{1F44D}".to_string();
+        let mut one = msg(1, "user1", at(1, 10, 0), None);
+        one.emoji = vec![laugh.clone(), laugh.clone(), thumb.clone()];
+        let mut two = msg(2, "user2", at(1, 10, 1), None);
+        two.emoji = vec![laugh.clone()];
+        let export = export(vec![one, two, msg(3, "user1", at(1, 10, 2), None)]);
+
+        let out = compute(&export, &People::new(&export));
+        assert_eq!(out.emoji_total, 4);
+        assert_eq!(
+            out.emoji,
+            [Count::new(laugh.clone(), 3), Count::new(thumb.clone(), 1)]
+        );
+        assert_eq!(
+            out.emoji_by_person["user1"],
+            [Count::new(laugh.clone(), 2), Count::new(thumb, 1)]
+        );
+        assert_eq!(out.emoji_by_person["user2"], [Count::new(laugh, 1)]);
+    }
+
+    #[test]
+    fn an_attachment_is_sent_whether_or_not_its_bytes_were_saved() {
+        let mut saved = msg(1, "user1", at(1, 10, 0), None);
+        saved.media = "photo".into();
+        saved.media_saved = true;
+        saved.file_size = 100;
+        let mut skipped = msg(2, "user1", at(1, 10, 1), None);
+        skipped.media = "photo".into();
+        skipped.file_size = 50;
+        let export = export(vec![saved, skipped]);
+
+        let out = compute(&export, &People::new(&export));
+        assert_eq!(
+            (out.media_messages, out.media_saved, out.media_bytes),
+            (2, 1, 150)
+        );
+        let photos = &out.media_kinds[0];
+        assert_eq!(
+            (photos.label.as_str(), photos.sent, photos.saved),
+            ("Photos", 2, 1)
+        );
     }
 }

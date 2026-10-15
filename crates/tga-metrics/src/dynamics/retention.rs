@@ -42,14 +42,22 @@ pub(super) fn retention(msgs: &[&Msg], people: &People) -> Retention {
     let empty: HashSet<String> = HashSet::new();
     let mut before: HashSet<String> = HashSet::new();
     let mut previous: &HashSet<String> = &empty;
-    let (mut act, mut fresh, mut back, mut lost) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut act, mut fresh, mut stayed, mut back, mut lost) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut kept: Vec<f64> = Vec::new();
 
     for name in &months {
         let now = spoke.get(name).unwrap_or(&empty);
         act.push(now.len() as i64);
         fresh.push(now.iter().filter(|k| !before.contains(*k)).count() as i64);
-        back.push(now.intersection(previous).count() as i64);
+        stayed.push(now.intersection(previous).count() as i64);
+        // Spoke before, but not last month: back after a silence of their own.
+        // `previous` is inside `before`, so the three columns split `now`.
+        back.push(
+            now.iter()
+                .filter(|k| before.contains(*k) && !previous.contains(*k))
+                .count() as i64,
+        );
         lost.push(previous.difference(now).count() as i64);
         if !previous.is_empty() {
             kept.push(now.intersection(previous).count() as f64 / previous.len() as f64);
@@ -62,7 +70,9 @@ pub(super) fn retention(msgs: &[&Msg], people: &People) -> Retention {
         months,
         active: act,
         new: fresh,
-        returning: back,
+        // Under its old key: see `tga_stats::Retention::returning`.
+        returning: stayed,
+        came_back: back,
         lost,
         people: before.len(),
         // The mean of the monthly rates, not the ratio of the totals: every

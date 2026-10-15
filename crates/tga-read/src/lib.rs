@@ -32,8 +32,18 @@ use serde_json::Value;
 pub mod text;
 pub use text::{domain_of, emoji_runs};
 
-/// What Desktop writes into `file` for a document it declined to download.
-const SKIPPED_PREFIX: &str = "(File exceeds";
+/// What Desktop writes into `file` or `photo` for an attachment it has no
+/// bytes for.
+///
+/// **The prefix of all of them, not of one.** It was `"(File exceeds"`, which
+/// is only the over-the-size-limit apology. Desktop and the exporter also write
+/// `"(File not included. Change data exporting settings to download.)"` when
+/// media is off and `"(File unavailable, please try again later)"` when a fetch
+/// failed, and those read as saved files with the apology for a path.
+/// `tgx-archive`'s `"(File "` rule is the same test; copied rather than
+/// imported, because no `tga-*` crate may reach a `tgx-*` one beyond the
+/// archive's reader.
+const SKIPPED_PREFIX: &str = "(File ";
 
 // ---------------------------------------------------------------------------
 // the model
@@ -205,9 +215,16 @@ impl Export {
             .collect();
 
         // A join announcement and a forward from a hidden account name people
-        // by string alone, with no key. Any name ever seen against a key with
-        // a handle maps to that handle.
-        let mut by_name: std::collections::HashMap<String, String> =
+        // by string alone, with no key. A name maps to a handle only when it
+        // was only ever seen against one key, and that key has one.
+        //
+        // **Every key counts, handle or not.** Two accounts can show the same
+        // display name, and an address book makes that likelier, not less.
+        // Indexing only the handle-holders, first seen winning, handed a
+        // namesake's join and forward to whoever happened to come first --
+        // including to somebody else's handle when the namesake had none. A
+        // name that could be either person stays the name the export wrote.
+        let mut owners: std::collections::HashMap<&str, HashSet<&str>> =
             std::collections::HashMap::new();
         let names = self
             .roster
@@ -215,14 +232,22 @@ impl Export {
             .map(|m| (&m.key, &m.name))
             .chain(self.msgs.iter().map(|m| (&m.sender, &m.name)));
         for (key, name) in names {
-            if let Some(handle) = handle_of.get(key) {
-                if !name.is_empty() {
-                    by_name
-                        .entry(name.clone())
-                        .or_insert_with(|| handle.clone());
-                }
+            if !key.is_empty() && !name.is_empty() {
+                owners.entry(name).or_default().insert(key);
             }
         }
+        let by_name: std::collections::HashMap<String, String> = owners
+            .into_iter()
+            .filter_map(|(name, keys)| {
+                let mut keys = keys.into_iter();
+                match (keys.next(), keys.next()) {
+                    (Some(only), None) => handle_of
+                        .get(only)
+                        .map(|handle| (name.to_string(), handle.clone())),
+                    _ => None,
+                }
+            })
+            .collect();
         let swap =
             |name: &mut String, map: &std::collections::HashMap<String, String>, key: &str| {
                 if let Some(handle) = map.get(key) {
@@ -567,8 +592,9 @@ pub fn one(raw: &Value, topic: usize, root: Option<i64>) -> Option<Msg> {
     };
     out.media_saved = !path.is_empty() && !path.starts_with(SKIPPED_PREFIX);
     // Only when it is really on disk. `path` otherwise holds the exporter's
-    // apology -- "(File exceeds maximum size...)" -- and joining that onto the
-    // topic folder makes a path that looks real and is not.
+    // apology -- "(File exceeds maximum size...)", "(File not included...)" --
+    // and joining that onto the topic folder makes a path that looks real and
+    // is not.
     if out.media_saved {
         out.file = path;
     }
@@ -693,19 +719,191 @@ fn roster(root: &Path) -> (Vec<Member>, Option<bool>, Option<bool>) {
         people.extend(list.iter().filter_map(member));
     }
 
-    // `complete` absent is not the same as `complete: false`. A roster the
-    // export never wrote and a roster it knows is short look identical
-    // downstream unless this distinction survives.
-    let flag = |name: &str| match body.get(name) {
+    (people, flag(body.get("complete")), flag(body.get("capped")))
+}
+
+/// A roster flag — `complete`, `capped` — as the export wrote it.
+///
+/// Absent is not the same as `false`. A roster the export never wrote and a
+/// roster it knows is short look identical downstream unless this distinction
+/// survives, so absent and `null` are `None`. `false` and `0` are both no.
+///
+/// **Public because a database carries the same flag** in its topic heads, and
+/// a second reading of it is how `members_complete: 0` came to mean yes from a
+/// database and no from a folder.
+pub fn flag(value: Option<&Value>) -> Option<bool> {
+    match value {
         None | Some(Value::Null) => None,
         Some(v) => Some(v != &Value::Bool(false) && v != &serde_json::json!(0)),
-    };
-    (people, flag("complete"), flag("capped"))
+    }
 }
 
 // ---------------------------------------------------------------------------
 // load
 // ---------------------------------------------------------------------------
+
+/// One `result.json`'s messages into `into`, converted as they are parsed, and
+/// everything else in it handed back as the header.
+///
+/// **Streamed, because the file is the size of the chat.** Parsing it into a
+/// `Value` first held the text and the whole tree of every message at once —
+/// several times the file, for a topic of 450,000 messages — before the first
+/// [`Msg`] existed. This holds the bytes and one message's tree at a time.
+///
+/// Every message is converted with no topic root, because the header that
+/// names the root need not come before `messages` in the file; [`load`]
+/// applies the thread rule once the header is known.
+fn stream(
+    bytes: &[u8],
+    topic: usize,
+    into: &mut Vec<Msg>,
+) -> serde_json::Result<serde_json::Map<String, Value>> {
+    use serde::de::DeserializeSeed;
+
+    let mut de = serde_json::Deserializer::from_slice(bytes);
+    let header = Body { topic, into }.deserialize(&mut de)?;
+    // What `from_str` checks too: nothing but whitespace after the value.
+    de.end()?;
+    Ok(header)
+}
+
+/// The top level of a `result.json`.
+struct Body<'a> {
+    topic: usize,
+    into: &'a mut Vec<Msg>,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for Body<'_> {
+    type Value = serde_json::Map<String, Value>;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, de: D) -> Result<Self::Value, D::Error> {
+        de.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for Body<'_> {
+    type Value = serde_json::Map<String, Value>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a result.json")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let start = self.into.len();
+        let mut header = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "messages" {
+                // A repeated key: the last one wins, as it did in a `Value`.
+                self.into.truncate(start);
+                map.next_value_seed(Messages {
+                    topic: self.topic,
+                    into: &mut *self.into,
+                })?;
+            } else {
+                header.insert(key, map.next_value()?);
+            }
+        }
+        Ok(header)
+    }
+
+    // Anything that is not an object has no header and no messages, which is
+    // what `Value::get` answered on one.
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+        Ok(serde_json::Map::new())
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(serde_json::Map::new())
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+        Ok(serde_json::Map::new())
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+        Ok(serde_json::Map::new())
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(serde_json::Map::new())
+    }
+
+    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+        Ok(serde_json::Map::new())
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(serde_json::Map::new())
+    }
+}
+
+/// The `messages` array, one element at a time.
+struct Messages<'a> {
+    topic: usize,
+    into: &'a mut Vec<Msg>,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for Messages<'_> {
+    type Value = ();
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, de: D) -> Result<(), D::Error> {
+        de.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for Messages<'_> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a list of messages")
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        while let Some(entry) = seq.next_element::<Value>()? {
+            if !entry.is_object() {
+                continue;
+            }
+            if let Some(msg) = one(&entry, self.topic, None) {
+                self.into.push(msg);
+            }
+        }
+        Ok(())
+    }
+
+    // `messages` that is not a list holds none.
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        while map
+            .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+            .is_some()
+        {}
+        Ok(())
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> {
+        Ok(())
+    }
+}
 
 /// Called as `(done, total, label)` after each file is read.
 ///
@@ -714,7 +912,8 @@ fn roster(root: &Path) -> (Vec<Member>, Option<bool>, Option<bool>) {
 /// than a no-op default so a caller that wants nothing pays nothing.
 pub type Progress<'a> = &'a mut dyn FnMut(usize, usize, &str);
 
-/// Read every `result.json` under `root` into one [`Export`].
+/// Read every `result.json` under `root` into one [`Export`], refusing a
+/// folder that holds more than one chat.
 ///
 /// `progress` gives a window something to move while a large export is parsed:
 /// the KRGM corpus is 333,582 messages, and every one of them is read before
@@ -735,28 +934,55 @@ pub fn load(root: &Path, mut progress: Option<Progress<'_>>) -> Result<Export> {
 
     let total = files.len();
     for (index, path) in files.iter().enumerate() {
-        let raw =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let body: Value =
-            serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+        let raw = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let start = export.msgs.len();
+        let body = Value::Object(
+            stream(&raw, index, &mut export.msgs)
+                .with_context(|| format!("parsing {}", path.display()))?,
+        );
+        drop(raw);
 
         let folder = path.parent().unwrap_or(root).to_path_buf();
         let mut topic = header_topic(&body, index, folder);
 
-        if export.members_count.is_none() {
-            export.members_count = as_i64(body.get("members_count"));
+        // **One chat per call.** A folder of several chats' `result.json`s —
+        // Desktop's `chats/chat_<id>/` layout, taken for more than one chat —
+        // would otherwise load as one group whose topics are chats, and
+        // [`Export::by_id`] is keyed on the bare message id, which is only
+        // unique inside a chat: chat A's reply to message 17 would land on
+        // chat B's 17. A database with several chats is read one at a time
+        // for the same reason.
+        if let Some(id) = topic.chat_id {
+            if let Some(other) = export
+                .topics
+                .iter()
+                .find(|t| t.chat_id.is_some_and(|seen| seen != id))
+            {
+                anyhow::bail!(
+                    "{} holds more than one chat: {} ({}) and {} ({}). \
+                     Point the analyser at one chat's folder.",
+                    root.display(),
+                    other.chat_id.unwrap_or_default(),
+                    other.folder.display(),
+                    id,
+                    topic.folder.display()
+                );
+            }
         }
 
-        if let Some(Value::Array(messages)) = body.get("messages") {
-            for entry in messages {
-                if !entry.is_object() {
-                    continue;
-                }
-                if let Some(msg) = one(entry, index, topic.root) {
-                    export.msgs.push(msg);
-                    topic.messages += 1;
-                }
+        // The thread rule, applied after the fact: the messages were converted
+        // as they streamed past, and `topic_id` need not come before them in
+        // the file. `one` with no root keeps every reply, so dropping the ones
+        // aimed at the root here is the same answer `one` with the root gives.
+        for msg in &mut export.msgs[start..] {
+            if topic.root.is_some() && msg.reply_to == topic.root {
+                msg.reply_to = None;
             }
+        }
+        topic.messages = export.msgs.len() - start;
+
+        if export.members_count.is_none() {
+            export.members_count = as_i64(body.get("members_count"));
         }
 
         let label = topic.name.clone();
@@ -854,6 +1080,133 @@ mod tests {
     }
 
     #[test]
+    fn handles_only_leaves_a_name_two_people_share_as_it_was() {
+        let member = |key: &str, name: &str, username: &str| {
+            member(&json!({"id": key, "name": name, "username": username})).unwrap()
+        };
+        let mut export = Export {
+            roster: vec![
+                // Two accounts called Ana, only one with a handle.
+                member("user1", "Ana", "ana"),
+                member("user2", "Ana", ""),
+                // Two with handles, both called Marko.
+                member("user3", "Marko", "marko1"),
+                member("user4", "Marko", "marko2"),
+                // And one name nobody else has.
+                member("user5", "Vesna", "vesna"),
+            ],
+            msgs: vec![
+                one(
+                    &msg(json!({"type": "service", "action": "invite_members",
+                                "actor": "Vesna", "actor_id": "user5",
+                                "members": ["Ana", "Marko", "Vesna"]})),
+                    0,
+                    None,
+                )
+                .unwrap(),
+                // A forward from a hidden account: a name and no key.
+                one(&msg(json!({"forwarded_from": "Ana"})), 0, None).unwrap(),
+            ],
+            ..Default::default()
+        };
+        export.handles_only();
+
+        // Either Ana could have been invited; neither is credited.
+        assert_eq!(export.msgs[0].members, vec!["Ana", "Marko", "@vesna"]);
+        assert_eq!(export.msgs[1].forward_from, "Ana");
+        // A keyed name still swaps, namesake or not: the key says who it is.
+        assert_eq!(export.roster[0].name, "@ana");
+        assert_eq!(export.roster[1].name, "Ana");
+        assert_eq!(export.roster[3].name, "@marko2");
+    }
+
+    /// A fresh folder under the temp dir, emptied first.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tga-read-test-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn write(dir: &Path, body: &Value) {
+        std::fs::create_dir_all(dir).expect("folder");
+        std::fs::write(
+            dir.join("result.json"),
+            serde_json::to_string_pretty(body).expect("json"),
+        )
+        .expect("write result.json");
+    }
+
+    #[test]
+    fn the_thread_rule_holds_wherever_the_header_sits_in_the_file() {
+        // Streamed, so the messages are converted before a `topic_id` written
+        // after them is known. The root must be dropped either way.
+        let messages = json!([
+            msg(json!({"id": 13, "reply_to_message_id": 12})),
+            msg(json!({"id": 14, "reply_to_message_id": 13})),
+            "not a message",
+        ]);
+        for (tag, text) in [
+            (
+                "head-first",
+                format!(r#"{{"name": "t", "id": 7, "topic_id": 12, "messages": {messages}}}"#),
+            ),
+            (
+                "head-last",
+                format!(r#"{{"messages": {messages}, "name": "t", "id": 7, "topic_id": 12}}"#),
+            ),
+        ] {
+            let dir = scratch(tag);
+            std::fs::write(dir.join("result.json"), text).expect("write");
+            let export = load(&dir, None).expect("load");
+            let replies: Vec<Option<i64>> = export.msgs.iter().map(|m| m.reply_to).collect();
+            assert_eq!(replies, [None, Some(13)], "{tag}");
+            assert_eq!(export.topics[0].root, Some(12), "{tag}");
+            assert_eq!(export.topics[0].messages, 2, "{tag}");
+            assert_eq!(export.topics[0].chat_id, Some(7), "{tag}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_not_an_object_holds_nothing_and_a_broken_one_fails() {
+        let dir = scratch("shapes");
+        std::fs::write(dir.join("result.json"), "[1, 2]").expect("write");
+        let export = load(&dir, None).expect("an array is an empty topic");
+        assert!(export.msgs.is_empty());
+        assert_eq!(export.topics.len(), 1);
+
+        std::fs::write(dir.join("result.json"), r#"{"messages": [}"#).expect("write");
+        let err = load(&dir, None).expect_err("malformed");
+        assert!(format!("{err:#}").contains("parsing"), "{err:#}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_holding_two_chats_is_refused_and_both_are_named() {
+        // Message ids are unique only inside a chat, so two chats loaded as one
+        // would answer chat A's replies with chat B's messages.
+        let dir = scratch("two-chats");
+        let body = |id: i64| {
+            json!({"name": "c", "type": "private_group", "id": id,
+                                    "messages": [msg(json!({}))]})
+        };
+        write(&dir.join("chats").join("chat_1"), &body(111));
+        write(&dir.join("chats").join("chat_2"), &body(222));
+        let err = load(&dir, None).expect_err("two chats");
+        let text = err.to_string();
+        assert!(text.contains("111") && text.contains("222"), "{text}");
+
+        // One chat's topics, which share the chat's id, still load as one.
+        let dir = scratch("one-chat");
+        write(&dir.join("a"), &body(111));
+        write(&dir.join("b"), &body(111));
+        assert_eq!(load(&dir, None).expect("one chat").topics.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("tga-read-test-two-chats"));
+    }
+
+    #[test]
     fn a_message_with_no_date_is_dropped() {
         let mut raw = msg(json!({}));
         raw["date"] = Value::Null;
@@ -884,6 +1237,25 @@ mod tests {
     }
 
     #[test]
+    fn every_apology_desktop_writes_is_unsaved_media_and_never_a_path() {
+        // Media off, and a fetch that failed. Both used to count as saved and
+        // land in `file`, where the digest joined them onto the topic folder.
+        for apology in [
+            "(File not included. Change data exporting settings to download.)",
+            "(File unavailable, please try again later)",
+        ] {
+            for key in ["file", "photo"] {
+                let out = one(&msg(json!({ key: apology })), 0, None).unwrap();
+                assert!(!out.media_saved, "{key}: {apology}");
+                assert_eq!(out.file, "", "{key}: {apology}");
+            }
+        }
+        // A real file whose name merely starts with a parenthesis is not one.
+        let odd = one(&msg(json!({"file": "files/(File) notes.txt"})), 0, None).unwrap();
+        assert!(odd.media_saved);
+    }
+
+    #[test]
     fn a_service_entry_takes_its_sender_from_the_actor_fields() {
         let raw = msg(json!({
             "type": "service", "action": "invite_members",
@@ -909,5 +1281,11 @@ mod tests {
         // A roster the export never wrote and one it knows is short must not
         // look the same downstream.
         assert_eq!(roster(Path::new("no-such-folder")).1, None);
+        assert_eq!(flag(None), None);
+        assert_eq!(flag(Some(&Value::Null)), None);
+        assert_eq!(flag(Some(&json!(false))), Some(false));
+        assert_eq!(flag(Some(&json!(0))), Some(false));
+        assert_eq!(flag(Some(&json!(true))), Some(true));
+        assert_eq!(flag(Some(&json!(1))), Some(true));
     }
 }

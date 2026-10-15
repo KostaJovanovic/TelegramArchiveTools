@@ -260,30 +260,54 @@ fn num(c: &Captures, i: usize) -> u32 {
     c.get(i).and_then(|m| m.as_str().parse().ok()).unwrap_or(0)
 }
 
+/// Every match of a digit-guarded pattern, the guards shared between
+/// neighbours.
+///
+/// **`captures_iter` would eat the separator between two dates.** The patterns
+/// open on `(?:^|[^0-9])` and close on `(?:[^0-9]|$)`, which is how they keep
+/// off the middle of a longer number, and the regex crate has no lookaround to
+/// write that without consuming a character. Non-overlapping matches then
+/// spend the `-` of `06.07.2026-10.07.2026` closing the first date, leave the
+/// second nothing to open on, and a report covering a week reads as covering
+/// its first day. Each search here resumes where the last date's own digits
+/// ended, so the character after one date is free to be the one before the
+/// next.
+fn every<'t>(pattern: &Regex, text: &'t str, last: usize) -> Vec<Captures<'t>> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(c) = pattern.captures_at(text, from) {
+        // The digits always end past `from`, so the walk always moves.
+        from = c.get(last).map_or(text.len(), |m| m.end());
+        out.push(c);
+    }
+    out
+}
+
 /// Every complete date -- year included -- in `text`, in the order written.
 fn full_dates(text: &str, posted: NaiveDate) -> Vec<NaiveDate> {
     let p = patterns();
-    let mut hits: Vec<(usize, NaiveDate)> = Vec::new();
-    let mut push = |at: usize, date: Option<NaiveDate>| {
+    // `(start, end, date)`, the span being the date's own digits.
+    let mut hits: Vec<(usize, usize, NaiveDate)> = Vec::new();
+    let mut push = |c: &Captures, date: Option<NaiveDate>| {
+        let (Some(first), Some(last)) = (c.get(1), c.get(3)) else {
+            return;
+        };
         if let Some(d) = date.filter(|d| plausible(*d, posted)) {
-            hits.push((at, d));
+            hits.push((first.start(), last.end(), d));
         }
     };
 
-    for c in p.iso.captures_iter(text) {
-        let at = c.get(1).map(|m| m.start()).unwrap_or(0);
-        push(at, ymd(num(&c, 1) as i32, num(&c, 2), num(&c, 3)));
+    for c in every(&p.iso, text, 3) {
+        push(&c, ymd(num(&c, 1) as i32, num(&c, 2), num(&c, 3)));
     }
-    for c in p.compact.captures_iter(text) {
-        let at = c.get(1).map(|m| m.start()).unwrap_or(0);
-        push(at, ymd(num(&c, 1) as i32, num(&c, 2), num(&c, 3)));
+    for c in every(&p.compact, text, 3) {
+        push(&c, ymd(num(&c, 1) as i32, num(&c, 2), num(&c, 3)));
     }
-    for c in p.day_first.captures_iter(text) {
-        let at = c.get(1).map(|m| m.start()).unwrap_or(0);
+    for c in every(&p.day_first, text, 3) {
         // Day first, always -- see the note at the top of the file. An
         // impossible pair such as `32.13.2026` is a typo and falls out of
         // `from_ymd_opt` as `None` rather than being reinterpreted.
-        push(at, ymd(num(&c, 3) as i32, num(&c, 2), num(&c, 1)));
+        push(&c, ymd(num(&c, 3) as i32, num(&c, 2), num(&c, 1)));
     }
     for c in p.month_name.captures_iter(text) {
         let Some(day) = c.get(1) else { continue };
@@ -295,13 +319,27 @@ fn full_dates(text: &str, posted: NaiveDate) -> Vec<NaiveDate> {
             continue;
         };
         push(
-            day.start(),
+            &c,
             ymd(num(&c, 3) as i32, *month, day.as_str().parse().unwrap_or(0)),
         );
     }
 
-    hits.sort_by_key(|(at, _)| *at);
-    hits.into_iter().map(|(_, d)| d).collect()
+    // **One stretch of digits is one date.** Once two dates may sit a
+    // character apart, the year of the first and the start of the second can
+    // be read as a third: `06.07.2026-10.07.2026` holds `2026-10.07`, which the
+    // ISO pattern takes for the 7th of October. A date that begins inside one
+    // already read, earlier in the text, is that misreading and is dropped.
+    hits.sort_by_key(|(start, _, _)| *start);
+    let mut kept = Vec::with_capacity(hits.len());
+    let mut read_to = 0;
+    for (start, end, date) in hits {
+        if start < read_to {
+            continue;
+        }
+        read_to = end;
+        kept.push(date);
+    }
+    kept
 }
 
 /// A day and month with no year, from a filename.
@@ -432,6 +470,28 @@ mod tests {
         let got = infer("ФМК X ФПН - Шетња 01.10.pdf", "", on(2025, 9, 28));
         assert_eq!(got.best, Some(on(2025, 10, 1)));
         assert_eq!(got.src, Source::FilenameYearGuessed);
+    }
+
+    #[test]
+    fn two_dates_one_character_apart_are_both_read() {
+        // The separator used to close the first match and leave the second
+        // with nothing to open on, so a week-long report read as one day.
+        let posted = on(2026, 7, 20);
+        let got = infer("Izvestaj 06.07.2026-10.07.2026.pdf", "", posted);
+        assert_eq!(got.best, Some(on(2026, 7, 6)), "the start is the date");
+        for (text, from, to) in [
+            ("06.07.2026-10.07.2026", on(2026, 7, 6), on(2026, 7, 10)),
+            ("2025-01-01 2025-01-02", on(2025, 1, 1), on(2025, 1, 2)),
+            ("12.1.2025/13.1.2025", on(2025, 1, 12), on(2025, 1, 13)),
+            ("20250101_20250102", on(2025, 1, 1), on(2025, 1, 2)),
+        ] {
+            let got = infer("x.txt", text, posted);
+            assert_eq!(
+                (got.from, got.to, got.n),
+                (Some(from), Some(to), 2),
+                "{text}"
+            );
+        }
     }
 
     #[test]

@@ -14,6 +14,9 @@ pub mod identity;
 pub mod people;
 pub mod util;
 
+#[cfg(test)]
+mod testing;
+
 use tga_read::Export;
 use tga_stats::{ExportInfo, Stats};
 
@@ -27,11 +30,15 @@ const AWARD_MINIMUM: i64 = 40;
 
 pub fn analyse(export: &Export) -> (Stats, People) {
     let who = People::new(export);
+    // Message id -> where it is, for every figure that follows a reply to its
+    // parent. Built once: it is a map of the whole archive, and three metrics
+    // each used to build their own.
+    let index = export.by_id();
 
     let activity = activity::compute(export, &who);
     let folk = people::compute(export, &who);
     let content = content::compute(export, &who);
-    let talk = conversation::compute(export, &who);
+    let talk = conversation::compute(export, &who, &index);
 
     // The graph is laid out on how much each person said, so it needs the
     // people rows before it can be built. Nothing else here depends on
@@ -57,11 +64,12 @@ pub fn analyse(export: &Export) -> (Stats, People) {
             roster_complete: export.roster_complete,
         },
         topics: extras::topics(export, &who),
-        superlatives: extras::superlatives(export, &who, &activity),
+        superlatives: extras::superlatives(export, &who, &activity, &index),
         awards: extras::awards(&folk.rows, AWARD_MINIMUM),
+        award_minimum: Some(AWARD_MINIMUM),
         streak: extras::streaks(export, &who),
         churn: extras::churn(export, &who, &activity),
-        dynamics: Some(dynamics::compute(export, &who)),
+        dynamics: Some(dynamics::compute(export, &who, &index)),
         renamed: renamed
             .iter()
             .map(|p| tga_stats::Renamed {
