@@ -22,7 +22,9 @@ use tgx_ui::tokens::space;
 /// thousand chats cost the same as nine. The price is that a category heading
 /// cannot be shorter than a chat row; it is set in tracked micro-type instead,
 /// which distinguishes it by weight rather than by size.
-const ROW_HEIGHT: f32 = 46.0;
+///
+/// The Library's rows are this tall too, and read it from here.
+pub(super) const ROW_HEIGHT: f32 = 46.0;
 
 /// How wide the filter box is.
 ///
@@ -187,7 +189,10 @@ impl Shell {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 // The label states the action; the price is the tooltip — one
                 // request per chat, minutes on a large account.
-                let countable = !self.chats.is_empty() && !self.exporting;
+                // Off while Update databases reads the folder, too: its answer
+                // starts an export. Stop counting is never off.
+                let countable =
+                    !self.chats.is_empty() && !self.exporting && (self.counting || !self.scanning);
                 let count = if self.counting {
                     "Stop counting"
                 } else {

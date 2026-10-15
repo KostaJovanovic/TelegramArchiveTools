@@ -99,6 +99,11 @@ pub(super) struct ViewerState {
     /// The chat on screen.
     pub(super) open: Option<Database>,
     pub(super) loading: bool,
+    /// Why the open chat could not be read. **Shown in the list's place**:
+    /// with only the status line saying it, an unreadable database looked
+    /// like one that "holds no messages", which invites exporting it again
+    /// over a good file.
+    pub(super) load_error: Option<String>,
     pub(super) rows: Vec<Row>,
     /// Message id to its index in `rows`.
     pub(super) index: HashMap<i64, usize>,
@@ -111,6 +116,9 @@ pub(super) struct ViewerState {
     /// The message in the detail pane, and what the database says of it.
     pub(super) selected: Option<i64>,
     pub(super) detail: Option<Box<Detail>>,
+    /// Why the selected message could not be read, in the pane's place —
+    /// which otherwise said "Reading…" for good.
+    pub(super) detail_error: Option<String>,
     /// A row to bring into view on the next frame, as an index into `shown`.
     pub(super) scroll_to: Option<usize>,
     /// Select this message once the chat being opened has loaded — a hit in
@@ -158,10 +166,16 @@ pub(super) struct ViewerState {
     pub(super) item_of_shown: Vec<usize>,
     /// Each item's height and where it starts. Guessed until it is drawn,
     /// then measured; `offsets` has one more entry than `items`, the total.
+    ///
+    /// **Kept across a change of width.** Every item on screen is drawn and
+    /// measured on every frame anyway, so a height from another width is
+    /// corrected the moment it matters, and off screen it is as good a guess
+    /// as [`bubbles::estimate`]'s. Re-guessing them all on a width change read
+    /// every message's text on the window's thread — on the first click,
+    /// which opens the detail pane, and on every frame of a resize drag — and
+    /// threw away every measurement, so the list jumped under the reader.
     pub(super) heights: Vec<f32>,
     pub(super) offsets: Vec<f32>,
-    /// The width the heights are for. A different width re-guesses them all.
-    pub(super) laid_width: f32,
     /// Where the list was scrolled to last frame, and how far to move it this
     /// frame so that an item above the view growing on measurement does not
     /// push what is being read down the screen.
@@ -652,7 +666,8 @@ impl Shell {
                 None => String::new(),
             };
         }
-        if v.open.is_none() || v.loading {
+        // Not "0 messages" for a file that could not be read.
+        if v.open.is_none() || v.loading || v.load_error.is_some() {
             return String::new();
         }
         let (deleted, edited, recovered) = v.counts;
@@ -670,7 +685,7 @@ impl Shell {
     }
 
     /// Why the list is empty, when it is.
-    fn viewer_empty(&self) -> Option<EmptyState> {
+    pub(super) fn viewer_empty(&self) -> Option<EmptyState> {
         let v = &self.viewer;
         // Chats are opened from the Library now, so the way out of an empty
         // Viewer is back there — not a picker this screen no longer has.
@@ -682,6 +697,12 @@ impl Shell {
         }
         if v.loading {
             return Some(EmptyState::new("Reading the database…", None));
+        }
+        if let Some(e) = &v.load_error {
+            return Some(EmptyState::new(
+                "Could not read this database",
+                Some(format!("{e} — Reload tries again.")),
+            ));
         }
         if v.rows.is_empty() {
             return Some(EmptyState::new("This database holds no messages", None));
@@ -737,8 +758,9 @@ impl Shell {
                 *pic = bubbles::Pic::Ready(tex);
             }
         }
-        if v.heights.len() != v.items.len() || (v.laid_width - width).abs() > 0.5 {
-            v.laid_width = width;
+        // Only when the items themselves changed; see `heights` for why a
+        // new width is not a reason.
+        if v.heights.len() != v.items.len() {
             v.heights = v
                 .items
                 .iter()
@@ -999,6 +1021,14 @@ impl Shell {
     fn viewer_detail_pane(&mut self, ui: &mut Ui) {
         let p = self.palette;
         let Some(d) = self.viewer.detail.clone() else {
+            if let Some(e) = &self.viewer.detail_error {
+                EmptyState::new(
+                    "Could not read this message",
+                    Some(format!("{e} — click the message again to retry.")),
+                )
+                .show(ui, &p, true);
+                return;
+            }
             let headline = if self.viewer.selected.is_some() {
                 "Reading…"
             } else {
@@ -1166,6 +1196,7 @@ impl Shell {
         }
         v.open = Some(db);
         v.loading = true;
+        v.load_error = None;
         v.rows.clear();
         v.index.clear();
         v.shown.clear();
@@ -1176,6 +1207,7 @@ impl Shell {
         v.counts = (0, 0, 0);
         v.selected = None;
         v.detail = None;
+        v.detail_error = None;
         v.scroll_to = None;
         v.select_after_load = then;
         v.showing_found = false;
@@ -1244,6 +1276,7 @@ impl Shell {
         }
         self.viewer.selected = Some(id);
         self.viewer.detail = None;
+        self.viewer.detail_error = None;
         if let Some(i) = self.viewer.hits.iter().position(|h| *h == id) {
             self.viewer.hit_at = Some(i);
         }
@@ -1278,6 +1311,8 @@ impl Shell {
         self.viewer.query = needle;
         self.viewer.everywhere = true;
         self.viewer_search_in(dir);
+        // Entered from the Library, so the way back goes there — as `read`.
+        self.viewer.back = None;
         self.show(View::Viewer);
     }
 
@@ -1370,10 +1405,17 @@ impl Shell {
         output_dir: String,
         found: Result<Vec<Database>, String>,
     ) {
+        // **Cleared before the answer is judged.** Left set by a stale one, it
+        // stopped the view from ever listing again and greyed Reload out for
+        // the rest of the session.
+        self.viewer.listing = false;
         if output_dir != self.settings.output_dir {
+            // The destination changed while the old one was being read: ask
+            // about the new one. Cannot loop — `listed_for` is now the current
+            // folder, so its answer is not stale.
+            self.viewer_list_databases();
             return;
         }
-        self.viewer.listing = false;
         match found {
             Ok(dbs) => {
                 self.viewer.databases = dbs;
@@ -1421,6 +1463,7 @@ impl Shell {
             Ok(loaded) => loaded,
             Err(e) => {
                 self.status = format!("Failed: {e}");
+                self.viewer.load_error = Some(e.clone());
                 self.journal.warn(e);
                 self.log_copied = false;
                 return;
@@ -1482,9 +1525,13 @@ impl Shell {
         }
         match detail {
             Ok(Some(d)) => self.viewer.detail = Some(d),
-            Ok(None) => self.status = format!("Message {id} is no longer in the database"),
+            Ok(None) => {
+                self.status = format!("Message {id} is no longer in the database");
+                self.viewer.detail_error = Some(self.status.clone());
+            }
             Err(e) => {
                 self.status = format!("Failed: {e}");
+                self.viewer.detail_error = Some(e.clone());
                 self.journal.warn(e);
                 self.log_copied = false;
             }

@@ -30,21 +30,33 @@ impl Shell {
             .filter(|c| self.view.folded.contains(c))
             .map(|c| c.key().to_string())
             .collect();
-        // **Never from a test.** A test binary under `target\` resolves its data
-        // folder to the workspace root, so a test that pressed a button would
-        // overwrite the developer's own settings.json — credentials included —
-        // with `Settings::default()`.
-        if !cfg!(test) {
-            if let Err(e) = self.settings.save() {
-                self.journal.warn(format!("could not save settings: {e}"));
-            }
-        }
+        self.save_settings();
         // **Written back at once**, not queued for the next frame. Under GPUI
         // this had to wait for the first moment a `&mut Window` was in hand, so
         // the shell carried a `needs_field_sync` flag and the render read it.
         // The form is plain data now, so a clamped entry is visible on the same
         // frame that clamped it.
         self.form.sync(&self.settings);
+    }
+
+    /// Write `settings.json` as it stands, without reading the form.
+    ///
+    /// **Never from a test.** A test binary under `target\` resolves its data
+    /// folder to the workspace root, so a test that pressed a button would
+    /// overwrite the developer's own settings.json — credentials included —
+    /// with `Settings::default()`.
+    ///
+    /// A failure is said, not dropped: the sign-in dialog once discarded it,
+    /// so an unwritable data folder lost the api_id in silence and the next
+    /// launch asked for it again.
+    pub(super) fn save_settings(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        if let Err(e) = self.settings.save() {
+            self.journal.warn(format!("could not save settings: {e}"));
+            self.log_copied = false;
+        }
     }
 
     /// A checkbox changed. Same path as a text field, minus the parsing.
@@ -177,7 +189,9 @@ impl Shell {
             self.status = "Stopping the count…".into();
             return;
         }
-        if self.chats.is_empty() {
+        // Not while Update databases is reading the folder: its answer starts
+        // an export on the same connection and the same `Cancel`.
+        if self.chats.is_empty() || self.scanning {
             return;
         }
         self.cancel.reset();
@@ -222,17 +236,7 @@ impl Shell {
     /// Both lists go: [`Queue::start`] replaces the table, and
     /// [`Pending::reset`] replaces the worker's work list.
     pub(super) fn start_export(&mut self) {
-        // Whatever is in the fields is what the run should use, so the fields
-        // are read here rather than trusted to have been committed already.
-        self.commit_settings();
-        if !self.settings.writes_anything() {
-            self.journal.warn(
-                "Nothing to write. Tick HTML pages or result.json in Settings, or choose Database.",
-            );
-            self.status = "No output format selected".into();
-            return;
-        }
-        if self.range_refused() {
+        if !self.ready_to_run() {
             return;
         }
         let picked = self.ticked_chats();
@@ -242,18 +246,30 @@ impl Shell {
     /// Export these chats, whatever is ticked — a row's right-click. The same
     /// checks as Export, and the same run: added to one going, or a new one.
     pub(super) fn export_these(&mut self, chats: Vec<ChatInfo>) {
+        if !self.ready_to_run() {
+            return;
+        }
+        self.run_chats(chats);
+    }
+
+    /// The checks every way of starting or resuming a run makes first, said in
+    /// the window when one fails.
+    ///
+    /// **One copy.** Export, a row's right-click and Resume each carried their
+    /// own, word for word, so a new precondition added to one would have let
+    /// the other two start a run it refuses.
+    fn ready_to_run(&mut self) -> bool {
+        // Whatever is in the fields is what the run should use, so the fields
+        // are read here rather than trusted to have been committed already.
         self.commit_settings();
         if !self.settings.writes_anything() {
             self.journal.warn(
                 "Nothing to write. Tick HTML pages or result.json in Settings, or choose Database.",
             );
             self.status = "No output format selected".into();
-            return;
+            return false;
         }
-        if self.range_refused() {
-            return;
-        }
-        self.run_chats(chats);
+        !self.range_refused()
     }
 
     /// A date range that does not parse stops the run here, in the window,
@@ -545,6 +561,15 @@ impl Shell {
             self.journal.warn(self.status.clone());
             return;
         }
+        // **A count started while the folder was being read** holds the
+        // connection and the one `Cancel`, and `begin_run` resets that — so a
+        // count already told to stop would carry on, beside an export, which
+        // every other way of starting one refuses.
+        if self.counting {
+            self.status = "A count is running — update the databases after it ends".into();
+            self.journal.warn(self.status.clone());
+            return;
+        }
         if !self.settings.export_db {
             self.toggle_setting(|s| s.export_db = true);
             self.journal
@@ -589,18 +614,7 @@ impl Shell {
     /// them. A chat that has left the chat list since cannot be reached and
     /// says so on its row rather than sitting at Queued.
     pub(super) fn resume_queue(&mut self, extra: Vec<ChatInfo>) {
-        if self.exporting {
-            return;
-        }
-        self.commit_settings();
-        if !self.settings.writes_anything() {
-            self.journal.warn(
-                "Nothing to write. Tick HTML pages or result.json in Settings, or choose Database.",
-            );
-            self.status = "No output format selected".into();
-            return;
-        }
-        if self.range_refused() {
+        if self.exporting || !self.ready_to_run() {
             return;
         }
         self.queue

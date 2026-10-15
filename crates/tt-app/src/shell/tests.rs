@@ -1378,3 +1378,197 @@ fn a_sign_out_telegram_did_not_confirm_says_where_to_finish_it() {
     assert!(s.journal.to_text().contains("Settings → Devices"));
     assert!(s.status.contains("warnings"));
 }
+
+// -- audit fixes -----------------------------------------------------------------
+
+// Only the stages that send nothing are driven: Phone asks Telegram for a
+// code. Safe to drive at all only because `save_settings` writes nothing
+// from a test — before it, this would have put the made-up api_id below into
+// the developer's own settings.json.
+#[test]
+fn the_credentials_stage_keeps_what_was_typed_and_moves_on() {
+    let mut s = Shell::headless();
+    s.open_login();
+    let d = s.login.as_mut().expect("opened");
+    assert_eq!(d.stage, Stage::Credentials);
+    *d.value_mut(crate::login::Field::ApiId) = "abc".into();
+    s.submit_login();
+    let d = s.login.as_ref().expect("still open");
+    assert_eq!(d.stage, Stage::Credentials, "not a number");
+    assert!(d.error.is_some());
+
+    let d = s.login.as_mut().expect("still open");
+    *d.value_mut(crate::login::Field::ApiId) = " 12345 ".into();
+    *d.value_mut(crate::login::Field::ApiHash) = "deadbeef".into();
+    s.submit_login();
+    assert_eq!(
+        (s.settings.api_id, s.settings.api_hash.as_str()),
+        (12345, "deadbeef")
+    );
+    let d = s.login.as_ref().expect("still open");
+    assert_eq!(d.stage, Stage::Phone);
+    assert!(d.error.is_none(), "the stale failure went");
+
+    // A blank phone is refused before anything is sent.
+    s.submit_login();
+    let d = s.login.as_ref().expect("still open");
+    assert!(!d.busy && d.error.is_some());
+}
+
+#[test]
+fn a_database_listing_for_a_folder_since_changed_asks_about_the_new_one() {
+    // The destination changed in Settings while the old one was being read.
+    // The old answer must not stick `listing` on, which stopped the Viewer
+    // ever listing again and greyed Reload out for good.
+    let mut s = Shell::headless();
+    let old = std::env::temp_dir().join("tgx-viewer-shell-test-old");
+    let new = std::env::temp_dir().join("tgx-viewer-shell-test-new");
+    s.settings.output_dir = old.display().to_string();
+    s.viewer_list_databases();
+    s.settings.output_dir = new.display().to_string();
+    s.apply(Event::ViewerDatabases {
+        output_dir: old.display().to_string(),
+        found: Ok(vec![db(1, "A")]),
+    });
+    assert!(
+        s.viewer.databases.is_empty(),
+        "the old folder's list is not this one's"
+    );
+    assert_eq!(
+        s.viewer.listed_for.as_deref(),
+        Some(&*s.settings.output_dir)
+    );
+    assert!(s.viewer.listing, "asking about the new folder");
+    s.apply(Event::ViewerDatabases {
+        output_dir: new.display().to_string(),
+        found: Ok(vec![]),
+    });
+    assert!(!s.viewer.listing);
+}
+
+#[test]
+fn a_database_that_cannot_be_read_says_so_rather_than_holding_no_messages() {
+    let d = db(7, "Dev");
+    let mut s = Shell::headless();
+    s.show(View::Viewer);
+    s.viewer_open(d.clone(), None);
+    s.apply(Event::ViewerLoaded {
+        path: d.path.clone(),
+        chat_id: 7,
+        rows: Err("database is locked".into()),
+    });
+    let empty = s.viewer_empty().expect("nothing to list");
+    assert_eq!(empty.headline, "Could not read this database");
+    assert!(empty
+        .hint
+        .unwrap_or_default()
+        .contains("database is locked"));
+
+    // Reload opens it again, and the error goes with the old attempt.
+    s.viewer_open(d.clone(), None);
+    assert!(s.viewer.load_error.is_none());
+    s.apply(Event::ViewerLoaded {
+        path: d.path.clone(),
+        chat_id: 7,
+        rows: Ok(loaded(vec![])),
+    });
+    let empty = s.viewer_empty().expect("still empty");
+    assert_eq!(empty.headline, "This database holds no messages");
+}
+
+#[test]
+fn a_message_that_cannot_be_read_says_so_and_clicking_it_asks_again() {
+    let d = db(7, "Dev");
+    let mut s = viewing(&d, vec![message(1, false, 1), message(2, false, 1)]);
+    s.viewer_select(2, false);
+    s.apply(Event::ViewerDetail {
+        chat_id: 7,
+        id: 2,
+        detail: Err("disk I/O error".into()),
+    });
+    assert_eq!(s.viewer.detail_error.as_deref(), Some("disk I/O error"));
+    s.viewer_select(2, false);
+    assert!(s.viewer.detail_error.is_none(), "asked again");
+    s.apply(Event::ViewerDetail {
+        chat_id: 7,
+        id: 2,
+        detail: Ok(None),
+    });
+    assert!(s
+        .viewer
+        .detail_error
+        .as_deref()
+        .is_some_and(|e| e.contains("no longer in the database")));
+}
+
+#[test]
+fn update_databases_does_not_start_an_export_over_a_count() {
+    // A count started while the folder was being read holds the connection
+    // and the shared `Cancel`; starting the run would reset that and leave a
+    // stopped count running beside an export.
+    let mut s = shell_with(vec![chat(1, "a", None)]);
+    s.settings.export_db = true;
+    s.scanning = true;
+    s.counting = true;
+    s.cancel.cancel();
+    s.apply(Event::Archived(Ok(Box::new(tgx_tg::engine::Archived {
+        chats: vec![(1, "a".into())],
+        unreadable: vec![],
+        ..Default::default()
+    }))));
+    assert!(!s.scanning, "the button comes back");
+    assert!(!s.exporting && s.queue.is_empty());
+    assert!(s.cancel.is_cancelled(), "the stop still stands");
+    assert!(s.status.contains("count is running"));
+}
+
+#[test]
+fn count_waits_for_update_databases_to_finish_reading_the_folder() {
+    let mut s = shell_with(vec![chat(1, "a", None)]);
+    s.scanning = true;
+    s.start_count();
+    assert!(!s.counting);
+}
+
+#[test]
+fn the_viewers_way_back_to_summaries_lasts_only_as_long_as_the_visit() {
+    // A citation's trip into the Viewer comes back to Summaries, and while it
+    // lasts the model server is kept. Any other way in must not inherit it.
+    let mut s = Shell::headless();
+    s.show(View::Summaries);
+    s.summaries_cite(
+        super::library::Read {
+            path: std::env::temp_dir()
+                .join("tgx-viewer-shell-test-none")
+                .join("Dev.sqlite"),
+            chat_id: 7,
+            title: "Dev".into(),
+        },
+        18,
+    );
+    assert_eq!(s.body, View::Viewer);
+    assert_eq!(s.viewer.back, Some(View::Summaries));
+    assert!(s.summaries_here(), "reading a citation is not leaving");
+
+    s.show(View::Library);
+    assert_eq!(s.viewer.back, None);
+    assert!(!s.summaries_here());
+    s.search_everywhere("budget".into(), "X:\\exports".into());
+    assert_eq!(s.body, View::Viewer);
+    assert_eq!(s.viewer.back, None, "the way back is the Library's");
+    assert!(!s.summaries_here(), "so the idle clock runs");
+}
+
+#[test]
+fn a_rows_read_and_a_citation_open_the_same_database() {
+    let read = super::library::Read {
+        path: std::path::PathBuf::from(r"C:\nowhere\Dev\Dev.sqlite"),
+        chat_id: 7,
+        title: "Dev".into(),
+    };
+    let db = tgx_tg::viewer::Database::from(read.clone());
+    assert_eq!(
+        (db.path, db.chat_id, db.title),
+        (read.path, read.chat_id, read.title)
+    );
+}

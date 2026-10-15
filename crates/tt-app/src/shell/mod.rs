@@ -577,6 +577,14 @@ impl Shell {
         // else.
         self.sign_out_armed = false;
         self.reset_armed = false;
+        // **The Viewer's way back lasts as long as the visit.** Left set, a
+        // citation's `Summaries` outlived it: the next way into the Viewer —
+        // the Library's search — offered a way back to a view it did not come
+        // from, and `summaries_idle` counted the reading as time in Summaries,
+        // so the model server it started was never let go.
+        if body != View::Viewer {
+            self.viewer.back = None;
+        }
         self.body = body;
         self.body_pinned = true;
     }
@@ -586,11 +594,7 @@ impl Shell {
     /// Pinned like a rail click, because it is one — the user asked to be in
     /// the Viewer, and a run starting must not take them out of it.
     pub(super) fn read(&mut self, read: library::Read) {
-        let db = tgx_tg::viewer::Database {
-            chat_id: read.chat_id,
-            title: read.title,
-            path: read.path,
-        };
+        let db = tgx_tg::viewer::Database::from(read);
         if !self.viewer.is_open(&db.path, db.chat_id) {
             self.viewer_open(db, None);
         }

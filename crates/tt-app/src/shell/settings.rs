@@ -34,7 +34,6 @@
 //! unreliable. An old `settings.json` naming it still loads, because unknown
 //! keys are dropped per field.
 
-use super::summaries::Found;
 use super::{list, Shell, THEMES};
 use eframe::egui::{self, Ui};
 use tgx_ui::components::{
@@ -463,16 +462,14 @@ impl Shell {
         section(ui, "Summaries", &p);
         let (mut open, mut pick_folder, mut server, mut commit) = (false, false, false, false);
         let folder = self.settings.summary_models_dir();
-        let stale = self
-            .summaries
-            .found
-            .as_ref()
-            .is_none_or(|f| f.folder != folder || f.at.elapsed() > Found::FOR);
-        if stale {
-            self.summaries.found = Some(Found::look(folder.clone()));
-        }
-        let found = self.summaries.found.as_ref().expect("looked just now");
-        let (models, found_server) = (found.models.clone(), found.server.clone());
+        self.summaries.look_for_models(&folder, ui.ctx());
+        // Only a look at *this* folder answers for it; until one arrives the
+        // rows say so rather than "none in the folder".
+        let found = self.summaries.found.as_ref().filter(|f| f.folder == folder);
+        let looking = found.is_none();
+        let (models, found_server) = found
+            .map(|f| (f.models.clone(), f.server.clone()))
+            .unwrap_or_default();
         let in_folder = |path: &std::path::Path| {
             path.strip_prefix(&folder)
                 .unwrap_or(path)
@@ -501,7 +498,9 @@ impl Shell {
         });
 
         let chosen = super::summaries::chosen_model(&self.settings, &models);
-        let about_model = if models.is_empty() {
+        let about_model = if looking {
+            "Looking in the folder…".to_string()
+        } else if models.is_empty() {
             "None in the folder yet: see How to add a model, below.".to_string()
         } else {
             format!(
@@ -538,6 +537,8 @@ impl Shell {
             "Chosen below; the models folder's is not used.".to_string()
         } else if let Some(exe) = &found_server {
             format!("{}, in the models folder.", in_folder(exe))
+        } else if looking {
+            "Looking in the folder…".to_string()
         } else {
             "Not in the models folder: see How to add a model, below, or choose one.".to_string()
         };

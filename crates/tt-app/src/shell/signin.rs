@@ -265,7 +265,10 @@ impl Shell {
                     Ok(n) if n > 0 && !hash.is_empty() => {
                         self.settings.api_id = n;
                         self.settings.api_hash = hash;
-                        let _ = self.settings.save();
+                        // Not `commit_settings`: that would also apply whatever
+                        // is half-typed in the Settings form, which signing in
+                        // was never asked to do.
+                        self.save_settings();
                         if let Some(d) = self.login.as_mut() {
                             d.stage = crate::login::Stage::Phone;
                         }
@@ -290,7 +293,7 @@ impl Shell {
                     return;
                 }
                 self.settings.phone = phone;
-                let _ = self.settings.save();
+                self.save_settings();
                 if let Some(d) = self.login.as_mut() {
                     d.busy = true;
                 }

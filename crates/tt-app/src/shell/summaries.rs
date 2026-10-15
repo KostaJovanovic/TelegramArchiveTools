@@ -153,8 +153,11 @@ pub(super) struct SummariesState {
     ask_key: Option<AskKey>,
     /// What Settings › Summaries found in the models folder — the folder,
     /// when it looked, the models and the `llama-server.exe` — so a frame
-    /// does not read a directory on what may be a slow disk.
+    /// does not read a directory on what may be a slow disk. See
+    /// [`SummariesState::look_for_models`].
     pub(super) found: Option<Found>,
+    /// A look at the models folder in flight.
+    looking_models: Option<Receiver<Found>>,
 }
 
 /// The models folder, as last looked at.
@@ -216,6 +219,7 @@ impl Default for SummariesState {
             grounding: None,
             ask_key: None,
             found: None,
+            looking_models: None,
         }
     }
 }
@@ -225,8 +229,12 @@ impl SummariesState {
         self.job.is_some()
     }
 
+    /// Anything still to arrive — what a photograph of the window waits for.
     pub(super) fn busy(&self) -> bool {
-        self.job.is_some() || self.reading.is_some() || self.asking.is_some()
+        self.job.is_some()
+            || self.reading.is_some()
+            || self.asking.is_some()
+            || self.looking_models.is_some()
     }
 
     /// A question is being answered.
@@ -248,6 +256,24 @@ impl SummariesState {
             self.to.trim().to_string(),
             self.scope,
         ))
+    }
+
+    /// What a question about `key`'s days rests on: the conversation's own
+    /// reading while it is about the same days. **Other days than the
+    /// conversation so far start a new one**, its turns going with the old
+    /// reading — or the history would be about messages the model is no
+    /// longer given.
+    fn grounding_for(&mut self, key: &AskKey) -> Option<Arc<Grounding>> {
+        match &self.grounding {
+            Some((k, g)) if k == key => Some(g.clone()),
+            _ => {
+                if self.grounding.is_some() {
+                    self.turns.clear();
+                }
+                self.grounding = None;
+                None
+            }
+        }
     }
 
     /// The options the form says, or why they cannot be.
@@ -311,6 +337,77 @@ impl SummariesState {
             }
         }
         self.estimate.as_ref().map(|(_, e)| *e)
+    }
+
+    /// Read `picked` on a worker, and list its saved summaries. Nothing while
+    /// the model is in use: what it is writing is about the chat picked now.
+    ///
+    /// **The same chat again is read again unless it is read or being
+    /// read.** A failed read leaves it picked with nothing to show, and the
+    /// click that should have retried it was taken for a click on the chat
+    /// already open — the only way to try again was to pick another and come
+    /// back.
+    fn pick(&mut self, picked: Picked, wake: tga_run::job::Wake) {
+        if self.using_model() {
+            return;
+        }
+        if self.picked.as_ref() == Some(&picked) && (self.chat.is_some() || self.reading.is_some())
+        {
+            return;
+        }
+        self.saved = run::saved(&picked.home);
+        self.reading = Some(run::load(
+            picked.path.clone(),
+            picked.chat_id.map(|id| id.to_string()),
+            wake,
+        ));
+        self.status = format!("Reading {}", picked.title);
+        self.picked = Some(picked);
+        self.chat = None;
+        self.estimate = None;
+        self.text.clear();
+        self.shown = None;
+        self.turns.clear();
+        self.grounding = None;
+    }
+
+    /// Keep `found` current for `folder`: take in a look that has finished,
+    /// and start another on a worker once the last is older than
+    /// [`Found::FOR`] or of another folder. What was found stays on screen
+    /// while the next look is in flight.
+    ///
+    /// **Never on the frame.** Models are many gigabytes and often on a
+    /// second drive; a spun-down or network one held the whole window for the
+    /// scan every five seconds while Settings was open.
+    pub(super) fn look_for_models(&mut self, folder: &std::path::Path, ctx: &egui::Context) {
+        if let Some(rx) = &self.looking_models {
+            match rx.try_recv() {
+                Ok(found) => {
+                    self.looking_models = None;
+                    self.found = Some(found);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.looking_models = None,
+            }
+        }
+        let stale = self
+            .found
+            .as_ref()
+            .is_none_or(|f| f.folder != folder || f.at.elapsed() > Found::FOR);
+        if !stale || self.looking_models.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let wake = ctx.clone();
+        let folder = folder.to_path_buf();
+        std::thread::Builder::new()
+            .name("tt-summary-models".into())
+            .spawn(move || {
+                let _ = tx.send(Found::look(folder));
+                wake.request_repaint();
+            })
+            .expect("the OS refused a worker thread");
+        self.looking_models = Some(rx);
     }
 
     fn show_file(&mut self, path: &std::path::Path) {
@@ -524,33 +621,13 @@ fn wake(ctx: &egui::Context) -> tga_run::job::Wake {
 impl Shell {
     /// Pick a chat: read it on a worker, and list its saved summaries.
     fn summaries_pick(&mut self, entry: &Entry, ctx: &egui::Context) {
-        let s = &mut self.summaries;
-        if s.using_model() {
-            return;
-        }
         let picked = Picked {
             path: entry.target.path().to_path_buf(),
             chat_id: entry.chat_id,
             title: entry.title.clone(),
             home: entry.target.home(),
         };
-        if s.picked.as_ref() == Some(&picked) {
-            return;
-        }
-        s.saved = run::saved(&picked.home);
-        s.reading = Some(run::load(
-            picked.path.clone(),
-            picked.chat_id.map(|id| id.to_string()),
-            wake(ctx),
-        ));
-        s.status = format!("Reading {}", picked.title);
-        s.picked = Some(picked);
-        s.chat = None;
-        s.estimate = None;
-        s.text.clear();
-        s.shown = None;
-        s.turns.clear();
-        s.grounding = None;
+        self.summaries.pick(picked, wake(ctx));
     }
 
     /// Summarise: the form's options, the settings' server, on a worker.
@@ -596,17 +673,7 @@ impl Shell {
         if question.is_empty() || s.using_model() {
             return;
         }
-        // Other days than the conversation so far: a new conversation.
-        let grounding = match &s.grounding {
-            Some((k, g)) if *k == key => Some(g.clone()),
-            _ => {
-                if s.grounding.is_some() {
-                    s.turns.clear();
-                }
-                s.grounding = None;
-                None
-            }
-        };
+        let grounding = s.grounding_for(&key);
         let history = s.turns.clone();
         s.turns.push(Turn {
             question: question.clone(),
@@ -1301,11 +1368,7 @@ impl Shell {
     /// A citation clicked: the Viewer, on that message, with its way back
     /// here.
     pub(super) fn summaries_cite(&mut self, read: super::library::Read, id: i64) {
-        let db = tgx_tg::viewer::Database {
-            chat_id: read.chat_id,
-            title: read.title,
-            path: read.path,
-        };
+        let db = tgx_tg::viewer::Database::from(read);
         if self.viewer.is_open(&db.path, db.chat_id) {
             self.viewer_select(id, true);
         } else {
@@ -1321,29 +1384,62 @@ impl Shell {
         let Some(idle) = self.summaries.keeper.idle() else {
             return;
         };
-        // **Loaded while the view is open.** Reading a summary takes longer
-        // than the idle minutes, and a question after it then waited for
-        // 15 GB to load again. So the clock runs only once the view is left —
-        // a citation's trip into the Viewer, which comes back here, does not
-        // count as leaving.
-        let here = self.body == View::Summaries
-            || (self.body == View::Viewer && self.viewer.back == Some(View::Summaries));
-        if self.summaries.using_model() || here {
-            self.summaries.keeper.touch();
-            return;
-        }
         let limit = std::time::Duration::from_secs(
             u64::from(self.settings.summary_idle_minutes.max(1)) * 60,
         );
-        if idle >= limit {
-            self.summaries.keeper.stop();
-            self.journal.push(format!(
-                "Stopped the model server: unused for {} min",
-                self.settings.summary_idle_minutes
-            ));
-        } else {
-            ctx.request_repaint_after(limit - idle);
+        let in_use = self.summaries.using_model() || self.summaries_here();
+        match idle_step(idle, limit, in_use) {
+            Idle::Touch => self.summaries.keeper.touch(),
+            Idle::Stop => {
+                self.summaries.keeper.stop();
+                self.journal.push(format!(
+                    "Stopped the model server: unused for {} min",
+                    self.settings.summary_idle_minutes
+                ));
+            }
+            Idle::Wait(left) => ctx.request_repaint_after(left),
         }
+    }
+
+    /// Whether the Summaries view counts as open for the idle clock.
+    ///
+    /// **Loaded while the view is open.** Reading a summary takes longer than
+    /// the idle minutes, and a question after it then waited for 15 GB to load
+    /// again. So the clock runs only once the view is left — a citation's trip
+    /// into the Viewer, which comes back here, does not count as leaving. Any
+    /// other way into the Viewer does: [`Shell::show`] drops the way back as
+    /// soon as the Viewer is left.
+    pub(super) fn summaries_here(&self) -> bool {
+        self.body == View::Summaries
+            || (self.body == View::Viewer && self.viewer.back == Some(View::Summaries))
+    }
+}
+
+/// What the idle clock does on a frame, given how long the server this
+/// window started has gone unused.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Idle {
+    /// In use, or looked at: the clock starts again.
+    Touch,
+    /// Its minutes are up.
+    Stop,
+    /// Not yet: a frame is wanted when they will be.
+    Wait(std::time::Duration),
+}
+
+/// The idle clock's rule, apart from the clock and the server, so it can be
+/// held by a test.
+pub(super) fn idle_step(
+    idle: std::time::Duration,
+    limit: std::time::Duration,
+    in_use: bool,
+) -> Idle {
+    if in_use {
+        Idle::Touch
+    } else if idle >= limit {
+        Idle::Stop
+    } else {
+        Idle::Wait(limit - idle)
     }
 }
 
@@ -1526,5 +1622,287 @@ mod tests {
         let s = SummariesState::default();
         assert!(!s.busy());
         assert_eq!(s.keeper.idle(), None);
+    }
+
+    // -- the state machine, driven without a window or a model -------------
+    //
+    // `reply` and `apply` are what `drain` hands each event to, so feeding
+    // them directly is the worker's half of the conversation with none of
+    // its threads. Nothing here starts a server or reads a real chat.
+
+    fn no_wake() -> tga_run::job::Wake {
+        Arc::new(|| {})
+    }
+
+    /// A chat that is not there: reading it fails at once, offline.
+    fn nowhere(title: &str) -> Picked {
+        let path = std::env::temp_dir()
+            .join("tt-summaries-test-none")
+            .join(title);
+        Picked {
+            home: path.clone(),
+            path,
+            chat_id: Some(7),
+            title: title.into(),
+        }
+    }
+
+    /// Drain until the read in flight has answered.
+    fn read_through(s: &mut SummariesState) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while s.reading.is_some() {
+            assert!(std::time::Instant::now() < until, "the read never answered");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            s.drain();
+        }
+    }
+
+    fn grounding(text: &str) -> Arc<Grounding> {
+        Arc::new(Grounding {
+            text: text.into(),
+            notes: false,
+            known: Default::default(),
+            topic: None,
+            messages: 1,
+            listed: Vec::new(),
+            days: Vec::new(),
+        })
+    }
+
+    fn key(from: &str) -> AskKey {
+        (
+            PathBuf::from("chat"),
+            from.into(),
+            String::new(),
+            Scope::Whole,
+        )
+    }
+
+    #[test]
+    fn a_failed_read_is_said_and_picking_the_chat_again_retries_it() {
+        let mut s = SummariesState::default();
+        let chat = nowhere("Gone");
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Err("database is locked".to_string())).unwrap();
+        s.picked = Some(chat.clone());
+        s.reading = Some(rx);
+        s.drain();
+        assert!(s.reading.is_none() && s.chat.is_none());
+        assert_eq!(s.status, "database is locked");
+
+        // The same row again is a retry, not a click on the chat open.
+        s.pick(chat.clone(), no_wake());
+        assert!(s.reading.is_some(), "read again");
+        assert_eq!(s.status, "Reading Gone");
+        // While that read is in flight, another click on it is not a third.
+        s.status = "still reading".into();
+        s.pick(chat.clone(), no_wake());
+        assert_eq!(s.status, "still reading");
+        read_through(&mut s);
+        assert!(s.chat.is_none());
+        assert!(s.status.contains("Not a database"), "got {}", s.status);
+    }
+
+    #[test]
+    fn a_chat_read_opens_on_its_last_week() {
+        // Two invented people, eleven days apart: the last seven days are the
+        // last day alone, and the form opens on them.
+        let dir = std::env::temp_dir().join(format!("tt-summaries-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("result.json"),
+            r#"{"name": "Scratch", "type": "private_supergroup", "id": 1, "messages": [
+ {"id": 1, "type": "message", "date": "2025-01-01T09:00:00", "date_unixtime": "1735718400",
+  "from": "Ana", "from_id": "user1", "text": "a", "text_entities": [{"type": "plain", "text": "a"}]},
+ {"id": 2, "type": "message", "date": "2025-01-12T09:00:00", "date_unixtime": "1736668800",
+  "from": "Bob", "from_id": "user2", "text": "b", "text_entities": [{"type": "plain", "text": "b"}]}
+]}"#,
+        )
+        .unwrap();
+        let mut s = SummariesState::default();
+        s.pick(
+            Picked {
+                path: dir.clone(),
+                chat_id: None,
+                title: "Scratch".into(),
+                home: dir.clone(),
+            },
+            no_wake(),
+        );
+        read_through(&mut s);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(s.chat.is_some(), "status: {}", s.status);
+        assert_eq!(s.status, "2 messages");
+        assert_eq!(
+            (s.from.as_str(), s.to.as_str()),
+            ("2025-01-06", "2025-01-12")
+        );
+    }
+
+    #[test]
+    fn an_answer_streams_into_the_last_turn_and_keeps_its_reading() {
+        let mut s = SummariesState::default();
+        s.turns.push(Turn {
+            question: "who?".into(),
+            answer: String::new(),
+        });
+        s.ask_key = Some(key("2025-01-01"));
+        s.reply(Reply::Step("Reading the days".into()));
+        assert_eq!(s.status, "Reading the days");
+        s.reply(Reply::Event(Event::Text("An".into())));
+        s.reply(Reply::Event(Event::Text("a".into())));
+        assert_eq!(s.turns[0].answer, "Ana");
+        s.reply(Reply::Done(Ok(run::Answered {
+            answer: "Ana [#1]".into(),
+            grounding: grounding("days"),
+        })));
+        assert_eq!(
+            s.turns[0].answer, "Ana [#1]",
+            "the checked answer replaces the stream"
+        );
+        assert_eq!(s.status, "Answered");
+        assert!(s.ask_key.is_none());
+        let (k, g) = s.grounding.as_ref().expect("kept for the next question");
+        assert_eq!((k, g.text.as_str()), (&key("2025-01-01"), "days"));
+    }
+
+    #[test]
+    fn a_stopped_answer_says_stopped_and_keeps_what_was_written() {
+        let mut s = SummariesState::default();
+        s.turns.push(Turn::default());
+        s.reply(Reply::Done(Err("cancelled".into())));
+        assert_eq!(s.status, "Stopped");
+        assert_eq!(s.turns[0].answer, "*No answer: Stopped*");
+
+        s.turns.push(Turn::default());
+        s.reply(Reply::Event(Event::Text("half an".into())));
+        s.reply(Reply::Done(Err("the server went away".into())));
+        assert_eq!(s.status, "the server went away");
+        assert_eq!(
+            s.turns[1].answer, "half an",
+            "a partial answer is not replaced"
+        );
+        assert!(s.grounding.is_none(), "a failure keeps no reading");
+    }
+
+    #[test]
+    fn a_question_about_other_days_starts_a_new_conversation() {
+        let mut s = SummariesState {
+            grounding: Some((key("2025-01-01"), grounding("first week"))),
+            turns: vec![Turn {
+                question: "q".into(),
+                answer: "a".into(),
+            }],
+            ..Default::default()
+        };
+        let same = s.grounding_for(&key("2025-01-01"));
+        assert_eq!(same.map(|g| g.text.clone()).as_deref(), Some("first week"));
+        assert_eq!(s.turns.len(), 1, "the same days carry on");
+
+        assert!(s.grounding_for(&key("2025-02-01")).is_none());
+        assert!(
+            s.turns.is_empty(),
+            "the old turns were about other messages"
+        );
+        assert!(s.grounding.is_none());
+    }
+
+    #[test]
+    fn a_summary_says_its_parts_as_it_writes_and_stopped_when_stopped() {
+        let mut s = SummariesState::default();
+        s.apply(Progress::Event(Event::Part {
+            done: 1,
+            of: 3,
+            cached: true,
+            secs: 0.0,
+            timings: None,
+        }));
+        assert!(s.status.contains("kept from an earlier run"));
+        s.apply(Progress::Event(Event::Part {
+            done: 3,
+            of: 3,
+            cached: false,
+            secs: 1.0,
+            timings: None,
+        }));
+        assert_eq!(s.part, Some((3, 3)));
+        assert_eq!(s.status, "Read part 3 of 3");
+        s.apply(Progress::Event(Event::Text("Overview.".into())));
+        assert_eq!(
+            s.status, "Writing",
+            "the parts are read; the summary is begun"
+        );
+        s.apply(Progress::Event(Event::Section(Some("Foto".into()))));
+        s.apply(Progress::Event(Event::Text("A day.".into())));
+        assert_eq!(s.text, "Overview.\n\n## Foto\n\nA day.");
+        s.apply(Progress::Done(Err("cancelled".into())));
+        assert_eq!(s.status, "Stopped");
+        assert!(s.part.is_none() && s.job.is_none());
+    }
+
+    #[test]
+    fn a_finished_summary_names_its_file_and_what_it_is_missing() {
+        let mut s = SummariesState {
+            text: "streamed".into(),
+            ..Default::default()
+        };
+        s.apply(Progress::Done(Ok(run::Finished {
+            path: PathBuf::from("2025-01-01_short_sr.md"),
+            document: "# Saved".into(),
+            summary: tga_run::tga_sum::Summary {
+                parts: 4,
+                failed: 1,
+                ..Default::default()
+            },
+            unread_photos: 1,
+        })));
+        assert_eq!(s.text, "# Saved", "the file's text, header and all");
+        assert!(s.status.starts_with("Saved as 2025-01-01_short_sr.md"));
+        assert!(s.status.contains("1 of 4 parts got no answer"));
+        assert!(s.status.contains("the text in 1 photo was not read"));
+        assert_eq!(s.shown, Some(PathBuf::from("2025-01-01_short_sr.md")));
+    }
+
+    #[test]
+    fn the_models_folder_is_looked_at_off_the_frame_and_once_at_a_time() {
+        let ctx = egui::Context::default();
+        let folder = std::env::temp_dir().join("tt-summaries-test-no-models");
+        let mut s = SummariesState::default();
+        s.look_for_models(&folder, &ctx);
+        assert!(s.found.is_none(), "the frame did not wait for the disk");
+        assert!(s.looking_models.is_some());
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while s.found.is_none() {
+            assert!(std::time::Instant::now() < until, "the look never answered");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            s.look_for_models(&folder, &ctx);
+        }
+        let found = s.found.as_ref().unwrap();
+        assert_eq!(found.folder, folder);
+        assert!(found.models.is_empty() && found.server.is_none());
+        // Fresh: the next frames ask nothing.
+        s.look_for_models(&folder, &ctx);
+        assert!(s.looking_models.is_none());
+        // Another folder is looked at, and the last look stays meanwhile.
+        s.look_for_models(&folder.join("other"), &ctx);
+        assert!(s.looking_models.is_some() && s.found.is_some());
+    }
+
+    #[test]
+    fn the_idle_clock_runs_only_once_the_server_is_left_alone() {
+        use std::time::Duration;
+        let limit = Duration::from_secs(600);
+        assert_eq!(
+            idle_step(Duration::from_secs(900), limit, true),
+            Idle::Touch
+        );
+        assert_eq!(
+            idle_step(Duration::from_secs(600), limit, false),
+            Idle::Stop
+        );
+        assert_eq!(
+            idle_step(Duration::from_secs(60), limit, false),
+            Idle::Wait(Duration::from_secs(540))
+        );
     }
 }

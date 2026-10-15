@@ -30,9 +30,10 @@ use tgx_ui::components::{
 };
 use tgx_ui::tokens::{space, Palette};
 
-/// Every row is this tall — the chat list's, so a title over a caption sits
-/// the same in both views.
-const ROW_HEIGHT: f32 = 46.0;
+// Every row is this tall — **the chat list's own constant**, not a copy of its
+// value, so a title over a caption sits the same in both views and changing
+// one cannot leave the other behind.
+use super::chats::ROW_HEIGHT;
 
 /// How wide the filter box is. **Fixed**, for the chat list's reason: a field
 /// stretched across the window advertises room for a sentence, and what goes
@@ -87,6 +88,17 @@ pub struct Read {
     pub path: PathBuf,
     pub chat_id: i64,
     pub title: String,
+}
+
+/// What the Viewer opens for a Read — a row's, or a summary's citation.
+impl From<Read> for tgx_tg::viewer::Database {
+    fn from(read: Read) -> Self {
+        tgx_tg::viewer::Database {
+            chat_id: read.chat_id,
+            title: read.title,
+            path: read.path,
+        }
+    }
 }
 
 /// What a worker calls after every send: a repaint of this window.
