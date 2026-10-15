@@ -24,6 +24,7 @@ pub async fn fetch_chat_info(
     peer: PeerRef,
     settings: &Settings,
     tally: &mut Enrichment,
+    cancel: &Cancel,
     mut on_wait: impl FnMut(u64),
 ) -> Map<String, Value> {
     let mut info = Map::new();
@@ -43,21 +44,11 @@ pub async fn fetch_chat_info(
                     access_hash: c.access_hash,
                 }),
             };
-            guarded(tally, &mut on_wait, || {
-                let client = client.clone();
-                let request = request.clone();
-                async move { client.invoke(&request).await.map_err(|e| classify(&e)) }
-            })
-            .await
+            guarded_invoke(client, &request, tally, &mut on_wait, cancel).await
         }
         tl::enums::InputPeer::Chat(c) => {
             let request = tl::functions::messages::GetFullChat { chat_id: c.chat_id };
-            guarded(tally, &mut on_wait, || {
-                let client = client.clone();
-                let request = request.clone();
-                async move { client.invoke(&request).await.map_err(|e| classify(&e)) }
-            })
-            .await
+            guarded_invoke(client, &request, tally, &mut on_wait, cancel).await
         }
         tl::enums::InputPeer::User(u) => {
             let request = tl::functions::users::GetFullUser {
@@ -66,12 +57,7 @@ pub async fn fetch_chat_info(
                     access_hash: u.access_hash,
                 }),
             };
-            let got = guarded(tally, &mut on_wait, || {
-                let client = client.clone();
-                let request = request.clone();
-                async move { client.invoke(&request).await.map_err(|e| classify(&e)) }
-            })
-            .await;
+            let got = guarded_invoke(client, &request, tally, &mut on_wait, cancel).await;
             // A user has no chat to be full of. What it does have is the bio,
             // which is the one field of this set that means anything for a
             // private chat.
@@ -183,7 +169,8 @@ pub async fn fetch_invites(
     peer: PeerRef,
     settings: &Settings,
     tally: &mut Enrichment,
-    mut on_wait: impl FnMut(u64),
+    cancel: &Cancel,
+    on_wait: impl FnMut(u64),
 ) -> Vec<Value> {
     if !settings.invite_links {
         return Vec::new();
@@ -206,12 +193,7 @@ pub async fn fetch_invites(
         offset_link: None,
         limit: 100,
     };
-    let result = guarded(tally, &mut on_wait, || {
-        let client = client.clone();
-        let request = request.clone();
-        async move { client.invoke(&request).await.map_err(|e| classify(&e)) }
-    })
-    .await;
+    let result = guarded_invoke(client, &request, tally, on_wait, cancel).await;
     let Some(tl::enums::messages::ExportedChatInvites::Invites(result)) = result else {
         return Vec::new();
     };
@@ -258,7 +240,8 @@ pub async fn fetch_scheduled(
     peer: PeerRef,
     settings: &Settings,
     tally: &mut Enrichment,
-    mut on_wait: impl FnMut(u64),
+    cancel: &Cancel,
+    on_wait: impl FnMut(u64),
 ) -> Vec<tl::enums::Message> {
     if !settings.scheduled_messages {
         return Vec::new();
@@ -267,12 +250,7 @@ pub async fn fetch_scheduled(
         peer: peer.into(),
         hash: 0,
     };
-    let result = guarded(tally, &mut on_wait, || {
-        let client = client.clone();
-        let request = request.clone();
-        async move { client.invoke(&request).await.map_err(|e| classify(&e)) }
-    })
-    .await;
+    let result = guarded_invoke(client, &request, tally, on_wait, cancel).await;
     match result {
         Some(tl::enums::messages::Messages::Messages(m)) => m.messages,
         Some(tl::enums::messages::Messages::Slice(m)) => m.messages,

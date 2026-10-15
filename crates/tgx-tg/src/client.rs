@@ -8,7 +8,7 @@
 //! ACL-restricted on creation — see [`crate::config`].
 
 use crate::config::{ensure_data_dir, session_file, Settings};
-use crate::error::{classify, EnrichError};
+use crate::error::classify;
 use anyhow::{anyhow, Context, Result};
 use grammers_client::client::{AutoSleep, ClientConfiguration, RetryContext, RetryPolicy};
 use grammers_client::{Client, SenderPool};
@@ -493,11 +493,6 @@ impl Session {
         }
     }
 
-    /// Is a two-factor step waiting for a password?
-    pub fn awaiting_password(&self) -> bool {
-        self.password.is_some()
-    }
-
     /// Which sign-in errors hand a token back for another attempt.
     ///
     /// Split out from [`Self::check_password`] because it is the only part of
@@ -622,12 +617,6 @@ pub fn is_auth_restart(e: &grammers_client::InvocationError) -> bool {
 // What dropping a `Session` still does, and is still relied on, is discard the
 // login and password tokens it is carrying: an abandoned sign-in leaves no
 // half-finished credential in memory.
-
-/// Turn a grammers error into our vocabulary. Re-exported so callers never
-/// reach for the raw type.
-pub fn classify_error(e: &grammers_client::InvocationError) -> EnrichError {
-    classify(e)
-}
 
 #[cfg(test)]
 mod tests {

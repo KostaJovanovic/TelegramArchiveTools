@@ -17,7 +17,16 @@ use super::*;
 /// **The three-name cap is per _message_, not per reaction.** A message with
 /// two reactions of five shows three names and hides seven, so the test is
 /// `sum(counts) > len(recent_reactions)` across the whole message.
+///
+/// **Not when the list is closed to us.** `can_see_list` false is Telegram
+/// saying it will not name the reactors — a broadcast channel to anyone who is
+/// not an admin — and it then sends no sample either, so the sum test was true
+/// for every reacted post. Each one cost a request that came back refused and
+/// was thrown away: one per post, across a channel of hundreds of thousands.
 pub fn reactions_are_truncated(reactions: &tl::types::MessageReactions) -> bool {
+    if !reactions.can_see_list {
+        return false;
+    }
     let total: i64 = reactions
         .results
         .iter()
@@ -93,17 +102,9 @@ pub async fn fetch_reactors(
         };
         let page = match client.invoke(&request).await {
             Ok(p) => p,
-            Err(e) => {
-                let err = classify(&e);
-                // A rate limit is the caller's to wait out, and a server error
-                // the caller's to count. A refusal — this is admin-visible on
-                // some chats — costs the message its full list and nothing
-                // else.
-                if err.is_transient() || err.is_unavailable() {
-                    return Err(err);
-                }
-                return Ok(Vec::new());
-            }
+            // A refusal — this is admin-visible on some chats — costs the
+            // message its full list and nothing else.
+            Err(e) => return passed_on(&e).map(|_| Vec::new()),
         };
         let tl::enums::messages::MessageReactionsList::List(page) = page;
         let batch = page.reactions.len();
@@ -138,13 +139,7 @@ pub async fn fetch_poll_results(
     };
     let updates = match client.invoke(&request).await {
         Ok(u) => u,
-        Err(e) => {
-            let err = classify(&e);
-            if err.is_transient() || err.is_unavailable() {
-                return Err(err);
-            }
-            return Ok(None);
-        }
+        Err(e) => return passed_on(&e).map(|_| None),
     };
     // Only an update that actually carries tallies is worth grafting on: the
     // response can echo the same empty results back.
@@ -157,6 +152,22 @@ pub async fn fetch_poll_results(
         }
     }
     Ok(None)
+}
+
+/// The per-message recoveries' one error policy: `Err` for what [`guarded`]
+/// waits out or counts, `Ok` for a refusal, which the caller turns into
+/// nothing.
+///
+/// A rate limit is the caller's to wait out, and a server error the caller's
+/// to count — `client::Patient` has already re-sent it. Anything else is
+/// Telegram declining, which is permanent and not lost data. Written once so
+/// the two fetchers cannot come to disagree about which is which.
+fn passed_on(e: &grammers_client::InvocationError) -> Result<(), EnrichError> {
+    let err = classify(e);
+    if err.is_transient() || err.is_unavailable() {
+        return Err(err);
+    }
+    Ok(())
 }
 
 fn updates_of(u: &tl::enums::Updates) -> Vec<&tl::enums::Update> {

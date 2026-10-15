@@ -8,41 +8,35 @@ use super::*;
 
 impl<'a> ChatExporter<'a> {
     /// **Closing drains.** Every path that can end an export comes through
-    /// here, including the two error returns above: the JSON is streamed, so an
-    /// abandoned output is a *zero-byte* file, not a truncated one.
+    /// here, once, from [`Self::run`]: the JSON is streamed, so an abandoned
+    /// output is a *zero-byte* file, not a truncated one.
     ///
-    /// Eight arguments, and the grouping that would fix it is the run-state
-    /// struct `run()` needs for the same reason — five of these are immutable
-    /// borrows of the same export, but they cannot be bundled once and reused,
-    /// because `&self.names` would then be held across a loop body that calls
-    /// `&mut self`. It is nine call sites in the one file no parity leg covers,
-    /// so it is its own change, not a rider on a defect fix.
     /// **The database commits here too**, for the same reason the outputs close
-    /// here: this is the one place every exit already comes through, so putting
-    /// the commit anywhere else would mean nine sites remembering to. Unlike
-    /// `Output`, the store has no `Drop` backstop that could cover a miss — a
-    /// `Drop` cannot await — so "no site can forget it" has to be structural.
-    /// The commit runs **first**, before anything that can fail.
-    #[allow(clippy::too_many_arguments)]
+    /// here: this is the one place every exit comes through. Unlike `Output`,
+    /// the store has no `Drop` backstop that could cover a miss — a `Drop`
+    /// cannot await — so "no exit can forget it" has to be structural. The
+    /// commit runs **first**, before anything that can fail, and its failure is
+    /// handed back rather than logged: on a run that otherwise finished it is
+    /// the run failing, and only `run` knows which kind of exit this is.
     pub(super) async fn close_all(
-        sinks: &mut HashMap<i64, TopicSink>,
+        &self,
+        state: &mut RunState,
         root: Option<&Path>,
         chat: &ChatInfo,
         topics: &[Topic],
-        names: &NameBook,
-        split: bool,
-        result: &mut ExportResult,
-        store: Option<&tgx_archive::Store>,
         progress: ProgressFn<'_>,
-    ) {
-        if let Some(store) = store {
-            if let Err(e) = store.commit_batch().await {
-                // Reported, not returned: every caller is already on its way
-                // out, several of them carrying an error of their own that
-                // matters more than this one.
-                progress(Progress::Log(format!("database: committing: {e}")));
-            }
-        }
+    ) -> Result<(), tgx_archive::Error> {
+        let committed = match &self.store {
+            Some(store) => store.commit_batch().await,
+            None => Ok(()),
+        };
+        let RunState {
+            sinks,
+            result,
+            split,
+            ..
+        } = state;
+        let split = *split;
 
         let mut written: HashMap<i64, usize> = HashMap::new();
         let mut ids: Vec<i64> = sinks.keys().copied().collect();
@@ -76,8 +70,8 @@ impl<'a> ChatExporter<'a> {
                 // empty chat should leave an empty export, not no export.
                 //
                 // Nothing to prune at all without a folder: the scratch tree a
-                // database-only run downloads into is removed wholesale by the
-                // media pass.
+                // database-only run downloads into is removed wholesale by its
+                // `ScratchTree` guard.
                 if let Some(root) = root {
                     if sink.dir != root {
                         let _ = std::fs::remove_dir_all(&sink.dir);
@@ -106,10 +100,11 @@ impl<'a> ChatExporter<'a> {
         // link and the target was absent. The link comes from the same `split`
         // branch that sets `back_href`, so the two cannot drift apart.
         if let (true, Some(root)) = (split, root) {
-            if let Err(e) = Self::write_index(root, chat, topics, names, &written, result) {
+            if let Err(e) = Self::write_index(root, chat, topics, &self.names, &written, result) {
                 progress(Progress::Log(format!("writing the index: {e}")));
             }
         }
+        committed
     }
 
     pub(super) fn write_index(

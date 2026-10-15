@@ -184,6 +184,7 @@ impl<'a> ChatExporter<'a> {
         peer: PeerRef,
         tally: &mut Enrichment,
         progress: ProgressFn<'_>,
+        cancel: &Cancel,
     ) -> MessageExtras {
         let mut extras = MessageExtras::default();
         let m = match &msg.raw {
@@ -212,6 +213,7 @@ impl<'a> ChatExporter<'a> {
                     let got = enrich::guarded(
                         tally,
                         |secs| progress(Progress::FloodWait { seconds: secs }),
+                        cancel,
                         || enrich::fetch_reactors(client, peer, id),
                     )
                     .await;
@@ -234,6 +236,7 @@ impl<'a> ChatExporter<'a> {
                     extras.poll_results = enrich::guarded(
                         tally,
                         |secs| progress(Progress::FloodWait { seconds: secs }),
+                        cancel,
                         || enrich::fetch_poll_results(client, peer, id),
                     )
                     .await

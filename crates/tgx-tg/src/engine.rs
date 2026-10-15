@@ -68,7 +68,7 @@ pub struct ExportResult {
     pub root: Option<PathBuf>,
     /// The database this chat was synced into — `None` for a folder export.
     /// Not always `<title>/<title>.sqlite`: a title clash puts the chat id in
-    /// the name (see [`ChatExporter::open_archive`]), so the path is reported
+    /// the name (see [`open_archive`]), so the path is reported
     /// rather than worked out again by whoever wants the file.
     pub database: Option<PathBuf>,
     pub messages: usize,
@@ -569,7 +569,7 @@ pub struct ChatExporter<'a> {
     peers_tried: std::collections::HashSet<String>,
     /// **The chat being exported right now, and its own database.**
     ///
-    /// One file per chat — see [`Self::open_archive`]. It was one store for the
+    /// One file per chat — see [`open_archive`]. It was one store for the
     /// whole queue, opened once in `new`, which meant a queue of six chats put
     /// six people's conversations into a single file in the folder most likely
     /// to be copied to a drive.
@@ -624,64 +624,6 @@ impl<'a> ChatExporter<'a> {
         self.archive_at = Some(path);
     }
 
-    /// Open this chat's database, and **be sure it is this chat's**.
-    ///
-    /// The name is the chat's, sanitised the same way a folder's is, so a
-    /// re-run finds the file the last run wrote and syncs into it. That is the
-    /// whole point of Database mode, and it is why this is not
-    /// [`unique_dir`]: a `(2)` suffix handed out on a clash would make every
-    /// run a fresh archive.
-    ///
-    /// Which leaves the clash itself. Two chats can sanitise to one name, and
-    /// putting both in one file is precisely what one-database-per-chat exists
-    /// to stop. So the plain name is tried first and kept unless the file turns
-    /// out to hold somebody else, in which case the chat id joins the name —
-    /// and it goes on joining it on every later run, because the file it
-    /// collided with still holds that other chat.
-    ///
-    /// **An unopenable database fails this chat, not the queue.** It used to
-    /// fail the queue, and that was right when there was one file: every later
-    /// chat would have hit the same locked file. With a file each, the next
-    /// chat has every chance of working.
-    ///
-    /// **Each database has a folder of its own**, `<chat>/<chat>.sqlite`, so
-    /// the `-wal` and `-shm` files SQLite keeps beside it stay with it rather
-    /// than scattering across `Exports/`.
-    async fn open_archive(
-        &self,
-        chat: &ChatInfo,
-    ) -> Result<(tgx_archive::Store, PathBuf), ExportError> {
-        if let Some(path) = &self.archive_at {
-            let store = tgx_archive::Store::open(path).await?;
-            // The caller found this file holding this chat; one holding
-            // another is a mix-up, and writing into it is the one thing a
-            // file per chat exists to prevent.
-            if store.holds_another_chat(chat.id).await? {
-                return Err(ExportError::Settings(format!(
-                    "{} holds another chat, not {} (id {})",
-                    path.display(),
-                    chat.title,
-                    chat.id
-                )));
-            }
-            return Ok((store, path.clone()));
-        }
-        let dir = Path::new(&self.settings.output_dir);
-        let base = tgx_media::topics::sanitize_component(&chat.title, "chat");
-        let path = archive_path(dir, &base)?;
-        let store = tgx_archive::Store::open(&path).await?;
-        if !store.holds_another_chat(chat.id).await? {
-            return Ok((store, path));
-        }
-        // Dropped before the second is opened: two live connections to two
-        // files is not a problem, but leaving one open on a file this chat has
-        // decided not to use is a handle nothing will close until the next
-        // chat replaces it.
-        drop(store);
-        let distinct = archive_path(dir, &format!("{base} ({})", chat.id))?;
-        Ok((tgx_archive::Store::open(&distinct).await?, distinct))
-    }
-
     /// Export one chat into `root`.
     ///
     /// `chat` is a **parameter**, not a field: with `chat_concurrency` above 1
@@ -689,11 +631,18 @@ impl<'a> ChatExporter<'a> {
     /// on asking Telegram about the wrong conversation and writing the answers
     /// into its own export as fact.
     ///
-    /// **`cancel` is honoured, not obeyed instantly.** Every exit it takes goes
-    /// through [`Self::close_all`] before returning [`ExportError::Cancelled`],
-    /// because the JSON is streamed: an output dropped at the point of the
-    /// click leaves a *zero-byte* file, which is worse than the partial export
-    /// the user asked to keep.
+    /// **`cancel` is honoured, not obeyed instantly.** Every exit, cancelled or
+    /// failed or finished, comes back through here to [`Self::close_all`]
+    /// before it returns, because the JSON is streamed: an output dropped at
+    /// the point of the click leaves a *zero-byte* file, which is worse than
+    /// the partial export the user asked to keep.
+    ///
+    /// **One exit, not nine.** `close_all` was called by hand at every return
+    /// of the body, nine copies of the same nine arguments, and every `?`
+    /// between them skipped it: a `SQLITE_BUSY` on one `put_blob` rolled back
+    /// every message merged since the last commit and the whole media ingest,
+    /// and closed no topic. The body now only returns, and this drains whatever
+    /// it returned.
     pub async fn run(
         &mut self,
         chat: &ChatInfo,
@@ -703,12 +652,193 @@ impl<'a> ChatExporter<'a> {
         progress: ProgressFn<'_>,
         cancel: &Cancel,
     ) -> Result<ExportResult, ExportError> {
+        let mut state = RunState {
+            sinks: HashMap::new(),
+            result: ExportResult {
+                root: root.map(Path::to_path_buf),
+                ..Default::default()
+            },
+            split: self.settings.split_topics && chat.is_forum,
+            opened: false,
+        };
+        let body = self
+            .export(chat, peer, topics, root, progress, cancel, &mut state)
+            .await;
+        // Nothing to drain before the outputs exist: no file is open and no
+        // batch has begun, and an index written now would list no topics.
+        let body = match body {
+            Err(e) if !state.opened && state.sinks.is_empty() => return Err(e),
+            body => body,
+        };
+        let committed = self
+            .close_all(&mut state, root, chat, topics, progress)
+            .await;
+        let finished = match body {
+            Ok(finished) => finished,
+            Err(e) => {
+                // Reported, not returned: the run is already failing with an
+                // error of its own, and that one matters more.
+                if let Err(c) = committed {
+                    progress(Progress::Log(format!("database: committing: {c}")));
+                }
+                return Err(e);
+            }
+        };
+        // **A batch that did not commit is a run that did not finish.** This
+        // was only logged, and the run then reported a clean finish with
+        // counts that included every row the dropped transaction took with it,
+        // and wrote the run row that says the batch above it landed.
+        committed?;
+        // After `close_all`, which commits: the run row is the record that the
+        // batch above it landed, so writing it inside the transaction it
+        // describes would make it disappear with everything else on a crash.
+        let result = &state.result;
+        if let (Some(store), Some(run_id)) = (&self.store, finished.run_id) {
+            store
+                .finish_run(
+                    run_id,
+                    result.db_new,
+                    result.db_changed,
+                    result.db_deleted,
+                    result.db_blobs,
+                    result.reached_end,
+                    finished.seen_at,
+                )
+                .await?;
+        }
+        progress(Progress::Messages {
+            chat_id: chat.id,
+            done: finished.done,
+            total: finished.reported_total,
+        });
+        Ok(state.result)
+    }
+}
+
+/// What every exit from [`ChatExporter::run`] has to close, kept outside the
+/// body so the body can return from anywhere.
+struct RunState {
+    sinks: HashMap<i64, TopicSink>,
+    result: ExportResult,
+    split: bool,
+    /// Every sink exists. Before this — and with no sink yet — there is
+    /// nothing to close and no batch to commit, and `close_all` would write an
+    /// index of no topics.
+    opened: bool,
+}
+
+/// What the run row and the last progress report need from a body that
+/// reached its end.
+struct Finished {
+    run_id: Option<i64>,
+    seen_at: i64,
+    done: usize,
+    reported_total: i64,
+}
+
+/// A database-only run's scratch tree, removed when this is dropped.
+///
+/// **On every exit, not only the one that falls through.** The removal sat at
+/// the end of the media pass under a comment saying it ran whatever happened,
+/// and a Stop or an error mid-pass left every file downloaded so far — someone's
+/// photos, in `Exports/`, under a name that looks like a mistake — until that
+/// chat next synced to the end, which for a chat never synced again is never.
+struct ScratchTree(PathBuf);
+
+impl Drop for ScratchTree {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Open this chat's database, and **be sure it is this chat's**.
+///
+/// `archive_at` is a file the caller already found — see
+/// [`ChatExporter::sync_into`]. A free function over the two settings it reads,
+/// so the clash rule below can be tested without a Telegram client.
+///
+/// The name is the chat's, sanitised the same way a folder's is, so a
+/// re-run finds the file the last run wrote and syncs into it. That is the
+/// whole point of Database mode, and it is why this is not
+/// [`unique_dir`]: a `(2)` suffix handed out on a clash would make every
+/// run a fresh archive.
+///
+/// Which leaves the clash itself. Two chats can sanitise to one name, and
+/// putting both in one file is precisely what one-database-per-chat exists
+/// to stop. So the plain name is tried first and kept unless the file turns
+/// out to hold somebody else, in which case the chat id joins the name —
+/// and it goes on joining it on every later run, because the file it
+/// collided with still holds that other chat.
+///
+/// **An unopenable database fails this chat, not the queue.** It used to
+/// fail the queue, and that was right when there was one file: every later
+/// chat would have hit the same locked file. With a file each, the next
+/// chat has every chance of working.
+///
+/// **Each database has a folder of its own**, `<chat>/<chat>.sqlite`, so
+/// the `-wal` and `-shm` files SQLite keeps beside it stay with it rather
+/// than scattering across `Exports/`.
+async fn open_archive(
+    output_dir: &Path,
+    archive_at: Option<&Path>,
+    chat: &ChatInfo,
+) -> Result<(tgx_archive::Store, PathBuf), ExportError> {
+    if let Some(path) = archive_at {
+        let store = tgx_archive::Store::open(path).await?;
+        // The caller found this file holding this chat; one holding
+        // another is a mix-up, and writing into it is the one thing a
+        // file per chat exists to prevent.
+        if store.holds_another_chat(chat.id).await? {
+            return Err(ExportError::Settings(format!(
+                "{} holds another chat, not {} (id {})",
+                path.display(),
+                chat.title,
+                chat.id
+            )));
+        }
+        return Ok((store, path.to_path_buf()));
+    }
+    let base = tgx_media::topics::sanitize_component(&chat.title, "chat");
+    let path = archive_path(output_dir, &base)?;
+    let store = tgx_archive::Store::open(&path).await?;
+    if !store.holds_another_chat(chat.id).await? {
+        return Ok((store, path));
+    }
+    // Dropped before the second is opened: two live connections to two
+    // files is not a problem, but leaving one open on a file this chat has
+    // decided not to use is a handle nothing will close until the next
+    // chat replaces it.
+    drop(store);
+    let distinct = archive_path(output_dir, &format!("{base} ({})", chat.id))?;
+    Ok((tgx_archive::Store::open(&distinct).await?, distinct))
+}
+
+impl<'a> ChatExporter<'a> {
+    /// The body of [`Self::run`]: everything but the closing.
+    ///
+    /// **It returns from anywhere and closes nothing.** What it opened is in
+    /// `state`, and `run` drains that whatever comes back — so a `?` here is
+    /// an exit like any other, not one that skips the commit.
+    #[allow(clippy::too_many_arguments)]
+    async fn export(
+        &mut self,
+        chat: &ChatInfo,
+        peer: PeerRef,
+        topics: &[Topic],
+        root: Option<&Path>,
+        progress: ProgressFn<'_>,
+        cancel: &Cancel,
+        state: &mut RunState,
+    ) -> Result<Finished, ExportError> {
         let started = std::time::Instant::now();
         let detail = detail_wanted();
-        let mut result = ExportResult {
-            root: root.map(Path::to_path_buf),
-            ..Default::default()
-        };
+        let RunState {
+            sinks,
+            result,
+            split,
+            opened,
+        } = state;
+        let split = *split;
         // **This chat's tally, on a book that outlives it.** The names mean the
         // same thing in every chat, so the book is kept for the whole queue;
         // who `own_names` touched is this chat's alone. Left running, the
@@ -738,9 +868,14 @@ impl<'a> ChatExporter<'a> {
         // **This chat's own file, opened here rather than once per queue.**
         // The assignment drops the previous chat's connection, so exactly one
         // is open at a time and the file the last chat wrote is released before
-        // this one starts. See [`Self::open_archive`].
+        // this one starts. See [`open_archive`].
         self.store = if db {
-            let (store, path) = self.open_archive(chat).await?;
+            let (store, path) = open_archive(
+                Path::new(&self.settings.output_dir),
+                self.archive_at.as_deref(),
+                chat,
+            )
+            .await?;
             result.database = Some(path);
             Some(store)
         } else {
@@ -836,7 +971,6 @@ impl<'a> ChatExporter<'a> {
         let total = known.unwrap_or(0);
         result.expected = total;
 
-        let split = self.settings.split_topics && chat.is_forum;
         // **"Folder" only where one is written.** A database-only run records
         // each message's topic and makes no folder at all, and these lines
         // said "one folder each" on every chat of a twelve-chat queue.
@@ -874,7 +1008,6 @@ impl<'a> ChatExporter<'a> {
                 .into(),
             ));
         }
-        let mut sinks: HashMap<i64, TopicSink> = HashMap::new();
         // `chat.public`, not `true`. Hardcoding it made the `false` arm of
         // `export_type` unreachable in production, so every export claimed
         // `public_supergroup` — including the invite-link-only groups this tool
@@ -887,16 +1020,24 @@ impl<'a> ChatExporter<'a> {
         // list. Both switches defaulted to on and were read by nothing, so an
         // export recorded nothing at all about the group it came from.
         let mut tally = Enrichment::default();
-        let mut chat_head =
-            enrich::fetch_chat_info(self.client, peer, self.settings, &mut tally, |seconds| {
-                progress(Progress::FloodWait { seconds })
-            })
-            .await;
-        let invites =
-            enrich::fetch_invites(self.client, peer, self.settings, &mut tally, |seconds| {
-                progress(Progress::FloodWait { seconds })
-            })
-            .await;
+        let mut chat_head = enrich::fetch_chat_info(
+            self.client,
+            peer,
+            self.settings,
+            &mut tally,
+            cancel,
+            |seconds| progress(Progress::FloodWait { seconds }),
+        )
+        .await;
+        let invites = enrich::fetch_invites(
+            self.client,
+            peer,
+            self.settings,
+            &mut tally,
+            cancel,
+            |seconds| progress(Progress::FloodWait { seconds }),
+        )
+        .await;
         if !invites.is_empty() {
             chat_head.insert("invite_links".into(), Value::Array(invites.clone()));
         }
@@ -924,6 +1065,7 @@ impl<'a> ChatExporter<'a> {
                 peer,
                 self.settings,
                 &mut tally,
+                cancel,
                 |seconds| progress(Progress::FloodWait { seconds }),
             )
             .await;
@@ -1000,6 +1142,8 @@ impl<'a> ChatExporter<'a> {
         let scratch = Path::new(&self.settings.output_dir)
             .join(".tgx-scratch")
             .join(chat.id.to_string());
+        // Removed on every way out of this function — see `ScratchTree`.
+        let scratch_tree = (!files).then(|| ScratchTree(scratch.clone()));
 
         if split {
             for t in topics {
@@ -1083,6 +1227,7 @@ impl<'a> ChatExporter<'a> {
                 },
             );
         }
+        *opened = true;
 
         // --- how much of the history this run reads --------------------------
         //
@@ -1094,9 +1239,13 @@ impl<'a> ChatExporter<'a> {
         // for edits and deletions.
         let mut run_id: Option<i64> = None;
         let mut start: i64 = 0;
+        // Nothing of this chat archived before the run, so nothing for a
+        // re-read to merge with — see the merge in the read loop.
+        let mut first_sync = false;
         if let Some(store) = &self.store {
             let (stored_all, stored_live) = store.message_count(chat.id).await?;
             result.db_archived = stored_all as usize;
+            first_sync = stored_all == 0;
             // A first sync has nothing to window against, so it reads
             // everything — otherwise a fresh archive would store the newest 500
             // messages of a chat and call itself done.
@@ -1225,18 +1374,6 @@ impl<'a> ChatExporter<'a> {
             // two-minute wait the loop comes back to the top of `'resume`, not
             // to the top of a message.
             if cancel.is_cancelled() {
-                Self::close_all(
-                    &mut sinks,
-                    root,
-                    chat,
-                    topics,
-                    &self.names,
-                    split,
-                    &mut result,
-                    self.store.as_ref(),
-                    progress,
-                )
-                .await;
                 return Err(ExportError::Cancelled);
             }
 
@@ -1263,18 +1400,6 @@ impl<'a> ChatExporter<'a> {
                 // goes; `result.complete()` is what tells it apart from a whole
                 // one.
                 if cancel.is_cancelled() {
-                    Self::close_all(
-                        &mut sinks,
-                        root,
-                        chat,
-                        topics,
-                        &self.names,
-                        split,
-                        &mut result,
-                        self.store.as_ref(),
-                        progress,
-                    )
-                    .await;
                     return Err(ExportError::Cancelled);
                 }
                 match iter.next().await {
@@ -1323,7 +1448,9 @@ impl<'a> ChatExporter<'a> {
                         // the three-name reaction sample and a `min` poll —
                         // so a converter that had already run would have
                         // written the short version.
-                        let extra = self.enrich_message(&msg, peer, &mut tally, progress).await;
+                        let extra = self
+                            .enrich_message(&msg, peer, &mut tally, progress, cancel)
+                            .await;
                         let mut db_verdict = None;
                         if let Some(sink) = sinks.get_mut(&key) {
                             let before = sink.jobs.len();
@@ -1339,7 +1466,7 @@ impl<'a> ChatExporter<'a> {
                             // --- the database -------------------------------
                             if let Some(store) = &self.store {
                                 let id = msg.id() as i64;
-                                seen.insert(id);
+                                let first_sight = seen.insert(id);
                                 // `_p` is presentation for the HTML writer and
                                 // nothing renders from the database, so it is
                                 // stripped here for the same reason
@@ -1349,7 +1476,19 @@ impl<'a> ChatExporter<'a> {
                                     .filter(|(k, _)| k.as_str() != "_p")
                                     .map(|(k, v)| (k.clone(), v.clone()))
                                     .collect();
-                                let merged = match store.get(chat.id, id).await? {
+                                // **No lookup on a first sync.** An archive
+                                // that held nothing of this chat when the run
+                                // began holds only what this run merged, so the
+                                // stored payload was asked for 450,000 times to
+                                // be told `None`. A message the walk meets twice
+                                // — a resume re-reading its cursor — is the one
+                                // case it has, and `seen` already knows it.
+                                let stored = if first_sync && first_sight {
+                                    None
+                                } else {
+                                    store.get(chat.id, id).await?
+                                };
+                                let merged = match stored {
                                     Some(old) => tgx_archive::merge_volatile(&old.payload, &body),
                                     None => body,
                                 };
@@ -1384,31 +1523,15 @@ impl<'a> ChatExporter<'a> {
                                     db_verdict,
                                 )));
                             }
-                            // Through `close_all`, not `?`. This was the one
-                            // error return in `run` that did not drain: `Drop`
-                            // keeps the JSON valid, but the index
-                            // (`export_results.html`) is never written and the
-                            // empty-folder pruning never runs — which
-                            // reintroduces exactly the dead back-link a
-                            // previous audit closed. Every other exit here goes
-                            // through `close_all`, and the doc on this function
-                            // says every one does.
+                            // A `?` is safe here only because `run` drains
+                            // whatever this returns. When every exit closed by
+                            // hand, this was the one that did not: `Drop` kept
+                            // the JSON valid, but the index
+                            // (`export_results.html`) was never written and the
+                            // empty-folder pruning never ran — the dead
+                            // back-link a previous audit closed.
                             if let Some(out) = sink.output.as_mut() {
-                                if let Err(e) = out.add(&payload) {
-                                    Self::close_all(
-                                        &mut sinks,
-                                        root,
-                                        chat,
-                                        topics,
-                                        &self.names,
-                                        split,
-                                        &mut result,
-                                        self.store.as_ref(),
-                                        progress,
-                                    )
-                                    .await;
-                                    return Err(e.into());
-                                }
+                                out.add(&payload)?;
                             }
 
                             // **In a database-only run the only reason to fetch
@@ -1456,20 +1579,8 @@ impl<'a> ChatExporter<'a> {
                         EnrichError::Transient(d) => {
                             stalled += 1;
                             if stalled >= MAX_STALLED_WAITS {
-                                // Close what we have before giving up, or the
-                                // buffered writes are lost entirely.
-                                Self::close_all(
-                                    &mut sinks,
-                                    root,
-                                    chat,
-                                    topics,
-                                    &self.names,
-                                    split,
-                                    &mut result,
-                                    self.store.as_ref(),
-                                    progress,
-                                )
-                                .await;
+                                // `run` closes what we have before giving up,
+                                // or the buffered writes would be lost.
                                 return Err(ExportError::Stalled { waits: stalled });
                             }
                             progress(Progress::FloodWait {
@@ -1486,18 +1597,6 @@ impl<'a> ChatExporter<'a> {
                         EnrichError::Unavailable(name) => {
                             stalled += 1;
                             if stalled >= MAX_STALLED_WAITS {
-                                Self::close_all(
-                                    &mut sinks,
-                                    root,
-                                    chat,
-                                    topics,
-                                    &self.names,
-                                    split,
-                                    &mut result,
-                                    self.store.as_ref(),
-                                    progress,
-                                )
-                                .await;
                                 return Err(ExportError::Invocation(format!(
                                     "Telegram kept failing on its side ({name}) — \
                                      {stalled} times with no message in between"
@@ -1510,21 +1609,7 @@ impl<'a> ChatExporter<'a> {
                             sleep_in_slices_until(UNAVAILABLE_PAUSE, cancel).await;
                             continue 'resume;
                         }
-                        other => {
-                            Self::close_all(
-                                &mut sinks,
-                                root,
-                                chat,
-                                topics,
-                                &self.names,
-                                split,
-                                &mut result,
-                                self.store.as_ref(),
-                                progress,
-                            )
-                            .await;
-                            return Err(ExportError::Invocation(other.to_string()));
-                        }
+                        other => return Err(ExportError::Invocation(other.to_string())),
                     },
                 }
             }
@@ -1569,9 +1654,14 @@ impl<'a> ChatExporter<'a> {
         // real. Asking Telegram for a list nothing can record is a request
         // spent on nothing. Recorded in ROADMAP as still open.
         let queued = if files {
-            enrich::fetch_scheduled(self.client, peer, self.settings, &mut tally, |seconds| {
-                progress(Progress::FloodWait { seconds })
-            })
+            enrich::fetch_scheduled(
+                self.client,
+                peer,
+                self.settings,
+                &mut tally,
+                cancel,
+                |seconds| progress(Progress::FloodWait { seconds }),
+            )
             .await
         } else {
             Vec::new()
@@ -1640,23 +1730,10 @@ impl<'a> ChatExporter<'a> {
         // already whole — so this returns the JSON and HTML rather than
         // throwing them away for the sake of the media nobody waited for.
         if cancel.is_cancelled() {
-            Self::close_all(
-                &mut sinks,
-                root,
-                chat,
-                topics,
-                &self.names,
-                split,
-                &mut result,
-                self.store.as_ref(),
-                progress,
-            )
-            .await;
             return Err(ExportError::Cancelled);
         }
-        // Keyed rather than `values_mut`: the cancel path below has to hand the
-        // whole map to `close_all`, which it cannot do while an iterator holds
-        // it borrowed.
+        // In topic order, so the transcript names the folders the same way on
+        // every run.
         let media_order: Vec<i64> = {
             let mut ids: Vec<i64> = sinks.keys().copied().collect();
             ids.sort();
@@ -1664,7 +1741,7 @@ impl<'a> ChatExporter<'a> {
         };
         for id in media_order {
             // The folder's name and root are lifted out of the map so the
-            // borrow ends here: the cancel check below needs the map back.
+            // borrow ends here.
             let Some((dir, title, jobs)) = sinks.get_mut(&id).map(|sink| {
                 (
                     sink.dir.clone(),
@@ -1682,18 +1759,6 @@ impl<'a> ChatExporter<'a> {
             // interrupting it mid-flight would leave part-written files that
             // the HTML already links to.
             if cancel.is_cancelled() {
-                Self::close_all(
-                    &mut sinks,
-                    root,
-                    chat,
-                    topics,
-                    &self.names,
-                    split,
-                    &mut result,
-                    self.store.as_ref(),
-                    progress,
-                )
-                .await;
                 return Err(ExportError::Cancelled);
             }
             let queued = jobs.len();
@@ -1818,15 +1883,15 @@ impl<'a> ChatExporter<'a> {
 
             // --- the bytes into the database ---------------------------------
             if let Some(store) = &self.store {
+                // Once per batch, not once per job per missing file.
+                let missing: HashSet<&str> =
+                    tally.missing.iter().map(|m| m.path.as_str()).collect();
                 for item in &ingest {
                     // Nothing to store, or nothing that arrived. A job the pool
                     // could not fetch is in `missing`, and reading its `dest`
                     // would either fail or — worse — pick up a stale file from
                     // an earlier export into the same folder.
-                    if item.file_id == 0
-                        || item.inline
-                        || tally.missing.iter().any(|m| m.path == item.dest)
-                    {
+                    if item.file_id == 0 || item.inline || missing.contains(item.dest.as_str()) {
                         continue;
                     }
                     // Already archived, by an earlier run or an earlier message
@@ -1834,27 +1899,43 @@ impl<'a> ChatExporter<'a> {
                     // file the folder wrote once, and re-reading them off disk
                     // to hand libsql something it would ignore is pure I/O.
                     if !store.has_blob(item.file_id, item.kind).await? {
-                        let bytes = match std::fs::read(dir.join(&item.dest)) {
-                            Ok(b) => b,
-                            Err(e) => {
-                                progress(Progress::Log(format!(
-                                    "database: {} could not be read back to archive it: {e}",
-                                    item.dest
-                                )));
-                                continue;
+                        let path = dir.join(&item.dest);
+                        // **The size before the bytes.** A 3 GB video under a
+                        // raised size limit was read whole into memory, on the
+                        // runtime's thread, for `put_blob` to refuse it.
+                        let size = tokio::fs::metadata(&path).await.map(|m| m.len() as i64);
+                        let stored = match size {
+                            Ok(size) if size > tgx_archive::store::MAX_BLOB => {
+                                Err(tgx_archive::Error::TooLarge {
+                                    file_id: item.file_id,
+                                    size,
+                                })
+                            }
+                            _ => {
+                                let bytes = match tokio::fs::read(&path).await {
+                                    Ok(b) => b,
+                                    Err(e) => {
+                                        progress(Progress::Log(format!(
+                                            "database: {} could not be read back to archive \
+                                             it: {e}",
+                                            item.dest
+                                        )));
+                                        continue;
+                                    }
+                                };
+                                store
+                                    .put_blob(
+                                        item.file_id,
+                                        item.kind,
+                                        &item.mime_type,
+                                        item.file_name.as_deref(),
+                                        &bytes,
+                                        seen_at,
+                                    )
+                                    .await
                             }
                         };
-                        match store
-                            .put_blob(
-                                item.file_id,
-                                item.kind,
-                                &item.mime_type,
-                                item.file_name.as_deref(),
-                                &bytes,
-                                seen_at,
-                            )
-                            .await
-                        {
+                        match stored {
                             Ok(()) => result.db_blobs += 1,
                             // Not fatal: the folder still has it, and the
                             // `media` row below still records that the message
@@ -1875,7 +1956,7 @@ impl<'a> ChatExporter<'a> {
                             Err(e) => return Err(e.into()),
                         }
                         if let Some(thumb) = &item.thumb_dest {
-                            if let Ok(b) = std::fs::read(dir.join(thumb)) {
+                            if let Ok(b) = tokio::fs::read(dir.join(thumb)).await {
                                 store.put_thumb(item.file_id, item.kind, &b).await?;
                             }
                         }
@@ -1894,13 +1975,10 @@ impl<'a> ChatExporter<'a> {
             }
         }
 
-        // **The scratch tree goes, whatever happened.** It only exists in a
-        // database-only run, the bytes it held are in the archive by now, and
-        // leaving it behind puts a folder of somebody's photos next to their
-        // exports under a name that looks like a mistake.
-        if !files {
-            let _ = std::fs::remove_dir_all(&scratch);
-        }
+        // **The scratch tree goes here on the way through**, the bytes it held
+        // being in the archive by now; every other way out drops the guard
+        // where it returns.
+        drop(scratch_tree);
 
         // --- profile pictures, into the database only -----------------------
         // After the read, because the senders are only known by then; Desktop's
@@ -1909,7 +1987,7 @@ impl<'a> ChatExporter<'a> {
             if self.settings.profile_photos != crate::config::USERPICS_OFF && !cancel.is_cancelled()
             {
                 let pics_started = std::time::Instant::now();
-                // One transaction for the lot; `close_all` below commits it.
+                // One transaction for the lot; `close_all` commits it.
                 store.begin_batch().await?;
                 let t = crate::userpics::sync(
                     self.client,
@@ -1935,40 +2013,12 @@ impl<'a> ChatExporter<'a> {
             }
         }
 
-        Self::close_all(
-            &mut sinks,
-            root,
-            chat,
-            topics,
-            &self.names,
-            split,
-            &mut result,
-            self.store.as_ref(),
-            progress,
-        )
-        .await;
-        // After `close_all`, which commits: the run row is the record that the
-        // batch above it landed, so writing it inside the transaction it
-        // describes would make it disappear with everything else on a crash.
-        if let (Some(store), Some(run_id)) = (&self.store, run_id) {
-            store
-                .finish_run(
-                    run_id,
-                    result.db_new,
-                    result.db_changed,
-                    result.db_deleted,
-                    result.db_blobs,
-                    result.reached_end,
-                    seen_at,
-                )
-                .await?;
-        }
-        progress(Progress::Messages {
-            chat_id: chat.id,
+        Ok(Finished {
+            run_id,
+            seen_at,
             done,
-            total: reported_total,
-        });
-        Ok(result)
+            reported_total,
+        })
     }
 }
 
@@ -2035,14 +2085,6 @@ pub async fn sleep_in_slices_until(total: std::time::Duration, cancel: &Cancel) 
         tokio::time::sleep(step).await;
         left -= step;
     }
-}
-
-/// Sleep in one-second slices with nothing able to interrupt it.
-///
-/// A thin wrapper for the callers that hold no signal — see
-/// [`sleep_in_slices_until`] for why the slicing exists.
-pub async fn sleep_in_slices(total: std::time::Duration) {
-    sleep_in_slices_until(total, &Cancel::new()).await;
 }
 
 /// Where the database named `name` lives: `<parent>/<name>/<name>.sqlite`.
@@ -2796,13 +2838,96 @@ mod tests {
         let _ = std::fs::remove_dir_all(&parent);
     }
 
+    fn listed(id: i64, title: &str) -> ChatInfo {
+        ChatInfo {
+            id,
+            title: title.into(),
+            kind: crate::client::ChatKind::Supergroup,
+            last_activity: 0,
+            is_forum: false,
+            public: false,
+            message_count: None,
+            migration: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn two_chats_with_one_name_get_a_database_each() {
+        let parent = std::env::temp_dir().join(format!("tgx-clash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        // The first chat takes the plain name and records itself in it.
+        let (first, path) = open_archive(&parent, None, &listed(5, "Admini"))
+            .await
+            .unwrap();
+        assert_eq!(path, parent.join("Admini").join("Admini.sqlite"));
+        first
+            .upsert_chat(5, "Admini", "private_group", 1)
+            .await
+            .unwrap();
+        drop(first);
+        // It finds the same file on the next run.
+        let (_, again) = open_archive(&parent, None, &listed(5, "Admini"))
+            .await
+            .unwrap();
+        assert_eq!(again, path);
+        // A second chat that sanitises to the same name is kept apart, by id —
+        // and on every later run, because the plain name still holds the first.
+        for _ in 0..2 {
+            let (_, other) = open_archive(&parent, None, &listed(9, "Admini"))
+                .await
+                .unwrap();
+            assert_eq!(
+                other,
+                parent.join("Admini (9)").join("Admini (9).sqlite"),
+                "one database per chat"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[tokio::test]
+    async fn a_database_the_caller_found_must_hold_this_chat() {
+        let parent = std::env::temp_dir().join(format!("tgx-found-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        let path = archive_path(&parent, "Mum").unwrap();
+        let store = tgx_archive::Store::open(&path).await.unwrap();
+        store
+            .upsert_chat(8, "Mum", "personal_chat", 1)
+            .await
+            .unwrap();
+        drop(store);
+        let (_, kept) = open_archive(&parent, Some(&path), &listed(8, "Renamed"))
+            .await
+            .unwrap();
+        assert_eq!(kept, path, "found by what is inside it, not by the title");
+        let other = open_archive(&parent, Some(&path), &listed(9, "Mum")).await;
+        assert!(matches!(other, Err(ExportError::Settings(_))));
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn the_scratch_tree_goes_however_the_run_ends() {
+        let parent = std::env::temp_dir().join(format!("tgx-scratch-{}", std::process::id()));
+        let tree = parent.join(".tgx-scratch").join("7");
+        std::fs::create_dir_all(tree.join("0").join("photos")).unwrap();
+        std::fs::write(tree.join("0").join("photos").join("photo_1.jpg"), b"x").unwrap();
+        // An early return, a `?` or a cancel: all of them drop the guard.
+        let leave = |guard: ScratchTree| -> Result<(), ExportError> {
+            let _guard = guard;
+            Err(ExportError::Cancelled)
+        };
+        assert!(leave(ScratchTree(tree.clone())).is_err());
+        assert!(!tree.exists(), "somebody's photos left in Exports/");
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_wait_sleeps_in_slices_not_one_block() {
         // With a paused clock, a flat sleep and a sliced one both return
         // instantly; what this pins is that the total is right and the
         // function yields repeatedly rather than once.
         let start = tokio::time::Instant::now();
-        sleep_in_slices(std::time::Duration::from_secs(120)).await;
+        sleep_in_slices_until(std::time::Duration::from_secs(120), &Cancel::new()).await;
         assert_eq!(start.elapsed(), std::time::Duration::from_secs(120));
     }
 

@@ -18,12 +18,14 @@
 //! refusal is not; see [`crate::error`] for why conflating them is the most
 //! damaging bug this code can have.
 
+use crate::cancel::Cancel;
 use crate::config::Settings;
 use crate::error::{classify, EnrichError};
 use grammers_client::session::types::PeerRef;
 use grammers_client::Client;
 use grammers_tl_types as tl;
 use serde_json::{json, Map, Value};
+use std::collections::HashSet;
 use std::time::Duration;
 
 /// How long a single enrichment may wait out a rate limit.
@@ -64,9 +66,15 @@ pub struct Enrichment {
 /// up quietly is correct — also catches a rate limit, which lands in the same
 /// net. That is unrepresentable here: `Transient` and `Refused` are different
 /// variants.
+///
+/// **The wait listens to Stop.** It slept on a token nothing could cancel, so a
+/// `FLOOD_WAIT_110` on the roster held a click on Stop for the whole 110 s, and
+/// a second one for as long again, before the first message was read. A cancel
+/// costs the data and is not counted as a deferral: the user chose it.
 pub async fn guarded<T, F, Fut>(
     tally: &mut Enrichment,
     mut on_wait: impl FnMut(u64),
+    cancel: &Cancel,
     mut call: F,
 ) -> Option<T>
 where
@@ -74,13 +82,18 @@ where
     Fut: std::future::Future<Output = Result<T, EnrichError>>,
 {
     for attempt in 0..2 {
+        // Before the first request as well as after the wait, so a stopped
+        // export spends no request on data it is not going to stay for.
+        if cancel.is_cancelled() {
+            return None;
+        }
         tally.requests += 1;
         match call().await {
             Ok(value) => return Some(value),
             Err(e) => match e.retry_after() {
                 Some(wait) if wait <= ENRICH_MAX_WAIT && attempt == 0 => {
                     on_wait(wait.as_secs());
-                    crate::engine::sleep_in_slices(wait).await;
+                    crate::engine::sleep_in_slices_until(wait, cancel).await;
                 }
                 // Past the cap, or a second rate limit: the data was there and
                 // we did not get it. Count it.
@@ -102,6 +115,26 @@ where
         }
     }
     None
+}
+
+/// [`guarded`] around one plain request: send it, and read the answer in this
+/// crate's vocabulary.
+///
+/// **One copy of the policy.** The clone-invoke-classify closure was written
+/// out by hand at seven call sites, so a change to how an optional request is
+/// guarded — the Stop above was one — had seven places to be missed in, and a
+/// site that missed it is an unguarded request again.
+pub async fn guarded_invoke<R: tl::RemoteCall>(
+    client: &Client,
+    request: &R,
+    tally: &mut Enrichment,
+    on_wait: impl FnMut(u64),
+    cancel: &Cancel,
+) -> Option<R::Return> {
+    guarded(tally, on_wait, cancel, move || async move {
+        client.invoke(request).await.map_err(|e| classify(&e))
+    })
+    .await
 }
 
 /// The member list, and whether it is the whole of it.
@@ -153,11 +186,20 @@ impl Roster {
 }
 
 /// Fetch the member roster, paged.
+///
+/// **Paged by what came back, and each person once.** The offset moved by a
+/// flat [`PARTICIPANT_PAGE`] whatever the page held, so a short page skipped
+/// the members between its end and the next offset; and a user listed on two
+/// pages — `users` carries everyone the participant objects mention, inviters
+/// included — was a member twice and pushed the count toward `count` early,
+/// ending the walk with a roster that called itself complete. Neither has been
+/// seen on a live roster; both are what the response's shape allows.
 pub async fn fetch_participants(
     client: &Client,
     peer: PeerRef,
     settings: &Settings,
     tally: &mut Enrichment,
+    cancel: &Cancel,
     mut on_wait: impl FnMut(u64),
 ) -> Roster {
     let mut roster = Roster {
@@ -174,10 +216,11 @@ pub async fn fetch_participants(
         // group with no members. Its members ride along with
         // `messages.getFullChat` instead, which the chat-details pass already
         // makes; a group small enough to still be a basic group is never paged.
-        return basic_group_roster(client, peer, settings.own_names, tally, on_wait).await;
+        return basic_group_roster(client, peer, settings.own_names, tally, cancel, on_wait).await;
     };
 
     let mut offset = 0i32;
+    let mut listed: HashSet<i64> = HashSet::new();
     loop {
         let request = tl::functions::channels::GetParticipants {
             channel: channel.clone(),
@@ -186,12 +229,7 @@ pub async fn fetch_participants(
             limit: PARTICIPANT_PAGE,
             hash: 0,
         };
-        let page = guarded(tally, &mut on_wait, || {
-            let client = client.clone();
-            let request = request.clone();
-            async move { client.invoke(&request).await.map_err(|e| classify(&e)) }
-        })
-        .await;
+        let page = guarded_invoke(client, &request, tally, &mut on_wait, cancel).await;
 
         let Some(page) = page else {
             // We did not finish. Say so rather than returning a short list
@@ -208,22 +246,33 @@ pub async fn fetch_participants(
         let before = roster.members.len();
         for user in &page.users {
             if let tl::enums::User::User(u) = user {
-                add_member(&mut roster, u, settings.own_names);
+                if listed.insert(u.id) {
+                    add_member(&mut roster, u, settings.own_names);
+                }
             }
         }
         let gained = roster.members.len() - before;
-        offset += PARTICIPANT_PAGE;
+        let returned = page.participants.len();
+        offset = offset.saturating_add(returned as i32);
 
         if settings.member_limit > 0 && roster.members.len() as i64 >= settings.member_limit {
             roster.members.truncate(settings.member_limit as usize);
             roster.capped = true;
             return roster;
         }
-        // No progress means the server has stopped serving the listing.
-        if gained == 0 || roster.members.len() as i32 >= page.count {
+        if roster_read(returned, gained, roster.members.len(), page.count) {
             return roster;
         }
     }
+}
+
+/// Is the roster walk over, after a page that returned `returned` participants
+/// and `gained` members not already listed?
+///
+/// An empty page is the end of the list. No progress means the server has
+/// stopped serving the listing. And `count` is the most there are.
+fn roster_read(returned: usize, gained: usize, listed: usize, count: i32) -> bool {
+    returned == 0 || gained == 0 || listed as i64 >= count as i64
 }
 
 mod chat;
@@ -245,7 +294,8 @@ async fn basic_group_roster(
     peer: PeerRef,
     own_names: bool,
     tally: &mut Enrichment,
-    mut on_wait: impl FnMut(u64),
+    cancel: &Cancel,
+    on_wait: impl FnMut(u64),
 ) -> Roster {
     let mut roster = Roster {
         complete: true,
@@ -257,12 +307,7 @@ async fn basic_group_roster(
     let request = tl::functions::messages::GetFullChat {
         chat_id: chat.chat_id,
     };
-    let full = guarded(tally, &mut on_wait, || {
-        let client = client.clone();
-        let request = request.clone();
-        async move { client.invoke(&request).await.map_err(|e| classify(&e)) }
-    })
-    .await;
+    let full = guarded_invoke(client, &request, tally, on_wait, cancel).await;
     let Some(tl::enums::messages::ChatFull::Full(full)) = full else {
         roster.complete = false;
         return roster;
@@ -454,6 +499,18 @@ mod tests {
         assert!(reactions_are_truncated(&reactions(&[4], 0)));
     }
 
+    #[test]
+    fn a_list_telegram_will_not_show_is_not_asked_for() {
+        // A channel's reactions to a non-admin: counts, no names, and a request
+        // per post that comes back refused.
+        let closed = tl::types::MessageReactions {
+            can_see_list: false,
+            recent_reactions: None,
+            ..reactions(&[4, 2], 0)
+        };
+        assert!(!reactions_are_truncated(&closed));
+    }
+
     fn results(min: bool, voters: Option<Vec<i32>>) -> tl::types::PollResults {
         tl::types::PollResults {
             min,
@@ -502,6 +559,7 @@ mod tests {
         let out: Option<()> = guarded(
             &mut tally,
             |_| {},
+            &Cancel::new(),
             || async { Err(EnrichError::Refused("CHAT_ADMIN_REQUIRED".into())) },
         )
         .await;
@@ -518,6 +576,7 @@ mod tests {
         let out = guarded(
             &mut tally,
             |s| waited.push(s),
+            &Cancel::new(),
             || {
                 let n = calls.get();
                 calls.set(n + 1);
@@ -542,6 +601,7 @@ mod tests {
         let out: Option<()> = guarded(
             &mut tally,
             |_| {},
+            &Cancel::new(),
             || async { Err(EnrichError::Transient(Duration::from_secs(600))) },
         )
         .await;
@@ -550,6 +610,59 @@ mod tests {
             tally.deferred, 1,
             "the data was there and we did not get it"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_during_a_rate_limit_ends_the_wait() {
+        // The wait slept on a token nothing could cancel, so Stop during a
+        // `FLOOD_WAIT_110` on the roster was held for the whole 110 s.
+        let mut tally = Enrichment::default();
+        let cancel = Cancel::new();
+        let stop = cancel.clone();
+        let started = tokio::time::Instant::now();
+        let out: Option<()> = guarded(
+            &mut tally,
+            |_| stop.cancel(),
+            &cancel,
+            || async { Err(EnrichError::Transient(Duration::from_secs(110))) },
+        )
+        .await;
+        assert!(out.is_none());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(tally.requests, 1, "nothing is asked for after a Stop");
+        assert_eq!(tally.deferred, 0, "a Stop is the user's, not lost data");
+    }
+
+    #[tokio::test]
+    async fn a_stopped_export_asks_for_nothing() {
+        let mut tally = Enrichment::default();
+        let cancel = Cancel::new();
+        cancel.cancel();
+        let calls = std::cell::Cell::new(0);
+        let out = guarded(
+            &mut tally,
+            |_| {},
+            &cancel,
+            || {
+                calls.set(calls.get() + 1);
+                async { Ok(()) }
+            },
+        )
+        .await;
+        assert!(out.is_none());
+        assert_eq!(calls.get(), 0, "no request after a Stop");
+        assert_eq!(tally.requests, 0);
+    }
+
+    #[test]
+    fn the_roster_ends_on_an_empty_page_or_on_no_progress() {
+        // A full page with new people carries on, whatever its size.
+        assert!(!roster_read(200, 200, 200, 5_000));
+        assert!(!roster_read(150, 150, 350, 5_000));
+        // The end of the list, however it is said.
+        assert!(roster_read(0, 0, 350, 5_000));
+        assert!(roster_read(40, 0, 350, 5_000));
+        assert!(roster_read(50, 50, 5_000, 5_000));
     }
 
     #[test]

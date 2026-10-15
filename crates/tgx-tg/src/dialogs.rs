@@ -10,10 +10,10 @@ use crate::client::{ChatInfo, ChatKind, Migration};
 use crate::engine::sleep_in_slices_until;
 use crate::error::{classify, EnrichError};
 use grammers_client::peer::Peer;
-use grammers_client::session::types::PeerRef;
+use grammers_client::session::types::{PeerId, PeerRef};
 use grammers_client::Client;
 use grammers_tl_types as tl;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tgx_media::topics::{GENERAL_TITLE, GENERAL_TOPIC_ID};
 
 /// Every chat the account can see.
@@ -358,17 +358,27 @@ pub async fn count_all(
 /// must not be reported as one — see [`peer_ref_for`] for what that confusion
 /// cost. A cancelled sweep returns `Ok` with what it had, because a cancel is
 /// the caller's own doing and the caller's own check is what stops it there.
+///
+/// **An id two dialogs share is left out, not guessed.** A chat is asked for by
+/// its bare id, and users, basic groups and channels number themselves
+/// separately, so a private chat and a channel can both be `123456789`. Keyed
+/// by the number alone the later dialog overwrote the earlier, and the export
+/// then read one conversation under the other's title and id. The sweep cannot
+/// tell which of the two was meant, so it says so in `tgx.log` and answers for
+/// neither. It only sees a twin listed before the queue is answered — the early
+/// stop below is worth more than reading every dialog for a case this rare.
 pub async fn peer_refs_for(
     client: &Client,
     chat_ids: &[i64],
     cancel: &Cancel,
 ) -> Result<HashMap<i64, PeerRef>, EnrichError> {
-    let mut out = HashMap::new();
+    let mut found: HashMap<i64, (PeerId, PeerRef)> = HashMap::new();
+    let mut twins: HashSet<i64> = HashSet::new();
     // Nothing asked, nothing to page. Without this an empty queue still fetches
     // the first page before the "every id answered" test below can notice that
     // it already is.
     if chat_ids.is_empty() {
-        return Ok(out);
+        return Ok(HashMap::new());
     }
     let mut iter = client.iter_dialogs();
     loop {
@@ -384,18 +394,57 @@ pub async fn peer_refs_for(
         };
         // `bare_id`, matching what `chat_info` recorded — the tagged `-100…`
         // form would never compare equal to an id taken from the same list.
-        if let Some(id) = d.peer.id().bare_id() {
+        let tagged = d.peer.id();
+        if let Some(id) = tagged.bare_id() {
             if chat_ids.contains(&id) {
-                out.insert(id, d.peer_ref());
+                if let Some(first) = note_dialog(&mut found, &mut twins, id, tagged, d.peer_ref()) {
+                    log::warn!(
+                        "chat id {id} names two dialogs ({:?} and {:?}); left out rather than \
+                         guessed",
+                        first.kind(),
+                        tagged.kind()
+                    );
+                }
             }
         }
         // Stop paging once every id asked about is answered; the dialog list
         // can run to hundreds and a count of three should not read all of it.
-        if out.len() == chat_ids.len() {
+        if found.len() + twins.len() == chat_ids.len() {
             break;
         }
     }
-    Ok(out)
+    Ok(found.into_iter().map(|(id, (_, r))| (id, r)).collect())
+}
+
+/// Record one dialog the sweep matched, and return the peer it clashed with.
+///
+/// The first dialog with a given bare id is kept. A second one that is the
+/// same peer is the same chat and changes nothing; one that is a *different*
+/// peer moves the id into `twins`, out of `found`, and keeps it there for the
+/// rest of the sweep — a third dialog must not bring a guess back.
+fn note_dialog<V>(
+    found: &mut HashMap<i64, (PeerId, V)>,
+    twins: &mut HashSet<i64>,
+    id: i64,
+    tagged: PeerId,
+    value: V,
+) -> Option<PeerId> {
+    if twins.contains(&id) {
+        return None;
+    }
+    match found.get(&id) {
+        None => {
+            found.insert(id, (tagged, value));
+            None
+        }
+        Some((first, _)) if *first == tagged => None,
+        Some((first, _)) => {
+            let first = *first;
+            found.remove(&id);
+            twins.insert(id);
+            Some(first)
+        }
+    }
 }
 
 /// One forum topic.
@@ -419,7 +468,6 @@ pub struct Topic {
     /// It was being read off the wire and thrown away: who opened a topic and
     /// when is part of what the topic is, and the folder name records neither.
     pub created_by: String,
-    pub top_message: i64,
     pub created_date: i64,
 }
 
@@ -434,7 +482,6 @@ impl Topic {
             icon_emoji_id: None,
             icon_color: 0,
             created_by: String::new(),
-            top_message: 0,
             created_date: 0,
         }
     }
@@ -503,7 +550,6 @@ pub async fn list_topics(client: &Client, peer: PeerRef) -> Result<Vec<Topic>, E
                     icon_emoji_id: t.icon_emoji_id,
                     icon_color: t.icon_color,
                     created_by: crate::convert::peer_key(&t.from_id).to_string(),
-                    top_message: t.top_message as i64,
                     created_date: t.date as i64,
                 });
                 offset_topic = t.id;
@@ -679,6 +725,49 @@ mod tests {
             to_diagnosis(Err(EnrichError::Failed("session closed".into()))),
             "could not be looked up"
         );
+    }
+
+    #[test]
+    fn a_bare_id_two_dialogs_share_is_left_out_rather_than_guessed() {
+        // A private chat and a channel numbered alike. Keyed by the number
+        // alone, the second dialog overwrote the first and the export read the
+        // wrong conversation under the right title.
+        let mut found = HashMap::new();
+        let mut twins = HashSet::new();
+        let user = PeerId::user(123_456_789).unwrap();
+        let channel = PeerId::channel(123_456_789).unwrap();
+        assert_eq!(
+            note_dialog(&mut found, &mut twins, 123_456_789, user, "user"),
+            None
+        );
+        // The same peer listed twice is still one chat.
+        assert_eq!(
+            note_dialog(&mut found, &mut twins, 123_456_789, user, "user"),
+            None
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            note_dialog(&mut found, &mut twins, 123_456_789, channel, "channel"),
+            Some(user)
+        );
+        assert!(found.is_empty(), "neither of the two is the answer");
+        assert!(twins.contains(&123_456_789));
+        // And a later dialog with the number does not bring a guess back.
+        assert_eq!(
+            note_dialog(&mut found, &mut twins, 123_456_789, user, "user"),
+            None
+        );
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn different_ids_are_each_answered() {
+        let mut found = HashMap::new();
+        let mut twins = HashSet::new();
+        note_dialog(&mut found, &mut twins, 5, PeerId::chat(5).unwrap(), ());
+        note_dialog(&mut found, &mut twins, 9, PeerId::channel(9).unwrap(), ());
+        assert_eq!(found.len(), 2);
+        assert!(twins.is_empty());
     }
 
     #[test]
