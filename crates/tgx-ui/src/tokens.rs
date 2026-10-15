@@ -108,28 +108,12 @@ impl Palette {
     }
 }
 
-/// The type scale, at the clamp ceilings the stylesheet declares.
-///
-/// Points rather than `gpui::Pixels`: egui sizes text in points and scales the
-/// whole UI by the display's DPI, so these are the same numbers in a type the
-/// toolkit accepts directly.
-pub mod type_scale {
-    pub const MEGA: f32 = 200.0;
-    pub const HUGE: f32 = 112.0;
-    pub const H1: f32 = 56.0;
-    pub const H2: f32 = 28.0;
-    pub const H3: f32 = 16.0;
-    pub const BODY: f32 = 16.0;
-    pub const SMALL: f32 = 13.0;
-    pub const TINY: f32 = 11.0;
-    pub const MICRO: f32 = 10.0;
-}
-
 /// The **window's** scale. Three roles, and the names are the roles.
 ///
-/// [`type_scale`] above is the stylesheet's, and a stylesheet describes a web
-/// page whose body is 16px on a viewport a metre wide. A window is read closer
-/// and holds four panels at once, so it takes its own sizes.
+/// Not the stylesheet's type scale: that describes a web page whose body is
+/// 16px on a viewport a metre wide. A window is read closer
+/// and holds four panels at once, so it takes its own sizes. Sizes are points:
+/// egui scales the whole UI by the display's DPI.
 ///
 /// **Named for what they are for, not for how big they are**, and that is the
 /// point rather than a nicety. Two earlier passes ended with 14, 13 and 11 all
@@ -319,13 +303,4 @@ mod tests {
     // assertion rather than a test — clippy rightly calls out an `assert!` over
     // two `const`s inside a `#[test]`, and this way a bad edit fails the build.
     const _: () = assert!(space::TIGHT < space::STEP && space::STEP < space::BREAK);
-
-    #[test]
-    fn the_type_scale_descends() {
-        use type_scale::*;
-        let steps = [MEGA, HUGE, H1, H2, BODY, SMALL, TINY, MICRO];
-        for pair in steps.windows(2) {
-            assert!(pair[0] >= pair[1], "{:?} then {:?}", pair[0], pair[1]);
-        }
-    }
 }

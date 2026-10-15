@@ -61,7 +61,13 @@ pub struct Part {
 
 /// Rows grouped into days, oldest first. `topic` names a row's topic when the
 /// lines mix topics, and returns `None` otherwise.
-pub fn days(rows: &[Row], topic: &dyn Fn(&Row) -> Option<String>) -> Vec<Day> {
+///
+/// Borrowed rows, not a slice of them: a caller holding `&Row`s would
+/// otherwise copy every one — document and photo text included — to call this.
+pub fn days<'r>(
+    rows: impl IntoIterator<Item = &'r Row>,
+    topic: &dyn Fn(&Row) -> Option<String>,
+) -> Vec<Day> {
     let mut out: Vec<Day> = Vec::new();
     for row in rows {
         let Some(date) = day_of(row) else { continue };
@@ -215,6 +221,8 @@ mod tests {
 
     fn plan(rows: &[Row], budget: usize) -> Vec<Part> {
         let d = days(rows, &|_| None);
+        // The same days from borrowed rows, which is how a summary calls it.
+        assert_eq!(d, days(rows.iter().collect::<Vec<&Row>>(), &|_| None));
         let n = measure(&d, &mut quarter).unwrap();
         cut(&d, &n, budget)
     }

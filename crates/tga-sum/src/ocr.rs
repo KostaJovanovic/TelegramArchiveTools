@@ -366,8 +366,9 @@ impl Readings {
         self.map.extend(read);
     }
 
-    /// Write them back. A cache that cannot be written is a slower next run,
-    /// not a failure of this one.
+    /// Write them back, whole or not at all (`cache::replace`): this one file
+    /// holds every reading in the chat. A cache that cannot be written is a
+    /// slower next run, not a failure of this one.
     pub fn save(&self) {
         let Some(path) = &self.path else { return };
         if let Some(dir) = path.parent() {
@@ -379,7 +380,7 @@ impl Readings {
         for k in keys {
             o.insert(k.clone(), Value::String(self.map[k].clone()));
         }
-        let _ = std::fs::write(path, Value::Object(o).to_string());
+        let _ = crate::cache::replace(path, &Value::Object(o).to_string());
     }
 }
 

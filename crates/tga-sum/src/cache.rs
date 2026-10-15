@@ -12,6 +12,7 @@
 //! summary the reader can redo.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{json, Value};
 
@@ -50,8 +51,31 @@ impl Cache {
             return;
         }
         let v = json!({ "notes": notes.iter().map(Note::to_json).collect::<Vec<_>>() });
-        let _ = std::fs::write(dir.join(format!("{key}.json")), v.to_string());
+        let _ = replace(&dir.join(format!("{key}.json")), &v.to_string());
     }
+}
+
+/// Write `text` as the whole of `path`: beside it first, then renamed over
+/// it, so a run killed mid-write leaves the old file or the new one and never
+/// half of either. A half-written `photos.json` does not parse, and reads as
+/// no readings at all — every photo in the chat read again.
+///
+/// The side file's name is unique to the write, so a summary and a question
+/// keeping the same part at once do not write into one file.
+pub(crate) fn replace(path: &Path, text: &str) -> std::io::Result<()> {
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    let mut part = path.as_os_str().to_owned();
+    part.push(format!(
+        ".{}-{}.part",
+        std::process::id(),
+        WRITES.fetch_add(1, Ordering::Relaxed)
+    ));
+    let part = PathBuf::from(part);
+    let written = std::fs::write(&part, text).and_then(|()| std::fs::rename(&part, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    written
 }
 
 /// A key from every input that shapes an answer, in order.
@@ -92,6 +116,24 @@ mod tests {
         assert!(cache.get("k").is_none());
         cache.put("k", &notes);
         assert_eq!(cache.get("k"), Some(notes));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_replaced_file_is_the_new_text_and_leaves_nothing_beside_it() {
+        let dir = std::env::temp_dir().join(format!("tga-sum-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("photos.json");
+        replace(&path, "{\"a\":\"1\"}").unwrap();
+        replace(&path, "{\"a\":\"2\"}").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":\"2\"}");
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(names, ["photos.json"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

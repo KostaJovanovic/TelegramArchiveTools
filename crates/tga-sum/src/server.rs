@@ -269,7 +269,10 @@ impl Keeper {
                 self.stop();
             }
         }
-        if !client.healthy() {
+        if !client.healthy_unless(cancel) {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(Error::Cancelled);
+            }
             if client.listening() {
                 // Something is there and not ready: a server still loading.
                 say(format!(
@@ -378,7 +381,7 @@ impl Keeper {
             if cancel.load(Ordering::Relaxed) {
                 return Err(Error::Cancelled);
             }
-            if client.healthy() {
+            if client.healthy_unless(cancel) {
                 return Ok(());
             }
             if let Some(code) = self.exited() {

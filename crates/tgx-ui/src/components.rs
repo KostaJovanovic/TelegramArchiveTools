@@ -150,11 +150,7 @@ pub fn button(
 }
 
 /// The colour a button's label takes.
-///
-/// Public because a [`NavCell`] is two runs at two weights and has to colour
-/// them itself — and because that is exactly the kind of second opinion this
-/// module exists to prevent.
-pub fn button_ink(enabled: bool, primary: bool, palette: &Palette) -> Color32 {
+fn button_ink(enabled: bool, primary: bool, palette: &Palette) -> Color32 {
     match (enabled, primary) {
         (true, true) => palette.accent_fg,
         (true, false) => palette.fg,
@@ -163,7 +159,7 @@ pub fn button_ink(enabled: bool, primary: bool, palette: &Palette) -> Color32 {
 }
 
 /// The box, around text the caller has already coloured.
-pub fn boxed(
+fn boxed(
     ui: &mut Ui,
     text: impl Into<egui::WidgetText>,
     enabled: bool,
@@ -272,14 +268,6 @@ fn hairline(ui: &mut Ui, colour: Color32) {
     // on its path, so a 1px stroke at an integer y covers half of each
     // neighbouring pixel and greys out to two half-lines.
     ui.painter().rect_filled(rect, CornerRadius::ZERO, colour);
-}
-
-/// The vertical rule, for splitting a row into columns.
-pub fn vrule(ui: &mut Ui, palette: &Palette) {
-    let height = ui.available_height();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, height), Sense::hover());
-    ui.painter()
-        .rect_filled(rect, CornerRadius::ZERO, palette.hairline);
 }
 
 /// A letterspaced run of text.
@@ -415,8 +403,9 @@ pub fn uppercase(text: &str) -> String {
 /// disabled box draws its tick in `muted`, not `rule`: `rule` is the divider
 /// grey and a mark in it reads as no mark on both appearances.
 ///
-/// The box is a fixed 12px and never shrinks: in a row with a long title, a
-/// flexible tick vanishes before the title does.
+/// The box is a fixed size, the text's (`TICK_SIZE`), and never shrinks: in a
+/// row with a long title, a flexible tick vanishes before the title does.
+///
 /// **`#[must_use]` because throwing this away is a control that does nothing.**
 ///
 /// It senses clicks, so inside a row that is *itself* click-sensing the box
@@ -871,134 +860,6 @@ pub fn progress_bar(ui: &mut Ui, fraction: Option<f32>, palette: &Palette) {
 /// assumed.
 fn radius() -> CornerRadius {
     CornerRadius::same(metrics::RADIUS as u8)
-}
-
-/// One cell of the nav bar.
-///
-/// **The bar numbers the steps and only the steps.** `01`–`03` across Sign in,
-/// Refresh chats and Start export, which really are a sequence. Stop and Open
-/// output folder are *tools*: unnumbered, sized to their labels, and pushed
-/// right where the sequence has ended.
-///
-/// A cell without a number does not pay the number gap either, or its label
-/// hangs further in than a numbered one's and reads as a misalignment rather
-/// than a distinction.
-///
-/// **A cell is a [`button`].** It used to paint itself — a galley laid out by
-/// hand, a rect measured off it, ink chosen at the moment of measurement — and
-/// the result was five runs of text along the top of the window with nothing
-/// around them. `primary` puts the one red on the step that is the point of the
-/// application; the rest are hairline boxes.
-pub struct NavCell {
-    pub number: Option<u32>,
-    pub label: String,
-    pub enabled: bool,
-    /// Fill with the accent. **Exactly one cell may set it.**
-    pub primary: bool,
-}
-
-impl NavCell {
-    pub fn step(number: u32, label: impl Into<String>) -> Self {
-        Self {
-            number: Some(number),
-            label: label.into(),
-            enabled: true,
-            primary: false,
-        }
-    }
-
-    /// A tool, not a step: no number, no number gap.
-    pub fn tool(label: impl Into<String>) -> Self {
-        Self {
-            number: None,
-            label: label.into(),
-            enabled: true,
-            primary: false,
-        }
-    }
-
-    pub fn enabled(mut self, yes: bool) -> Self {
-        self.enabled = yes;
-        self
-    }
-
-    /// The one red. See [`button`]: an accent that marks two things marks
-    /// neither, and `only_one_cell_carries_the_accent` is what holds it.
-    pub fn primary(mut self, yes: bool) -> Self {
-        self.primary = yes;
-        self
-    }
-
-    /// The cell's own text, numbered or not.
-    ///
-    /// Split from the painting so the numbering rule — the thing worth being
-    /// sure of — is decidable without a window.
-    pub fn caption(&self) -> String {
-        match self.number {
-            Some(n) => format!("{n:02}  {}", self.label),
-            None => self.label.clone(),
-        }
-    }
-
-    /// The cell's two runs: the mono number, then the label.
-    ///
-    /// Split out so [`Self::show`] is nothing but the widget call — and so the
-    /// gap after the number lives beside the rule that says a tool does not pay
-    /// it.
-    /// The cell's two runs: the mono number, then the label.
-    ///
-    /// The number is set a shade back from the label whenever there is a shade
-    /// to spare — on the accent fill there is not, so both take `accent_fg` and
-    /// the step reads as one word.
-    fn job(&self, palette: &Palette, enabled: bool) -> LayoutJob {
-        let ink = button_ink(enabled, self.primary, palette);
-        // A shade back from the label wherever there is one to spare. On the
-        // accent fill there is not, so the number takes the label's ink and the
-        // step reads as one word.
-        let figure = if self.primary && enabled {
-            ink
-        } else {
-            palette.muted
-        };
-        let mut job = LayoutJob::default();
-        if let Some(n) = self.number {
-            job.append(
-                &format!("{n:02}"),
-                0.0,
-                TextFormat {
-                    font_id: fonts::mono(window::LABEL),
-                    color: figure,
-                    ..Default::default()
-                },
-            );
-        }
-        job.append(
-            &self.label,
-            if self.number.is_some() { 10.0 } else { 0.0 },
-            TextFormat {
-                font_id: fonts::sans(window::READING),
-                color: ink,
-                ..Default::default()
-            },
-        );
-        job
-    }
-
-    /// Paint the cell as the window's one kind of button.
-    ///
-    /// The ink is baked into the job rather than left to [`button`]'s own
-    /// colouring, because a cell is two runs at two weights and `WidgetText`
-    /// carries one colour. What `button` still owns is the box, the fill, the
-    /// border and the disabled state.
-    pub fn show(&self, ui: &mut Ui, palette: &Palette) -> Response {
-        boxed(
-            ui,
-            self.job(palette, self.enabled),
-            self.enabled,
-            self.primary,
-            palette,
-        )
-    }
 }
 
 /// The painted empty state.
@@ -1521,21 +1382,6 @@ mod tests {
     }
 
     #[test]
-    fn only_one_cell_carries_the_accent() {
-        // An accent that marks two things marks neither. The nav bar is the one
-        // place with more than one button in a row, so the rule is checked
-        // where it could actually be broken.
-        let bar = [
-            NavCell::step(1, "Sign in"),
-            NavCell::step(2, "Refresh chats"),
-            NavCell::step(3, "Start export").primary(true),
-            NavCell::tool("Stop"),
-            NavCell::tool("Open output folder"),
-        ];
-        assert_eq!(bar.iter().filter(|c| c.primary).count(), 1);
-    }
-
-    #[test]
     fn every_label_is_the_one_label_size() {
         // The failure this whole scale exists to prevent, checked at the only
         // place it could recur: a helper that takes its size from somewhere
@@ -1584,10 +1430,7 @@ mod tests {
     }
 
     #[test]
-    fn a_button_and_its_cell_agree_about_ink() {
-        // `NavCell` colours its own two runs because `WidgetText` carries one
-        // colour and a cell is a number and a label at two weights. That is a
-        // second opinion about the same rule, so it reads it from the first.
+    fn a_buttons_ink_is_the_accents_own_or_muted_when_it_is_off() {
         let p = Palette::dark();
         assert_eq!(button_ink(true, true, &p), p.accent_fg);
         assert_eq!(button_ink(true, false, &p), p.fg);
@@ -1632,22 +1475,6 @@ mod tests {
         assert_eq!(bar_fill(Some(-1.0)), 0.0);
         assert_eq!(bar_fill(Some(2.0)), 1.0);
         assert_eq!(bar_fill(Some(0.5)), 0.5);
-    }
-
-    #[test]
-    fn only_the_sequence_is_numbered() {
-        // Stop and Open output folder are tools, not steps four and five.
-        assert_eq!(NavCell::step(1, "Sign in").caption(), "01  Sign in");
-        assert_eq!(NavCell::tool("Stop").caption(), "Stop");
-        assert_eq!(NavCell::step(3, "Start export").number, Some(3));
-        assert_eq!(NavCell::tool("Stop").number, None);
-    }
-
-    #[test]
-    fn a_disabled_cell_is_still_a_cell() {
-        let cell = NavCell::step(2, "Refresh chats").enabled(false);
-        assert!(!cell.enabled);
-        assert_eq!(cell.caption(), "02  Refresh chats");
     }
 
     #[test]

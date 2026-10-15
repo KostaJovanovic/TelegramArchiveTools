@@ -156,18 +156,31 @@ pub fn run(args: Vec<String>) -> Result<()> {
         return refresh_all(&folder, force, digest, handles, quiet, &options);
     }
 
+    // Where the notes and the digest live. A database named as a file has
+    // them beside it, in its chat's folder, as `refresh::one` has them;
+    // `x.sqlite\events.json` is never a file and `x.sqlite\analysis` cannot
+    // be made. A folder is its own home, as it always was, so a folder's
+    // report is byte for byte what it was.
+    let home: Option<PathBuf> = folder.as_ref().map(|f| {
+        if f.is_file() {
+            crate::refresh::beside(f)
+        } else {
+            f.clone()
+        }
+    });
+
     // The notes come from wherever they were named, or from beside the export.
     // A `--notes` path that is not there is an error rather than a shrug: the
     // ordinary "no annotations" case is not passing the flag at all, so naming
     // a file and getting silence would hide a typo.
-    let notes = match (&notes_path, &folder) {
+    let notes = match (&notes_path, &home) {
         (Some(path), _) => {
             if !path.is_file() {
                 bail!("Not a file: {}", path.display());
             }
             tga_notes::load_file(path)
         }
-        (None, Some(folder)) => tga_notes::load(folder),
+        (None, Some(home)) => tga_notes::load(home),
         (None, None) => tga_notes::Notes::default(),
     };
 
@@ -275,7 +288,7 @@ pub fn run(args: Vec<String>) -> Result<()> {
     }
 
     if digest {
-        let target = folder.join("analysis");
+        let target = home.unwrap_or(folder).join("analysis");
         let stored = database.as_deref().and_then(|db| Stored::open(db, &export));
         let rows = digest_rows(&export, &people, stored.as_ref());
         println!("  {}", tga_notes::write_digest(&rows, &target)?.display());
@@ -610,6 +623,8 @@ fn write_utf8(path: &Path, text: &str) -> std::io::Result<()> {
     std::fs::write(path, text)
 }
 
+/// `6,643`. The one copy in this crate: the library's footer, the summary's
+/// header and this command line say a count the same way.
 pub(crate) fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::new();
@@ -620,4 +635,70 @@ pub(crate) fn thousands(n: usize) -> String {
         out.push(ch);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_database_named_as_a_file_finds_its_notes_and_writes_its_digest_beside_it() {
+        // `analyse <chat>.sqlite` read `<chat>.sqlite\events.json` and wrote
+        // the digest into `<chat>.sqlite\analysis`, which failed before any
+        // report was written. Beside the file is where `--refresh` looks.
+        let base = std::env::temp_dir().join(format!("tga-run-cli-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("Dev");
+        let db = home.join("Dev.sqlite");
+        std::fs::create_dir_all(&home).unwrap();
+        const CHAT: i64 = 4343;
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let store = tgx_archive::Store::open(&db).await.unwrap();
+                store
+                    .upsert_chat(CHAT, "Dev", "private_group", 0)
+                    .await
+                    .unwrap();
+                let head = serde_json::json!({});
+                store
+                    .upsert_topic(CHAT, 0, "Dev", head.as_object().unwrap(), 0)
+                    .await
+                    .unwrap();
+                for id in 1..=3 {
+                    let m = serde_json::json!({
+                        "id": id, "type": "message", "date": "2026-07-16T10:00:00",
+                        "date_unixtime": "1784196000", "from": "Ana", "from_id": "user1",
+                        "text": "dobar dan",
+                    });
+                    store
+                        .merge(CHAT, id, Some(0), m.as_object().unwrap(), 0)
+                        .await
+                        .unwrap();
+                }
+            });
+        std::fs::write(
+            home.join("events.json"),
+            r#"{"events": [{"date": "2026-07-16", "title": "Sastanak odbora"}]}"#,
+        )
+        .unwrap();
+
+        let args = [
+            db.to_string_lossy().as_ref(),
+            "--digest",
+            "--quiet",
+            "--no-fonts",
+            "--stamp",
+            "2026-07-17",
+        ]
+        .map(String::from)
+        .to_vec();
+        run(args).expect("analysed");
+
+        assert!(home.join("analysis").join("digest.jsonl").is_file());
+        let report = std::fs::read_to_string(home.join("report.html")).unwrap();
+        assert!(report.contains("Sastanak odbora"), "the notes beside it");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

@@ -18,18 +18,35 @@
 //! `Style`, we own all of it, and there is no second vocabulary to translate
 //! into.
 //!
-//! Re-running is free — every write is an assignment — so the settings screen
-//! flips appearance by rebuilding the palette and calling this again.
+//! The settings screen flips appearance by rebuilding the palette and calling
+//! [`install`] again. That is cheap because the fonts are not part of it. They
+//! do not depend on the palette, and handing egui font definitions it already
+//! has is not free: it compares them byte for byte before deciding there is
+//! nothing to rebuild, and with the system fallbacks that is some 40 MB of
+//! font files on every flip. So the fonts go in once per context
+//! ([`install_fonts`]), and the rest is assignments.
 
 use crate::fonts;
 use crate::tokens::{metrics, space, window, Palette};
 use eframe::egui::{self, Context, CornerRadius, Stroke, TextStyle};
 
+/// The design's faces, with the system's fallbacks behind them — once per
+/// context; a second call does nothing. [`install`] calls it, so a window
+/// that installs the theme has its fonts.
+pub fn install_fonts(ctx: &Context) {
+    let done = egui::Id::new("tgx_ui::theme::fonts installed");
+    if ctx.data(|d| d.get_temp::<bool>(done)).unwrap_or(false) {
+        return;
+    }
+    ctx.set_fonts(fonts::with_system_fallbacks());
+    ctx.data_mut(|d| d.insert_temp(done, true));
+}
+
 /// Everything about the window that is a decision rather than a default.
 ///
 /// Call once at startup, and again whenever the appearance changes.
 pub fn install(ctx: &Context, palette: &Palette) {
-    ctx.set_fonts(fonts::with_system_fallbacks());
+    install_fonts(ctx);
 
     let mut style = (*ctx.style()).clone();
 
@@ -37,10 +54,10 @@ pub fn install(ctx: &Context, palette: &Palette) {
     // `Heading` is the medium weight rather than a larger size: this design
     // separates headings by face and tracking, not by scale.
     //
-    // **`tokens::window`, not `tokens::type_scale`.** The second is the
-    // stylesheet's, which describes a web page; these five roles are what a
-    // widget falls back to when a call site does not name a font, and they have
-    // to be the same three sizes the call sites use.
+    // **`tokens::window`, not the stylesheet's scale**, which describes a web
+    // page; these five roles are what a widget falls back to when a call site
+    // does not name a font, and they have to be the same three sizes the call
+    // sites use.
     style.text_styles = [
         (TextStyle::Body, fonts::sans(window::READING)),
         (TextStyle::Button, fonts::sans(window::READING)),
@@ -276,6 +293,26 @@ mod tests {
                 id.family
             );
         }
+    }
+
+    #[test]
+    fn the_fonts_go_in_once_per_context() {
+        // The probe: other definitions set after the first install are still
+        // there after a second, which would have put ours back.
+        let ctx = Context::default();
+        let faces = |ctx: &Context| ctx.fonts(|f| f.definitions().font_data.len());
+        install(&ctx, &Palette::dark());
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        assert_eq!(faces(&ctx), fonts::with_system_fallbacks().font_data.len());
+
+        ctx.set_fonts(fonts::definitions());
+        install(&ctx, &Palette::light());
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        assert_eq!(
+            faces(&ctx),
+            fonts::definitions().font_data.len(),
+            "a change of appearance handed egui the fonts again"
+        );
     }
 
     #[test]

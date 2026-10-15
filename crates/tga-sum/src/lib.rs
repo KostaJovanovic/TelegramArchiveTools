@@ -27,15 +27,15 @@ pub mod prompt;
 pub mod server;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::atomic::AtomicBool;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use chrono::NaiveDate;
 use serde_json::{json, Value};
 use tga_notes::Row;
 
 pub use cache::Cache;
-pub use client::{Client, Props, Timings};
+pub use client::{Client, Props, Streamed, Timings};
 pub use server::{Keeper, Launch, Want};
 
 /// Messages are read in parts no bigger than this: ReVision's `CHUNK_TOKENS`
@@ -81,6 +81,19 @@ const MERGE_ROUNDS: usize = 3;
 
 /// Tries at a notes answer that is not valid JSON, as ReVision's runner.
 const ATTEMPTS: usize = 3;
+
+/// The pause before trying again after the server failed (a 5xx), doubled
+/// each time: a slot being reset is over in a second or two, and three tries
+/// back to back are spent before it is.
+const BACKOFF: Duration = Duration::from_secs(1);
+
+/// A part of more messages than this that the model finds nothing in is not
+/// kept. A stretch that long with nothing worth a note is rare, and an empty
+/// answer kept would leave it out of every later summary of those days.
+const NOTHING_TO_NOTE: usize = 10;
+
+/// How much of a server's refusal is repeated in the narration.
+const REFUSAL_CHARS: usize = 200;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -278,6 +291,9 @@ pub struct Summary {
     /// Parts the model never gave a readable answer for. Their notes are
     /// missing from the summary, which is why the caller must say so.
     pub failed: usize,
+    /// A section reached its answer's length limit and stops where the limit
+    /// fell, which the caller must say for the same reason.
+    pub cut: bool,
     pub model: String,
     pub lang: Lang,
 }
@@ -365,6 +381,11 @@ pub fn summarise(
     };
 
     let groups = groups(request);
+    // Days of stickers, "ok" and "haha" only: the model would be handed an
+    // empty input, and asked for a summary it writes one — of nothing.
+    if groups.busy.is_empty() && groups.quiet.is_empty() {
+        return Err(Error::Bad("nothing was said in these days".into()));
+    }
     let headed = request.by_topic && request.forum;
     for (name, rows) in &groups.busy {
         if headed {
@@ -380,7 +401,8 @@ pub fn summarise(
 
     if headed && summary.sections.len() > 1 && request.length != Length::Short {
         on(Event::Section(None));
-        let text = run.overview(&summary.sections, on)?;
+        let (text, cut) = run.overview(&summary.sections, on)?;
+        summary.cut |= cut;
         summary.sections.insert(
             0,
             Section {
@@ -417,8 +439,15 @@ fn groups<'r>(request: &Request<'r>) -> Groups<'r> {
         let mut seen = request.rows.iter().map(|r| r.topic);
         let only = seen.next().filter(|first| seen.all(|t| t == *first));
         let topic = only.filter(|_| request.forum).map(name);
+        // Nothing left once the trivial is dropped is no group at all, not
+        // a group of nothing: the callers' "nothing was said" rests on it.
+        let busy = if all.is_empty() {
+            Vec::new()
+        } else {
+            vec![(topic, all)]
+        };
         return Groups {
-            busy: vec![(topic, all)],
+            busy,
             quiet: Vec::new(),
         };
     }
@@ -504,7 +533,7 @@ impl Run<'_> {
         let known: HashSet<i64> = rows.iter().map(|r| r.id).collect();
         let direct = prompt::final_text(&about, req.length, req.lang, false);
         let reserve = req.length.answer();
-        match self.gather(
+        let (text, cut) = match self.gather(
             &about,
             topic,
             rows,
@@ -521,8 +550,8 @@ impl Run<'_> {
                 &known,
                 req.length.cites(),
                 on,
-            ),
-            Gathered::Notes(notes) => {
+            )?,
+            Gathered::Notes(notes, _) => {
                 let system = prompt::final_text(&about, req.length, req.lang, true);
                 let room = self.budget(&system, reserve)?.min(INPUT_TOKENS);
                 let notes = self.fit(&about, notes, room, on)?;
@@ -533,9 +562,11 @@ impl Run<'_> {
                     &known,
                     req.length.cites(),
                     on,
-                )
+                )?
             }
-        }
+        };
+        summary.cut |= cut;
+        Ok(text)
     }
 
     /// `rows` as the model reads them, by day — with a topic tag on each line
@@ -545,14 +576,14 @@ impl Run<'_> {
         let mixed =
             req.forum && topic.is_none() && rows.windows(2).any(|w| w[0].topic != w[1].topic);
         let tag = |r: &Row| mixed.then(|| req.topics.get(r.topic).cloned().unwrap_or_default());
-        let owned: Vec<Row> = rows.iter().map(|r| (*r).clone()).collect();
-        cut::days(&owned, &tag)
+        cut::days(rows.iter().copied(), &tag)
     }
 
     /// What a call about `rows` reads: the messages themselves when they come
     /// to `single` tokens or fewer and fit beside `direct` (the prompt that
     /// would read them) and `reserve` tokens of answer, else notes on each
-    /// part — cached, so a summary's notes are a conversation's too.
+    /// part — cached, so a summary's notes are a conversation's too — and the
+    /// days they were taken from.
     #[allow(clippy::too_many_arguments)]
     fn gather(
         &self,
@@ -591,6 +622,7 @@ impl Run<'_> {
         summary.parts += parts.len();
 
         let mut notes: Vec<Note> = Vec::new();
+        let mut refused: Option<String> = None;
         for (i, part) in parts.iter().enumerate() {
             let key = cache::key(&[
                 &prompt::VERSION.to_string(),
@@ -617,8 +649,19 @@ impl Run<'_> {
             let part_ids: HashSet<i64> = part.ids.iter().copied().collect();
             let user = format!("Messages:\n\n{}", part.text);
             match self.notes_call(&system, &user, &part_ids)? {
-                Some((got, timings)) => {
-                    self.cache.put(&key, &got);
+                Answer::Got(got, timings) => {
+                    // The merge's rule, for the same reason: an empty answer
+                    // kept is a part left out of every summary after this one.
+                    if got.is_empty() && part.ids.len() > NOTHING_TO_NOTE {
+                        on(Event::Say(format!(
+                            "part {} of {}: no notes on {} messages; not kept, so a re-run asks again",
+                            i + 1,
+                            parts.len(),
+                            part.ids.len()
+                        )));
+                    } else {
+                        self.cache.put(&key, &got);
+                    }
                     notes.extend(got);
                     on(Event::Part {
                         done: i + 1,
@@ -628,20 +671,33 @@ impl Run<'_> {
                         timings: Some(timings),
                     });
                 }
-                None => {
+                Answer::Unreadable(why) => {
                     summary.failed += 1;
-                    on(Event::Say(format!(
-                        "part {} of {}: no readable answer after {ATTEMPTS} tries, left out",
-                        i + 1,
-                        parts.len()
-                    )));
+                    on(Event::Say(match &why {
+                        Some(said) => format!(
+                            "part {} of {}: the model server refused ({said}), left out",
+                            i + 1,
+                            parts.len()
+                        ),
+                        None => format!(
+                            "part {} of {}: no readable answer after {ATTEMPTS} tries, left out",
+                            i + 1,
+                            parts.len()
+                        ),
+                    }));
+                    refused = why.or(refused);
                 }
             }
         }
         if notes.is_empty() {
-            return Err(Error::Bad("the model wrote no notes for any part".into()));
+            return Err(Error::Bad(match refused {
+                Some(said) => {
+                    format!("the model wrote no notes for any part; the server last said: {said}")
+                }
+                None => "the model wrote no notes for any part".into(),
+            }));
         }
-        Ok(Gathered::Notes(notes))
+        Ok(Gathered::Notes(notes, days))
     }
 
     /// Notes cut down until they fit `room`: merged by the model first, then,
@@ -702,7 +758,7 @@ impl Run<'_> {
                 }
                 asked += 1;
                 match self.notes_call(&system, &user, &known)? {
-                    Some((got, _)) if !got.is_empty() => {
+                    Answer::Got(got, _) if !got.is_empty() => {
                         self.cache.put(&key, &got);
                         merged.extend(got);
                     }
@@ -737,38 +793,36 @@ impl Run<'_> {
         Ok(kept.into_iter().map(|(_, n)| n).collect())
     }
 
-    /// Notes for one input. `None` when no try produced readable JSON.
+    /// Notes for one input, their ids checked against `known`.
     fn notes_call(
         &self,
         system: &str,
         user: &str,
         known: &HashSet<i64>,
-    ) -> Result<Option<(Vec<Note>, Timings)>, Error> {
+    ) -> Result<Answer<Vec<Note>>, Error> {
         let mut body = self.body(system, user, NOTES_ANSWER);
         body["response_format"] = json!({
             "type": "json_schema",
             "json_schema": { "name": "notes", "strict": true, "schema": prompt::notes_schema() }
         });
-        for _ in 0..ATTEMPTS {
-            let (text, timings) = match self.client.complete(&body, self.cancel) {
-                Ok(answer) => answer,
-                Err(Error::Server(_)) => continue,
-                Err(e) => return Err(e),
-            };
-            let Ok(v) = serde_json::from_str::<Value>(&text) else {
-                continue;
-            };
-            let mut notes = Note::all_from(&v);
-            for n in &mut notes {
-                n.ids.retain(|id| known.contains(id));
+        Ok(match json_answer(self.client, &body, self.cancel)? {
+            Answer::Got(v, timings) => {
+                let mut notes = Note::all_from(&v);
+                for n in &mut notes {
+                    n.ids.retain(|id| known.contains(id));
+                }
+                Answer::Got(notes, timings)
             }
-            return Ok(Some((notes, timings)));
-        }
-        Ok(None)
+            Answer::Unreadable(why) => Answer::Unreadable(why),
+        })
     }
 
-    /// The overview above the topics' summaries.
-    fn overview(&self, sections: &[Section], on: &mut dyn FnMut(Event)) -> Result<String, Error> {
+    /// The overview above the topics' summaries, and whether it was cut.
+    fn overview(
+        &self,
+        sections: &[Section],
+        on: &mut dyn FnMut(Event),
+    ) -> Result<(String, bool), Error> {
         let from = self.request.from.to_string();
         let to = self.request.to.to_string();
         let about = self.about(None, &from, &to);
@@ -793,7 +847,8 @@ impl Run<'_> {
         )
     }
 
-    /// A streamed call whose text is the summary.
+    /// A streamed call whose text is the summary, and whether the length
+    /// limit cut it.
     fn write(
         &self,
         system: &str,
@@ -802,7 +857,7 @@ impl Run<'_> {
         known: &HashSet<i64>,
         cites: bool,
         on: &mut dyn FnMut(Event),
-    ) -> Result<String, Error> {
+    ) -> Result<(String, bool), Error> {
         let body = self.body(system, user, answer);
         let none = HashSet::new();
         stream_cited(
@@ -840,18 +895,20 @@ fn body(messages: Value, max_tokens: usize) -> Value {
 }
 
 /// Stream `body`'s answer through the citation check: `on` gets each piece
-/// as [`Event::Text`], then [`Event::Written`]. The whole text, trimmed.
+/// as [`Event::Text`], then [`Event::Written`]. The whole text, trimmed, and
+/// whether it stopped at its length limit — said as it happens, since the
+/// text then ends wherever the limit fell.
 fn stream_cited(
     client: &Client,
     body: &Value,
     known: &HashSet<i64>,
     cancel: &AtomicBool,
     on: &mut dyn FnMut(Event),
-) -> Result<String, Error> {
+) -> Result<(String, bool), Error> {
     let mut filter = cite::Filter::new(known);
     let mut text = String::new();
     let mut started = false;
-    let timings = client.stream(body, cancel, &mut |piece| {
+    let streamed = client.stream(body, cancel, &mut |piece| {
         let mut shown = filter.push(piece);
         if !started {
             // The model's habit of opening on a blank line.
@@ -868,8 +925,73 @@ fn stream_cited(
         text.push_str(&rest);
         on(Event::Text(rest));
     }
-    on(Event::Written(timings));
-    Ok(text.trim().to_string())
+    on(Event::Written(streamed.timings));
+    if streamed.cut {
+        on(Event::Say(format!(
+            "the answer reached its limit of {} tokens and stops there",
+            body["max_tokens"].as_u64().unwrap_or_default()
+        )));
+    }
+    Ok((text.trim().to_string(), streamed.cut))
+}
+
+/// What a call asked for JSON came back with.
+enum Answer<T> {
+    Got(T, Timings),
+    /// No try gave readable JSON. The server's last refusal, if that is why:
+    /// its own words about the request — "exceeds the context", a schema it
+    /// cannot take — never anything the model wrote.
+    Unreadable(Option<String>),
+}
+
+/// `body`'s answer as JSON, asked up to [`ATTEMPTS`] times: again at once
+/// when the answer is not JSON; again after a pause when the server failed
+/// (a 5xx), [`BACKOFF`] and doubling; and not again when it refused the
+/// request (a 4xx), which the same request would get the same way.
+fn json_answer(client: &Client, body: &Value, cancel: &AtomicBool) -> Result<Answer<Value>, Error> {
+    let mut refused: Option<String> = None;
+    let mut pause = BACKOFF;
+    for attempt in 0..ATTEMPTS {
+        let (text, timings) = match client.complete(body, cancel) {
+            Ok(answer) => {
+                // Answered: if this try fails, it is the model's doing.
+                refused = None;
+                answer
+            }
+            Err(Error::Server(said)) => {
+                // `client` puts the status first: "400: …".
+                let for_good = said.starts_with('4');
+                // Its reason, not a page of it: the line goes to the log.
+                refused = Some(shorten(&said, REFUSAL_CHARS));
+                if for_good || attempt + 1 == ATTEMPTS {
+                    break;
+                }
+                wait(pause, cancel)?;
+                pause *= 2;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        return Ok(Answer::Got(v, timings));
+    }
+    Ok(Answer::Unreadable(refused))
+}
+
+/// Sleep `pause`, or less if the run is stopped.
+fn wait(pause: Duration, cancel: &AtomicBool) -> Result<(), Error> {
+    let until = Instant::now() + pause;
+    while Instant::now() < until {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        std::thread::sleep(
+            Duration::from_millis(100).min(until.saturating_duration_since(Instant::now())),
+        );
+    }
+    Ok(())
 }
 
 /// `Merging 1,332 notes, round 1 of up to 3: group 8 of 30, about 9 min
@@ -916,10 +1038,12 @@ fn lines_of(notes: &[Note]) -> String {
     notes.iter().map(Note::line).collect::<Vec<_>>().join("\n")
 }
 
-/// What one group of rows came to: the messages, or notes on them.
+/// What one group of rows came to: the messages, or notes on them and the
+/// days they were taken from — which a conversation keeps, to read the
+/// messages behind a note, and which are not cheap to render twice.
 enum Gathered {
     Messages(String),
-    Notes(Vec<Note>),
+    Notes(Vec<Note>, Vec<cut::Day>),
 }
 
 // -- a conversation about a range ---------------------------------------------
@@ -1032,7 +1156,7 @@ pub fn ground(
     };
     match gathered {
         Gathered::Messages(text) => grounding.text = text,
-        Gathered::Notes(notes) => {
+        Gathered::Notes(notes, days) => {
             let room = run
                 .budget(&prompt::chat(&about, prompt::Basis::Notes), reserve)?
                 .min(INPUT_TOKENS);
@@ -1040,7 +1164,7 @@ pub fn ground(
             grounding.text = lines_of(&listed);
             grounding.notes = true;
             grounding.listed = listed;
-            grounding.days = run.days(topic.as_deref(), &rows);
+            grounding.days = days;
         }
     }
     grounding.topic = topic;
@@ -1055,6 +1179,9 @@ pub fn ground(
 /// the answer reads the messages they rest on: a note can be wrong about
 /// who held which position, and a question is usually about exactly that.
 /// Only when nothing is picked does the answer read the notes alone.
+///
+/// Of `request`, only the chat's name and the days are read: what the days
+/// say is in `grounding`, so a caller need not build the rows again.
 pub fn answer(
     client: &Client,
     request: &Request,
@@ -1109,13 +1236,16 @@ pub fn answer(
         messages.push(json!({ "role": "assistant", "content": turn.answer }));
     }
     messages.push(json!({ "role": "user", "content": question }));
-    stream_cited(
+    // An answer cut at its limit is said by `stream_cited` as it happens; the
+    // conversation goes on, and the next question can ask for the rest.
+    let (text, _) = stream_cited(
         client,
         &body(Value::Array(messages), CHAT_ANSWER),
         known,
         cancel,
         on,
-    )
+    )?;
+    Ok(text)
 }
 
 /// What a question over notes reads: the notes it turns on, and the
@@ -1146,15 +1276,23 @@ fn sources(
         "Choosing among {} notes",
         grounding.listed.len()
     )));
-    let picked: Vec<&Note> = pick(client, about, &grounding.listed, history, question, cancel)?
+    let (places, refused) = match pick(client, about, &grounding.listed, history, question, cancel)?
+    {
+        Answer::Got(places, _) => (places, None),
+        Answer::Unreadable(why) => (Vec::new(), why),
+    };
+    let picked: Vec<&Note> = places
         .into_iter()
         .map(|i| &grounding.listed[i])
         .filter(|n| !n.ids.is_empty())
         .collect();
     if picked.is_empty() {
-        on(Event::Say(
-            "No note picked: answering from all the notes".into(),
-        ));
+        on(Event::Say(match refused {
+            Some(said) => format!(
+                "The model server refused the choice ({said}): answering from all the notes"
+            ),
+            None => "No note picked: answering from all the notes".into(),
+        }));
         return Ok(None);
     }
     on(Event::Say(format!(
@@ -1198,8 +1336,8 @@ fn sources(
     Ok(None)
 }
 
-/// The places in `notes` of those `question` turns on, most relevant first.
-/// Empty when the model chose none or gave no readable answer.
+/// The places in `notes` of those `question` turns on, most relevant first;
+/// empty when the model chose none.
 fn pick(
     client: &Client,
     about: &prompt::About,
@@ -1207,7 +1345,7 @@ fn pick(
     history: &[&Turn],
     question: &str,
     cancel: &AtomicBool,
-) -> Result<Vec<usize>, Error> {
+) -> Result<Answer<Vec<usize>>, Error> {
     let listed: Vec<String> = notes
         .iter()
         .enumerate()
@@ -1233,28 +1371,22 @@ fn pick(
         "type": "json_schema",
         "json_schema": { "name": "picked", "strict": true, "schema": prompt::pick_schema() }
     });
-    for _ in 0..ATTEMPTS {
-        let text = match client.complete(&body, cancel) {
-            Ok((text, _)) => text,
-            Err(Error::Server(_)) => continue,
-            Err(e) => return Err(e),
-        };
-        let Ok(v) = serde_json::from_str::<Value>(&text) else {
-            continue;
-        };
-        let mut out: Vec<usize> = Vec::new();
-        for n in v["notes"].as_array().into_iter().flatten() {
-            let Some(i) = n.as_u64().map(|i| i as usize) else {
-                continue;
-            };
-            if (1..=notes.len()).contains(&i) && !out.contains(&(i - 1)) {
-                out.push(i - 1);
+    Ok(match json_answer(client, &body, cancel)? {
+        Answer::Got(v, timings) => {
+            let mut out: Vec<usize> = Vec::new();
+            for n in v["notes"].as_array().into_iter().flatten() {
+                let Some(i) = n.as_u64().map(|i| i as usize) else {
+                    continue;
+                };
+                if (1..=notes.len()).contains(&i) && !out.contains(&(i - 1)) {
+                    out.push(i - 1);
+                }
             }
+            out.truncate(prompt::PICKED);
+            Answer::Got(out, timings)
         }
-        out.truncate(prompt::PICKED);
-        return Ok(out);
-    }
-    Ok(Vec::new())
+        Answer::Unreadable(why) => Answer::Unreadable(why),
+    })
 }
 
 /// The first `chars` characters of `text`, and `…` if there were more.

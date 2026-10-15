@@ -262,8 +262,10 @@ impl Options {
             format!("{}_{}", self.from, self.to)
         };
         if let Some(t) = self.topic {
-            name.push('_');
-            name.push_str(&slug(&chat.topics()[t]));
+            // The topic's number as well as its name: two names can make one
+            // slug ("Mediji / PR", "Mediji - PR"), and the second summary
+            // would be written over the first.
+            name.push_str(&format!("_t{}-{}", t + 1, slug(&chat.topics()[t])));
         } else if self.by_topic {
             name.push_str("_by-topic");
         }
@@ -319,6 +321,11 @@ pub fn document(chat: &Chat, options: &Options, summary: &Summary, written: &str
             "> {} of {} parts got no readable answer from the model and are missing from this summary.\n\n",
             summary.failed, summary.parts
         ));
+    }
+    if summary.cut {
+        out.push_str(
+            "> The model reached its length limit, so this summary stops where the limit fell.\n\n",
+        );
     }
     out.push_str(&summary.body());
     out.push('\n');
@@ -656,16 +663,26 @@ fn answer(
         )
         .map_err(|e| e.to_string())?;
     let topics = chat.topics();
-    let mut rows = chat.rows(options.from, options.to, options.topic);
-    if let (None, Some(ocr)) = (&grounding, &server.ocr) {
-        let pictures = chat.pictures(&rows);
-        kept_readings(
-            &readings_at(&chat.home),
-            &file_name(&ocr.model),
-            &mut rows,
-            pictures,
-        );
-    }
+    // **Only when the days are to be read.** Building the rows reads and
+    // parses every document in the range, and a follow-up question rests on
+    // the grounding already made of them: `tga_sum::answer` reads the chat's
+    // name and the days from the request, never its rows.
+    let rows = match &grounding {
+        Some(_) => Vec::new(),
+        None => {
+            let mut rows = chat.rows(options.from, options.to, options.topic);
+            if let Some(ocr) = &server.ocr {
+                let pictures = chat.pictures(&rows);
+                kept_readings(
+                    &readings_at(&chat.home),
+                    &file_name(&ocr.model),
+                    &mut rows,
+                    pictures,
+                );
+            }
+            rows
+        }
+    };
     let request = Request {
         chat: chat.title(),
         rows: &rows,
@@ -1043,6 +1060,9 @@ pub fn run(args: Vec<String>, models: &Path) -> Result<()> {
             summary.failed, summary.parts
         );
     }
+    if summary.cut {
+        eprintln!("  warning: the model reached its length limit; the summary stops there");
+    }
     eprintln!(
         "  {:.0} s in all; saved {}",
         started.elapsed().as_secs_f64(),
@@ -1127,6 +1147,15 @@ mod tests {
         o.to = day("2025-01-04");
         o.by_topic = true;
         assert_eq!(name(&o), "2025-01-02_2025-01-04_by-topic_detailed_en.md");
+        o.by_topic = false;
+        o.topic = Some(0);
+        assert_eq!(
+            name(&o),
+            format!(
+                "2025-01-02_2025-01-04_t1-{}_detailed_en.md",
+                slug(&chat.topics()[0])
+            )
+        );
         assert_eq!(
             o.path(home, &chat).parent().unwrap(),
             Path::new("H").join("analysis").join("summaries")
@@ -1166,6 +1195,39 @@ mod tests {
             chat.estimate(day("2025-01-04"), day("2025-01-04"), None)
                 .photos,
             1
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_summary_cut_at_its_limit_says_so_above_the_text() {
+        let dir = synthetic("cut");
+        let chat = Chat::open(&dir, None).unwrap();
+        let options = Options {
+            from: day("2025-01-02"),
+            to: day("2025-01-02"),
+            length: Length::Short,
+            lang: Lang::English,
+            by_topic: false,
+            topic: None,
+        };
+        let mut summary = Summary {
+            sections: vec![tga_sum::Section {
+                heading: None,
+                text: "It was decided".into(),
+            }],
+            messages: 2,
+            model: "gemma-test.gguf".into(),
+            lang: Lang::English,
+            ..Default::default()
+        };
+        let whole = document(&chat, &options, &summary, "2025-01-05 10:00");
+        assert!(!whole.contains("length limit"), "{whole}");
+        summary.cut = true;
+        let cut = document(&chat, &options, &summary, "2025-01-05 10:00");
+        assert!(
+            cut.contains("> The model reached its length limit, so this summary stops where the limit fell.\n\nIt was decided\n"),
+            "{cut}"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

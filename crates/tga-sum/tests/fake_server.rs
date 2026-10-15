@@ -27,9 +27,26 @@ struct Script {
     garbage: AtomicUsize,
     /// A question's pick chooses no note.
     pick_none: AtomicBool,
+    /// How a streamed answer ends: one of the `END_*` below.
+    ending: AtomicUsize,
+    /// A notes call is answered `{"notes": []}`.
+    empty_notes: AtomicBool,
+    /// Refuse this many notes calls with `refuse_status` first.
+    refusals: AtomicUsize,
+    refuse_status: AtomicUsize,
     /// Every chat request, as sent.
     seen: Mutex<Vec<Value>>,
 }
+
+/// `finish_reason: "stop"`, `[DONE]` and the closing chunk, as llama-server
+/// ends a stream.
+const END_WHOLE: usize = 0;
+/// The socket closed after a few chunks: the server killed mid-answer.
+const END_KILLED: usize = 1;
+/// `finish_reason: "length"`: the answer hit its `max_tokens`.
+const END_LENGTH: usize = 2;
+/// The closing chunk with neither a `finish_reason` nor `[DONE]` before it.
+const END_UNSAID: usize = 3;
 
 struct Fake {
     port: u16,
@@ -141,12 +158,29 @@ fn serve(conn: TcpStream, s: &Script) {
                     &json!({"choices": [{"message": {"content": picked.to_string()}}]}),
                 );
             } else if body.get("response_format").is_some() {
+                if s.refusals
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok()
+                {
+                    let status = s.refuse_status.load(Ordering::SeqCst);
+                    let said = json!({"error": {"code": status,
+                        "message": "the request exceeds the available context size"}})
+                    .to_string();
+                    let _ = write!(
+                        out,
+                        "HTTP/1.1 {status} Refused\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{said}",
+                        said.len()
+                    );
+                    return;
+                }
                 let content = if s
                     .garbage
                     .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                     .is_ok()
                 {
                     "{\"notes\": [ {\"day\": \"2024-1".to_string()
+                } else if s.empty_notes.load(Ordering::SeqCst) {
+                    json!({"notes": []}).to_string()
                 } else {
                     json!({"notes": [{"day": "2024-12-02", "weight": "major",
                                       "what": "Something was decided.",
@@ -161,7 +195,7 @@ fn serve(conn: TcpStream, s: &Script) {
                 );
             } else {
                 let text = format!("\nIt was decided [#{}] and denied [#{STRANGER}].", ids[0]);
-                streamed(&mut out, &text);
+                streamed(&mut out, &text, s.ending.load(Ordering::SeqCst));
             }
         }
         _ => {
@@ -195,8 +229,8 @@ fn plain(out: &mut TcpStream, v: &Value) {
 }
 
 /// The text as server-sent events, three characters a chunk, so citations
-/// arrive cut in half.
-fn streamed(out: &mut TcpStream, text: &str) {
+/// arrive cut in half, ended as `ending` says.
+fn streamed(out: &mut TcpStream, text: &str, ending: usize) {
     let _ = out.write_all(
         b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
     );
@@ -211,16 +245,30 @@ fn streamed(out: &mut TcpStream, text: &str) {
             )
         })
         .collect();
-    events.push(format!(
-        "data: {}\n\n",
-        json!({"choices": [{"delta": {}, "finish_reason": "stop"}],
-               "timings": {"prompt_n": 500, "predicted_n": 40,
-                           "prompt_per_second": 2000.0, "predicted_per_second": 60.0}})
-    ));
-    events.push("data: [DONE]\n\n".into());
+    if ending == END_KILLED {
+        events.truncate(3);
+    } else if ending != END_UNSAID {
+        let reason = if ending == END_LENGTH {
+            "length"
+        } else {
+            "stop"
+        };
+        events.push(format!(
+            "data: {}\n\n",
+            json!({"choices": [{"delta": {}, "finish_reason": reason}],
+                   "timings": {"prompt_n": 500, "predicted_n": 40,
+                               "prompt_per_second": 2000.0, "predicted_per_second": 60.0}})
+        ));
+        events.push("data: [DONE]\n\n".into());
+    }
     for e in events {
         let _ = write!(out, "{:x}\r\n{e}\r\n", e.len());
         let _ = out.flush();
+    }
+    if ending == END_KILLED {
+        // Gone between two chunks, with no closing one.
+        let _ = out.shutdown(std::net::Shutdown::Both);
+        return;
     }
     let _ = out.write_all(b"0\r\n\r\n");
 }
@@ -388,6 +436,157 @@ fn a_part_that_never_answers_is_counted_and_left_out() {
         &Cache::none(),
     );
     assert_eq!(out.unwrap().failed, 1);
+}
+
+#[test]
+fn a_server_gone_mid_answer_is_an_error_not_a_short_summary() {
+    let fake = Fake::start(32_768);
+    let rows = chat(2, 10);
+    let topics = topics();
+    let req = request(&rows, &topics, Length::Detailed, false);
+    for ending in [END_KILLED, END_UNSAID] {
+        fake.script.ending.store(ending, Ordering::SeqCst);
+        let (out, events) = run(&fake, &req, &Cache::none());
+        assert!(out.is_err(), "ending {ending}: {out:?}");
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Written(_))),
+            "ending {ending}: nothing was finished"
+        );
+    }
+    // The same server answering whole again: the same request is a summary.
+    fake.script.ending.store(END_WHOLE, Ordering::SeqCst);
+    let (out, _) = run(&fake, &req, &Cache::none());
+    assert!(!out.unwrap().cut);
+}
+
+#[test]
+fn an_answer_stopped_at_its_length_limit_is_kept_and_said() {
+    let fake = Fake::start(32_768);
+    fake.script.ending.store(END_LENGTH, Ordering::SeqCst);
+    let rows = chat(2, 10);
+    let topics = topics();
+    let (out, events) = run(
+        &fake,
+        &request(&rows, &topics, Length::Detailed, false),
+        &Cache::none(),
+    );
+    let s = out.unwrap();
+    assert!(s.cut);
+    assert_eq!(s.sections[0].text, "It was decided [#1000] and denied.");
+    assert!(events.iter().any(
+        |e| matches!(e, Event::Say(s) if s == "the answer reached its limit of 2500 tokens and stops there")
+    ));
+}
+
+#[test]
+fn a_range_of_nothing_but_stickers_and_ok_asks_the_model_nothing() {
+    let fake = Fake::start(32_768);
+    let mut rows = chat(1, 6);
+    for (i, r) in rows.iter_mut().enumerate() {
+        if i % 2 == 0 {
+            r.text = "haha".into();
+        } else {
+            r.text.clear();
+            r.media = "sticker".into();
+        }
+    }
+    let topics = topics();
+    for by_topic in [false, true] {
+        let (out, _) = run(
+            &fake,
+            &request(&rows, &topics, Length::Detailed, by_topic),
+            &Cache::none(),
+        );
+        match out {
+            Err(Error::Bad(m)) => assert_eq!(m, "nothing was said in these days"),
+            other => panic!("by topic {by_topic}: {other:?}"),
+        }
+    }
+    let never = AtomicBool::new(false);
+    let g = ground(
+        &fake.client(),
+        &request(&rows, &topics, Length::Short, false),
+        &Cache::none(),
+        &never,
+        &mut |_| {},
+    );
+    assert!(matches!(g, Err(Error::Bad(_))), "{g:?}");
+    assert!(fake.chats().is_empty());
+}
+
+#[test]
+fn a_busy_part_with_no_notes_is_not_kept_for_next_time() {
+    let fake = Fake::start(6_000);
+    fake.script.empty_notes.store(true, Ordering::SeqCst);
+    let rows = chat(6, 40);
+    let topics = topics();
+    let dir = std::env::temp_dir().join(format!("tga-sum-empty-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cache = Cache::at(&dir);
+    let req = request(&rows, &topics, Length::Short, false);
+
+    let (out, events) = run(&fake, &req, &cache);
+    assert!(out.is_err(), "no part had a note");
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::Say(s) if s.contains("not kept, so a re-run asks again"))));
+    let kept = std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0);
+    assert_eq!(kept, 0, "an empty answer is not the answer for good");
+
+    // Asked again, the model has something to say, and every part is asked.
+    let parts = fake.notes_calls();
+    fake.script.empty_notes.store(false, Ordering::SeqCst);
+    let (again, _) = run(&fake, &req, &cache);
+    assert_eq!(again.unwrap().failed, 0);
+    assert_eq!(fake.notes_calls(), parts * 2);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_refusal_is_not_asked_again_and_its_reason_is_said() {
+    let fake = Fake::start(6_000);
+    fake.script.refuse_status.store(400, Ordering::SeqCst);
+    fake.script.refusals.store(usize::MAX, Ordering::SeqCst);
+    let rows = chat(6, 40);
+    let topics = topics();
+    let (out, events) = run(
+        &fake,
+        &request(&rows, &topics, Length::Short, false),
+        &Cache::none(),
+    );
+    let parts = events
+        .iter()
+        .filter(|e| matches!(e, Event::Say(s) if s.contains("the model server refused (400: the request exceeds the available context size)")))
+        .count();
+    assert!(parts > 1, "{events:?}");
+    assert_eq!(
+        fake.notes_calls(),
+        parts,
+        "one try a part: a 400 stays a 400"
+    );
+    match out {
+        Err(Error::Bad(m)) => assert!(m.contains("exceeds the available context size"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_server_failure_is_tried_again_after_a_pause() {
+    let fake = Fake::start(6_000);
+    fake.script.refuse_status.store(503, Ordering::SeqCst);
+    fake.script.refusals.store(1, Ordering::SeqCst);
+    let rows = chat(6, 40);
+    let topics = topics();
+    let started = std::time::Instant::now();
+    let (out, _) = run(
+        &fake,
+        &request(&rows, &topics, Length::Short, false),
+        &Cache::none(),
+    );
+    let s = out.unwrap();
+    assert_eq!(s.failed, 0);
+    assert_eq!(fake.notes_calls(), s.parts + 1);
+    assert!(started.elapsed() >= std::time::Duration::from_secs(1));
 }
 
 #[test]

@@ -37,6 +37,12 @@ const TICK: Duration = Duration::from_millis(250);
 /// not wait forever.
 const REQUEST_DEADLINE: Duration = Duration::from_secs(30 * 60);
 
+/// The longest "are you there" and "what are you" may take. Both are answered
+/// at once by a server that is up, loading or not; something on the port that
+/// accepts and never answers would otherwise hold the caller for the whole
+/// [`REQUEST_DEADLINE`], with Stop pressed and nothing reading it.
+const PROBE_DEADLINE: Duration = Duration::from_secs(5);
+
 /// What the server says it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Props {
@@ -69,6 +75,15 @@ impl Timings {
     }
 }
 
+/// How a streamed answer ended.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Streamed {
+    pub timings: Timings,
+    /// The answer reached its `max_tokens` and was stopped there: whole as
+    /// far as it goes, and not finished.
+    pub cut: bool,
+}
+
 /// A llama-server on this machine.
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -95,15 +110,22 @@ impl Client {
         TcpStream::connect_timeout(&self.address(), CONNECT_TIMEOUT).is_ok()
     }
 
-    /// Whether a server is up and has finished loading its model.
+    /// Whether a server is up and has finished loading its model. Bounded by
+    /// [`PROBE_DEADLINE`].
     pub fn healthy(&self) -> bool {
-        let never = AtomicBool::new(false);
-        matches!(self.get("/health", &never), Ok(v) if v.get("status").and_then(Value::as_str) == Some("ok"))
+        self.healthy_unless(&AtomicBool::new(false))
     }
 
+    /// [`Client::healthy`], given up as soon as `cancel` is set: what a wait
+    /// that the user can stop asks.
+    pub fn healthy_unless(&self, cancel: &AtomicBool) -> bool {
+        matches!(self.probe("/health", cancel), Ok(v) if v.get("status").and_then(Value::as_str) == Some("ok"))
+    }
+
+    /// What the server has loaded. Bounded by [`PROBE_DEADLINE`].
     pub fn props(&self) -> Result<Props, Error> {
         let never = AtomicBool::new(false);
-        let v = self.get("/props", &never)?;
+        let v = self.probe("/props", &never)?;
         // `model_path` is the file it loaded; older builds name it only in
         // `/v1/models`, which is asked as a fallback.
         let path = v
@@ -111,7 +133,7 @@ impl Client {
             .and_then(Value::as_str)
             .map(str::to_string)
             .or_else(|| {
-                self.get("/v1/models", &never).ok().and_then(|m| {
+                self.probe("/v1/models", &never).ok().and_then(|m| {
                     m.pointer("/data/0/id")
                         .and_then(Value::as_str)
                         .map(str::to_string)
@@ -154,16 +176,29 @@ impl Client {
 
     /// One chat completion, streamed: `on` gets each piece of text as the
     /// model writes it. `body` gets `"stream": true` added.
+    ///
+    /// **An answer is finished when the server says so** — a `finish_reason`,
+    /// or `[DONE]` — and not when the socket goes quiet. A server stopped,
+    /// crashed or out of memory mid-answer closes the connection exactly as a
+    /// finished one does, and the text so far would otherwise be kept as the
+    /// whole summary.
     pub fn stream(
         &self,
         body: &Value,
         cancel: &AtomicBool,
         on: &mut dyn FnMut(&str),
-    ) -> Result<Timings, Error> {
+    ) -> Result<Streamed, Error> {
         let mut body = body.clone();
         body["stream"] = Value::Bool(true);
-        let mut reader = self.request("POST", "/v1/chat/completions", Some(&body), cancel)?;
-        let mut timings = Timings::default();
+        let mut reader = self.request(
+            "POST",
+            "/v1/chat/completions",
+            Some(&body),
+            REQUEST_DEADLINE,
+            cancel,
+        )?;
+        let mut out = Streamed::default();
+        let mut finished = false;
         let mut line = String::new();
         loop {
             // A server that never pauses never lets `Patient` look, so the
@@ -172,18 +207,20 @@ impl Client {
                 return Err(Error::Cancelled);
             }
             line.clear();
-            if reader
-                .read_line(&mut line)
-                .map_err(|e| io_error(e, cancel))?
-                == 0
-            {
-                break;
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {}
+                // Said it was done, then dropped the socket without the
+                // closing chunk: the answer is whole all the same.
+                Err(_) if finished && !cancel.load(Ordering::Relaxed) => break,
+                Err(e) => return Err(io_error(e, cancel)),
             }
             let Some(data) = line.trim_end().strip_prefix("data:") else {
                 continue;
             };
             let data = data.trim();
             if data == "[DONE]" {
+                finished = true;
                 break;
             }
             let Ok(v) = serde_json::from_str::<Value>(data) else {
@@ -200,19 +237,38 @@ impl Client {
                     on(piece);
                 }
             }
+            if let Some(reason) = v
+                .pointer("/choices/0/finish_reason")
+                .and_then(Value::as_str)
+            {
+                finished = true;
+                out.cut |= reason == "length";
+            }
             if let Some(t) = Timings::of(&v) {
-                timings = t;
+                out.timings = t;
             }
         }
-        Ok(timings)
+        if !finished {
+            return Err(Error::Bad(
+                "the model server stopped before the answer was finished".into(),
+            ));
+        }
+        Ok(out)
     }
 
-    fn get(&self, path: &str, cancel: &AtomicBool) -> Result<Value, Error> {
-        self.read_json(self.request("GET", path, None, cancel)?, cancel)
+    /// A short question about the server itself, under [`PROBE_DEADLINE`].
+    fn probe(&self, path: &str, cancel: &AtomicBool) -> Result<Value, Error> {
+        self.read_json(
+            self.request("GET", path, None, PROBE_DEADLINE, cancel)?,
+            cancel,
+        )
     }
 
     fn post(&self, path: &str, body: &Value, cancel: &AtomicBool) -> Result<Value, Error> {
-        self.read_json(self.request("POST", path, Some(body), cancel)?, cancel)
+        self.read_json(
+            self.request("POST", path, Some(body), REQUEST_DEADLINE, cancel)?,
+            cancel,
+        )
     }
 
     fn read_json(
@@ -228,12 +284,14 @@ impl Client {
     }
 
     /// Send one request; on a 2xx, the body to read. Anything else is an
-    /// error carrying what the server said.
+    /// error carrying what the server said. `deadline` bounds the whole of
+    /// it, start to last byte.
     fn request<'a>(
         &self,
         method: &str,
         path: &str,
         body: Option<&Value>,
+        deadline: Duration,
         cancel: &'a AtomicBool,
     ) -> Result<Box<dyn BufRead + 'a>, Error> {
         if cancel.load(Ordering::Relaxed) {
@@ -256,7 +314,7 @@ impl Client {
         let mut reader = BufReader::new(Patient {
             socket,
             cancel,
-            deadline: Instant::now() + REQUEST_DEADLINE,
+            deadline: Instant::now() + deadline,
         });
         let mut status_line = String::new();
         reader
@@ -337,8 +395,12 @@ impl Read for Patient<'_> {
                         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                     ) =>
                 {
+                    // **Not `Interrupted`.** `read_line` and `read_to_string`
+                    // retry that kind by contract, so a Stop pressed while the
+                    // server was still thinking spun here for good. The
+                    // caller's `io_error` names it `Cancelled` by the flag.
                     if self.cancel.load(Ordering::Relaxed) {
-                        return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+                        return Err(io::Error::other("cancelled"));
                     }
                     if Instant::now() > self.deadline {
                         return Err(io::Error::new(
@@ -387,9 +449,14 @@ impl<R: BufRead> Read for Chunked<R> {
         }
         if self.left == 0 {
             let mut size = String::new();
+            // The body ends on a zero-size chunk. A socket closed before it
+            // is a server that went away between two chunks, and the text so
+            // far is not the whole answer.
             if self.inner.read_line(&mut size)? == 0 {
-                self.done = true;
-                return Ok(0);
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "the stream ended before its last chunk",
+                ));
             }
             // A chunk size may carry `;extensions`; nobody here sends them.
             let hex = size.trim().split(';').next().unwrap_or_default();
@@ -447,6 +514,59 @@ mod tests {
         let wire = b"a\r\nhello";
         let mut out = String::new();
         assert!(Chunked::new(&wire[..]).read_to_string(&mut out).is_err());
+    }
+
+    #[test]
+    fn a_body_cut_between_chunks_is_an_error_not_a_short_answer() {
+        let wire = b"5\r\nhello\r\n";
+        let mut out = String::new();
+        let err = Chunked::new(&wire[..])
+            .read_to_string(&mut out)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn a_port_that_accepts_and_never_answers_does_not_hold_a_probe() {
+        // Bound and never served: the system accepts the connection for it,
+        // and the request then waits on a reply that is not coming.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = Client::new(silent.local_addr().unwrap().port());
+
+        let cancel = AtomicBool::new(false);
+        let started = Instant::now();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(300));
+                cancel.store(true, Ordering::Relaxed);
+            });
+            assert!(!client.healthy_unless(&cancel));
+        });
+        assert!(started.elapsed() < Duration::from_secs(3), "Stop was heard");
+
+        let started = Instant::now();
+        assert!(!client.healthy());
+        assert!(
+            started.elapsed() < PROBE_DEADLINE + Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn stop_is_heard_while_the_server_is_still_thinking() {
+        // A long prefill: connected, sent, and nothing back yet. This spun
+        // for good while a cancelled read said `Interrupted`.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = Client::new(silent.local_addr().unwrap().port());
+        let cancel = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(300));
+                cancel.store(true, Ordering::Relaxed);
+            });
+            assert!(matches!(client.tokens("x", &cancel), Err(Error::Cancelled)));
+        });
     }
 
     #[test]

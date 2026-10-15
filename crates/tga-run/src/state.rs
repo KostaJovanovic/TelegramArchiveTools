@@ -23,6 +23,7 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Local};
 
+use crate::cli::thousands;
 use crate::job::{Counted, Progress};
 use crate::refresh::{Source, Target};
 
@@ -209,6 +210,10 @@ pub struct State {
     /// What this run wrote and what it could not.
     written: usize,
     failed: Vec<String>,
+    /// Exports that appeared while a run held the rows, found by the rescan
+    /// that ends it and not yet handed to `job::count`. See
+    /// [`State::take_uncounted`].
+    uncounted: Vec<Source>,
 }
 
 impl Default for State {
@@ -232,6 +237,7 @@ impl Default for State {
             generation: 0,
             written: 0,
             failed: Vec::new(),
+            uncounted: Vec::new(),
         }
     }
 }
@@ -267,6 +273,8 @@ impl State {
         if !same {
             self.generation += 1;
             self.selected.clear();
+            // Waiting on a folder no longer on screen.
+            self.uncounted.clear();
         }
         self.root = root.clone();
 
@@ -571,11 +579,26 @@ impl State {
                     }
                 }
                 // Re-read the folder: every report just written changes what
-                // is stale, and the rows should say so.
-                let _ = self.rescan();
+                // is stale, and the rows should say so. A database that
+                // appeared meanwhile — the exporter finishing a chat, "report
+                // after export" adding it — is a new row with no count, and
+                // is kept for the window to send off to be counted.
+                let found = self.rescan();
+                self.uncounted.extend(found);
                 self.status = finished_status(self.written, &self.failed, stopped);
             }
         }
+    }
+
+    /// The rows a finished run's rescan found and nothing has counted yet,
+    /// for the caller to hand to `job::count` — once no count is running,
+    /// since starting one drops the last.
+    ///
+    /// Kept here rather than returned by [`State::apply`] because the batch
+    /// that ends a run may arrive while a count from a folder pick is still
+    /// going, and a list returned then would have nowhere to wait.
+    pub fn take_uncounted(&mut self) -> Vec<Source> {
+        std::mem::take(&mut self.uncounted)
     }
 
     pub fn apply_count(&mut self, counted: Counted) {
@@ -620,19 +643,6 @@ pub fn finished_status(written: usize, failed: &[String], stopped: bool) -> Stri
         [] => format!("{head}."),
         [first, ..] => format!("{head}; {} failed — {first}", failed.len()),
     }
-}
-
-/// `6,643`.
-fn thousands(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
 }
 
 /// `2.4 GB`. Decimal units, as Explorer's own column is not and as the
@@ -941,6 +951,39 @@ mod tests {
         state.toggle(&base.join("B").join("B.sqlite"));
         assert!(state.rescan().is_empty());
         assert_eq!(state.selected.len(), 2);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_database_that_appears_during_a_run_is_left_to_be_counted() {
+        let base =
+            std::env::temp_dir().join(format!("tga-run-state-appears-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let touch = |name: &str| {
+            let dir = base.join(name);
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            std::fs::write(dir.join(format!("{name}.sqlite")), b"").expect("touch");
+        };
+        touch("A");
+        let mut state = State::default();
+        assert_eq!(state.set_path(&base).len(), 1);
+        state.start().expect("A needs a report");
+
+        // The exporter finishes another chat while the report is written.
+        touch("C");
+        state.apply(Progress::Finished { stopped: false });
+        assert_eq!(
+            state.take_uncounted(),
+            vec![Source::Database(base.join("C").join("C.sqlite"))]
+        );
+        assert!(state.take_uncounted().is_empty(), "handed over once");
+
+        // One found and then left behind by a folder change is not counted.
+        state.start_one(&base.join("A").join("A.sqlite"));
+        touch("D");
+        state.apply(Progress::Finished { stopped: false });
+        state.set_path(&std::env::temp_dir().join("tga-run-state-elsewhere"));
+        assert!(state.take_uncounted().is_empty());
         let _ = std::fs::remove_dir_all(&base);
     }
 }
