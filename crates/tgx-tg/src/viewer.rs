@@ -326,7 +326,7 @@ fn row_of(m: tgx_archive::StoredMessage, recovered: &std::collections::HashSet<i
         file_skipped: ["photo", "file"].iter().any(|k| {
             p.get(*k)
                 .and_then(Value::as_str)
-                .is_some_and(|v| v.starts_with("(File"))
+                .is_some_and(tgx_format::placeholder::is_skipped)
         }),
         reactions: reactions_of(p),
         forwarded: p

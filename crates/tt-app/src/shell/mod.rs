@@ -293,10 +293,10 @@ pub struct Shell {
     started: bool,
     /// The palette changed and the context has not been told.
     ///
-    /// `theme::install` re-uploads the font definitions, so calling it on every
-    /// frame would rebuild the glyph atlas sixty times a second for an answer
-    /// that changes when someone clicks the chip. Starts `true` so the first
-    /// frame installs it.
+    /// The fonts go in once per context (`theme::install_fonts`), but the
+    /// style is still cloned and replaced on every call, for an answer that
+    /// changes when someone clicks the chip. Starts `true` so the first frame
+    /// installs it.
     theme_stale: bool,
     /// Frames drawn. Only [`shot`] reads it, to know when the layout has
     /// settled enough to be worth photographing.
@@ -434,6 +434,13 @@ impl Shell {
     /// repaint, and these two are the events that decide what the very first
     /// screen says.
     fn start_up(&mut self) {
+        // Said once, where a warning is kept; Settings carries the way out.
+        if let Some(why) = tgx_tg::config::settings_unreadable() {
+            self.journal.warn(format!(
+                "Your settings file was not used: {why}. Nothing is saved over it until \
+                 you choose to in Settings."
+            ));
+        }
         let tx = self.bridge.sender();
         // The one caller `config::lockdown_error` was written for. Until it
         // existed nothing asked, and an ACL failure on the folder holding a
@@ -867,7 +874,7 @@ impl eframe::App for Shell {
         self.rebuild_rows_if_stale();
         // The analyser's workers report on their own channels, not the
         // bridge's; they wake the window the same way. See `library`.
-        self.library.drain();
+        self.library.drain(ctx);
         // What a report contains is a setting; the run reads it off the
         // Library's state when it starts, so it is handed over before any
         // start this frame can happen.

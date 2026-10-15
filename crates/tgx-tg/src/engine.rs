@@ -335,7 +335,7 @@ fn describe(
         }
         // The skip placeholder is the interesting case, so name it as one
         // rather than printing the whole parenthesised sentence.
-        what.push(if v.starts_with("(File") {
+        what.push(if tgx_format::placeholder::is_skipped(v) {
             format!("{key}=skipped")
         } else {
             format!("{key}={v}")
@@ -2607,22 +2607,6 @@ mod tests {
         assert!(!worth_fetching(77, true, false));
         // A stripped thumbnail has no Telegram file id and is never archived.
         assert!(!worth_fetching(0, false, false));
-    }
-
-    /// `tgx-archive` may not depend on this crate, so `merge_volatile` matches
-    /// Desktop's "I did not save this" placeholders on their shared prefix
-    /// rather than on these constants. That is the only thing letting a
-    /// re-sync with a raised size limit replace the placeholder with the file
-    /// it finally fetched — so if the strings ever stop starting this way, the
-    /// backfill goes silently back to leaving the payload wrong.
-    #[test]
-    fn the_skip_placeholders_keep_the_shape_the_archive_matches_on() {
-        for placeholder in [plan::NOT_INCLUDED, plan::TOO_LARGE] {
-            assert!(
-                placeholder.starts_with("(File "),
-                "{placeholder:?} no longer matches tgx-archive's SKIPPED_PREFIX"
-            );
-        }
     }
 
     /// How many `Progress::Messages` a chat of `total` messages would send.

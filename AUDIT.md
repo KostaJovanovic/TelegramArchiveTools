@@ -10,6 +10,8 @@ raised 33 findings across every crate. All are closed; the items that were
 not reproduced here, because a closed finding list is the kind of document that
 gets read as current.
 
+A third, of the merged workspace, ran 2026-10-15; see its own section below.
+
 The section that matters is the next one.
 
 ---
@@ -192,6 +194,42 @@ should not have.
 its newest 500 stored messages, so it fetches the missing messages — but not
 the media of the 47,800 it already holds, because a sync backfills files only
 for messages it re-reads. "Re-read the whole history" is the recovery.
+
+---
+
+# The third code audit — 2026-10-15
+
+The first audit of the merged workspace: seven reviewers, one per area, and a
+skeptic behind each that tried to refute every finding. 99 raised, 79
+confirmed, 13 uncertain, 7 refuted. Fixed on the `audit-fixes` branch with all
+four replay legs green either side. As above, the closed list is not kept here;
+what is worth keeping is what moved figures and what stayed open.
+
+**What changes a report's numbers.** `media_saved` counts every Desktop
+placeholder, not only "exceeds" (`tga-read`); retention splits "stayed" from
+"came back" (`docs/analyser/PLAN.md`); and the silent-member, emoji, award and
+arrow figures each had a counting error. The recorded baselines were not on
+any drive that day, so these were compared on `reference\` with the build
+before the fixes, field by field.
+
+**Left open, on purpose:**
+
+- **#20, #72** — the store, `unpack` and the Viewer parse a whole chat's
+  payloads at once. Paging them touches the bytes every leg compares; worth it
+  only with the legs watching.
+- **#52** — a dropped connection mid-history ends the chat, where a 500
+  resumes from the cursor. **#67** — two copies of the retry ladder. Both need a
+  live network to prove a change right.
+- **#50** — `peer_refs_for` matches dialogs by bare id; a user and a channel
+  sharing one are now caught only when both appear before the lookup stops.
+  The real fix passes `(id, ChatKind)` from the callers holding a `ChatInfo`.
+- **#49** — `split::plan` and `open_archive` each carry the name-clash rule.
+- **#63** — a second process still rotates the window's live `tgx.log`.
+- **#97** — a chat that grows while picked in Summaries is not re-read.
+- **#70, #80, #88** — judged not worth the change: the duplicate check reads
+  each file twice deliberately, the two result summaries serve different
+  readers, and the Activity log's per-frame cost was not measured as a
+  problem.
 
 ---
 

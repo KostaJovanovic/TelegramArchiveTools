@@ -559,6 +559,10 @@ impl SummariesState {
                                 f.summary.failed, f.summary.parts
                             ));
                         }
+                        if f.summary.cut {
+                            self.status
+                                .push_str(" — the answer hit its length limit and stops short");
+                        }
                         if f.unread_photos > 0 {
                             self.status.push_str(&format!(
                                 " — the text in {} photo{} was not read",

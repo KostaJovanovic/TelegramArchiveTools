@@ -255,7 +255,18 @@ impl Library {
     /// looks at the chat list, and its rows must be right when they come back.
     /// In a batch, because a run emits one message per topic it reads, and a
     /// ten-topic export would otherwise be ten frames nobody sees.
-    pub(super) fn drain(&mut self) {
+    pub(super) fn drain(&mut self, ctx: &egui::Context) {
+        self.drain_counts();
+        self.drain_run();
+        // What the rescan ending a run found, once no count is running —
+        // starting one drops the last (`State::take_uncounted`).
+        if self.counts.is_none() {
+            let todo = self.state.take_uncounted();
+            self.count(todo, ctx);
+        }
+    }
+
+    fn drain_counts(&mut self) {
         if let Some(rx) = &self.counts {
             let mut batch = Vec::new();
             let finished = loop {
@@ -272,6 +283,9 @@ impl Library {
                 self.counts = None;
             }
         }
+    }
+
+    fn drain_run(&mut self) {
         let Some(run) = &self.run else {
             return;
         };

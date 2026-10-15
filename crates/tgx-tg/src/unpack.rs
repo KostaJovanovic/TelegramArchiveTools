@@ -366,7 +366,7 @@ async fn write_media(
     let thumb = payload
         .get("thumbnail")
         .and_then(Value::as_str)
-        .filter(|t| !t.starts_with("(File"));
+        .filter(|t| !tgx_format::placeholder::is_skipped(t));
     let owner = rows.iter().find(|r| r.role == "file");
     if let (Some(thumb), Some(owner)) = (thumb, owner) {
         if let Some(rel) = contained(thumb) {

@@ -562,6 +562,23 @@ async fn import(roots: &[std::path::PathBuf], db: &std::path::Path, dry_run: boo
             ),
             Outcome::Failed(e) => println!("  FAILED: {e}"),
         }
+        if c.unread > 0 {
+            println!(
+                "  {} could not be read back out of the exports — a file moved, changed or \
+                 stopped parsing since the comparison",
+                c.unread
+            );
+        }
+        let newer = verdicts
+            .iter()
+            .find(|v| v.chat_id == c.chat_id)
+            .map_or(0, |v| v.newer.len());
+        if newer > 0 {
+            println!(
+                "  not imported: {newer} message(s) newer than the database's last sync — \
+                 a sync reads those, and they were never deleted"
+            );
+        }
     }
     if done.is_empty() {
         println!("nothing to import — no database lacks a message these exports hold");
@@ -667,6 +684,15 @@ async fn compare(
                 .collect();
             let more = if v.missing.len() > 12 { ", …" } else { "" };
             println!("    ids: {}{more}", ids.join(", "));
+        }
+        if !v.newer.is_empty() {
+            let span = compare::date_span(&v.newer)
+                .map(|(a, b)| format!(", {a} … {b}"))
+                .unwrap_or_default();
+            println!(
+                "  {} sent after the database's last sync{span} — not missing, a sync reads them",
+                v.newer.len()
+            );
         }
         if v.only_in_database > 0 {
             println!(

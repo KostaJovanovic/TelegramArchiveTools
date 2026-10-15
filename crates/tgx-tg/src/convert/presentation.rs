@@ -164,7 +164,7 @@ fn reactions_chosen(r: &tl::types::MessageReactions) -> Option<Value> {
 fn preview_of(out: &Map<String, Value>, preview_src: Option<&str>) -> Option<Value> {
     let s = |k: &str| out.get(k).and_then(Value::as_str).unwrap_or("");
     let n = |k: &str| out.get(k).and_then(Value::as_i64).unwrap_or(0);
-    let is_ph = |v: &str| v.starts_with("(File");
+    let is_ph = tgx_format::placeholder::is_skipped;
 
     let sized = |src: &str, box_size: i64| {
         let (_, css) = tgx_html::preview::preview_size(n("width"), n("height"), box_size);

@@ -251,7 +251,7 @@ unanswerable:
 | `pairs` | reply edges collapsed onto unordered pairs, ranked on `min(there, back)` rather than the total | 4,007 mutual, 2,355 one-way |
 | `answer` | median reply latency by the hour the *parent* was posted | fastest 03:00 at 22 s, slowest 08:00 at 39 min |
 | `tenure` | first, last, active days, days dormant, and a status per person | 137 active, 32 fading, 81 long gone |
-| `retention` | active / new / returning / lost per month, silent months included | 10 months, 82.2% kept |
+| `retention` | active / new / stayed / came back / lost per month, silent months included | 10 months, 82.2% kept |
 | `depth` | reply-chain length, 2 up to 8+ | deepest 22, mean 2.5 |
 
 - **`pairs` is the figure the graph section cannot give.** A directed edge
@@ -265,6 +265,13 @@ unanswerable:
   reclassify everyone in it as gone.
 - **`retention` keeps silent months on the axis.** Closing a six-month gap into
   a single step reports the first month after it as ordinary retention.
+- **"Stayed" and "came back" are different people, and split a month's active
+  with "new".** Stayed spoke last month too; came back spoke at some point
+  before but not last month. The first is still serialised under its old key,
+  `returning`, so recorded dumps keep reading; `came_back` is the new key, and a
+  dump without it renders the column empty. Until 2026-10-15 only the first
+  existed, under the name of the second, and somebody back after six months was
+  counted nowhere.
 - **It costs 0.16 s and 27 KB** on a 333,582-message archive: one extra pass
   over the replies.
 

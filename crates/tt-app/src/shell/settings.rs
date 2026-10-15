@@ -105,6 +105,7 @@ impl Shell {
             .id_salt("settings-body")
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                self.unreadable_settings(ui);
                 ui.columns(2, |cols| {
                     self.destination_section(&mut cols[0]);
                     self.contents_section(&mut cols[0]);
@@ -117,6 +118,34 @@ impl Shell {
                 });
                 ui.add_space(space::BREAK);
             });
+    }
+
+    /// `settings.json` would not read at start, so nothing here is saved over
+    /// it — it may still hold the credentials — until this is pressed. The
+    /// file is kept as `settings.json.bad` either way.
+    fn unreadable_settings(&mut self, ui: &mut Ui) {
+        let Some(why) = tgx_tg::config::settings_unreadable() else {
+            return;
+        };
+        let p = self.palette;
+        block(ui, |ui| {
+            ui.label(text(
+                format!(
+                    "Your settings file was not used: {why}. Changes here are not saved until \
+                     you choose to replace it."
+                ),
+                &p,
+            ))
+        });
+        let replace = row(ui, |ui| {
+            button(ui, "Replace it with these settings", true, false, &p).clicked()
+        });
+        if replace {
+            tgx_tg::config::allow_settings_overwrite();
+            self.commit_settings();
+            self.status = "Settings saved over the unreadable file".into();
+        }
+        ui.add_space(space::STEP);
     }
 
     /// **The path shows its start, not its end, and the whole of it is the

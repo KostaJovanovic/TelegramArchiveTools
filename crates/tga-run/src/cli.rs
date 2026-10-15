@@ -335,15 +335,16 @@ fn read_database(
     quiet: bool,
     progress: tga_read::Progress<'_>,
 ) -> anyhow::Result<tga_read::Export> {
-    let chats = tga_db::chats(db)?;
-    let export = tga_db::load(db, wanted, Some(progress))?;
+    let reader = tga_db::Reader::open(db)?;
+    let chats = reader.chats()?;
+    let export = reader.load(wanted, Some(progress))?;
 
     if !quiet {
         println!("  database {}", db.display());
         let id = export.topics.first().and_then(|t| t.chat_id);
         if let Some(id) = id {
-            let deleted = tga_db::deleted(db, id).unwrap_or(0);
-            let (edited, versions) = tga_db::edits(db, id).unwrap_or((0, 0));
+            let deleted = reader.deleted(id).unwrap_or(0);
+            let (edited, versions) = reader.edits(id).unwrap_or((0, 0));
             if deleted > 0 {
                 println!("  {deleted} deleted on Telegram, kept, and counted here");
             }
@@ -562,7 +563,9 @@ fn attachment(
 /// media — and the bytes fetched one document at a time, only for messages
 /// whose file is a document this build can open.
 pub(crate) struct Stored {
-    db: PathBuf,
+    /// Open once: a digest asks for one blob per document, and each used to
+    /// pay a runtime and a libsql open of its own.
+    reader: tga_db::Reader,
     /// Message id to `(file_id, kind)`, the `file` role: that is the one a
     /// document is filed under, and an image sent as a file.
     files: std::collections::HashMap<i64, (i64, String)>,
@@ -577,9 +580,10 @@ impl Stored {
     /// the table. A digest without attachment text is what it wrote before.
     pub(crate) fn open(db: &Path, export: &tga_read::Export) -> Option<Self> {
         let chat_id = export.topics.iter().find_map(|t| t.chat_id)?;
+        let reader = tga_db::Reader::open(db).ok()?;
         let mut files = std::collections::HashMap::new();
         let mut photos = std::collections::HashMap::new();
-        for ((id, role), file) in tga_db::media_index(db, chat_id).ok()? {
+        for ((id, role), file) in reader.media_index(chat_id).ok()? {
             match role.as_str() {
                 "file" => files.insert(id, file),
                 "photo" => photos.insert(id, file),
@@ -587,7 +591,7 @@ impl Stored {
             };
         }
         Some(Stored {
-            db: db.to_path_buf(),
+            reader,
             files,
             photos,
         })
@@ -595,7 +599,7 @@ impl Stored {
 
     fn bytes_of(&self, message_id: i64) -> Option<Vec<u8>> {
         let (file_id, kind) = self.files.get(&message_id)?;
-        tga_db::blob(&self.db, *file_id, kind).ok().flatten()
+        self.blob(*file_id, kind)
     }
 
     /// The stored picture of a message whose media is a photo: what a photo
@@ -610,7 +614,7 @@ impl Stored {
     }
 
     pub(crate) fn blob(&self, file_id: i64, kind: &str) -> Option<Vec<u8>> {
-        tga_db::blob(&self.db, file_id, kind).ok().flatten()
+        self.reader.blob(file_id, kind).ok().flatten()
     }
 }
 

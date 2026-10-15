@@ -72,9 +72,7 @@ pub struct DownloadJob {
 }
 
 /// Desktop's verbatim placeholder strings for a file it did not save.
-pub const NOT_INCLUDED: &str = "(File not included. Change data exporting settings to download.)";
-pub const TOO_LARGE: &str =
-    "(File exceeds maximum size. Change data exporting settings to download.)";
+pub use tgx_format::placeholder::{NOT_INCLUDED, TOO_LARGE};
 
 /// What a message's media is, in the vocabulary `tgx-media` speaks.
 #[derive(Debug, Clone, PartialEq)]
