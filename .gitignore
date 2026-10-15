@@ -8,6 +8,8 @@ TelegramToolsData/
 # checkout that has not run since still has one.
 TelegramExporterData/
 Exports/
+# The summaries' models folder by default: llama.cpp and gigabytes of .gguf.
+/Models/
 
 # The built exe and whatever it writes beside itself. The folder itself is
 # tracked (dist/.gitkeep) so a fresh clone has somewhere to build into; its

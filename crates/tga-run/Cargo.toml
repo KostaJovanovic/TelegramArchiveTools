@@ -24,6 +24,9 @@ tga-stats = { path = "../tga-stats" }
 tga-metrics = { path = "../tga-metrics" }
 tga-notes = { path = "../tga-notes" }
 tga-report = { path = "../tga-report" }
+# The summary: rows in, a local model's text out. It reads no export itself,
+# which is why the reading happens here.
+tga-sum = { path = "../tga-sum" }
 
 anyhow = { workspace = true }
 

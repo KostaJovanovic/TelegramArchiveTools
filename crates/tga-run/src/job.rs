@@ -110,16 +110,18 @@ pub fn spawn(request: Request, wake: Wake) -> Run {
 /// Wrapped rather than left to the caller because "send, then repaint" has to
 /// happen at every send site and forgetting it at one produces a window that
 /// is a frame behind for the rest of the run.
-struct Waking<T> {
-    tx: Sender<T>,
-    wake: Wake,
+///
+/// The summary's workers send through it too (`summary.rs`).
+pub(crate) struct Waking<T> {
+    pub(crate) tx: Sender<T>,
+    pub(crate) wake: Wake,
 }
 
 impl<T> Waking<T> {
     /// Every send is ignored on failure: the window may have been closed, and a
     /// worker that panics on a closed channel loses the report it had already
     /// written.
-    fn send(&self, event: T) {
+    pub(crate) fn send(&self, event: T) {
         let _ = self.tx.send(event);
         (self.wake)();
     }

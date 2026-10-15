@@ -92,6 +92,10 @@ pub(super) struct ViewerState {
     pub(super) listed_for: Option<String>,
     pub(super) listing: bool,
 
+    /// Where the way back goes: the Library, unless the Viewer was opened
+    /// from a summary's citation.
+    pub(super) back: Option<View>,
+
     /// The chat on screen.
     pub(super) open: Option<Database>,
     pub(super) loading: bool,
@@ -332,9 +336,10 @@ impl Shell {
         let mut go_to = false;
         let mut refresh = false;
         let mut unpack = false;
+        let back_to = self.viewer.back.unwrap_or(View::Library);
         row(ui, |ui| {
             ui.spacing_mut().item_spacing.x = space::STEP;
-            if action(ui, text("\u{2190} Library", &p), true).clicked() {
+            if action(ui, text(format!("\u{2190} {}", back_to.label()), &p), true).clicked() {
                 back = true;
             }
             let v = &self.viewer;
@@ -432,7 +437,7 @@ impl Shell {
             });
         });
         if back {
-            self.show(View::Library);
+            self.show(back_to);
         }
         if let Some(t) = topic {
             self.viewer_set_topic(t);

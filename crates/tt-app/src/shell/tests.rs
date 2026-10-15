@@ -934,12 +934,14 @@ fn the_export_button_says_how_many_and_what_pressing_it_will_do() {
 
 #[test]
 fn the_viewer_is_entered_from_the_library_and_lights_its_rail_entry() {
-    assert_eq!(View::ALL.len(), 4);
+    assert_eq!(View::ALL.len(), 5);
     assert!(!View::ALL.contains(&View::Viewer));
     assert!(View::ALL.contains(&View::Library));
     // Settings last: it is consulted rarely, and the views above it are the
-    // work, in the order it is done.
-    assert_eq!(View::ALL[3], View::Settings);
+    // work, in the order it is done — a summary comes after the export.
+    assert_eq!(View::ALL[3], View::Summaries);
+    assert_eq!(View::ALL[4], View::Settings);
+    assert_eq!(View::Summaries.label(), "Summaries");
     assert_eq!(View::Viewer.on_rail(), View::Library);
     assert_eq!(View::Chats.on_rail(), View::Chats);
     assert_eq!(View::Viewer.label(), "Read");

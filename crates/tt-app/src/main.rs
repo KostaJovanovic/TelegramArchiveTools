@@ -23,6 +23,7 @@ mod actions;
 mod bridge;
 mod cli;
 mod diagnostics;
+mod holder;
 mod instance;
 mod journal;
 mod list;
@@ -135,6 +136,8 @@ enum Command {
     Window,
     /// The analyser's command line, with the word `analyse` taken off.
     Analyse(Vec<String>),
+    /// A local model's summary of a date range, with the word taken off.
+    Summarise(Vec<String>),
     /// Everything else is one of the exporter's: `login`, `export`, `--help`…
     Export(Vec<String>),
 }
@@ -148,6 +151,10 @@ fn command(mut args: Vec<String>) -> Command {
         Some("analyse" | "analyze" | "report") => {
             args.remove(0);
             Command::Analyse(args)
+        }
+        Some("summarise" | "summarize" | "summary") => {
+            args.remove(0);
+            Command::Summarise(args)
         }
         Some(_) => Command::Export(args),
     }
@@ -176,6 +183,12 @@ fn main() {
     // that keeps it. Nothing in the analyser logs.
     if let Command::Analyse(args) = command {
         finish(tga_run::cli::run(args));
+        return;
+    }
+    // The same for a summary: the analyser's side, offline but for loopback.
+    if let Command::Summarise(args) = command {
+        let models = tgx_tg::config::Settings::load().summary_models_dir();
+        finish(tga_run::summary::run(args, &models));
         return;
     }
     // **And a second window leaves before it too**, for the same reason and a
@@ -379,6 +392,17 @@ mod tests {
             assert_eq!(
                 command(argv(&[word, r"C:\export", "--digest"])),
                 Command::Analyse(argv(&[r"C:\export", "--digest"])),
+                "{word}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_spelling_of_summarise_reaches_the_summary_without_the_word() {
+        for word in ["summarise", "summarize", "summary"] {
+            assert_eq!(
+                command(argv(&[word, r"C:\db.sqlite", "--from", "2024-12-01"])),
+                Command::Summarise(argv(&[r"C:\db.sqlite", "--from", "2024-12-01"])),
                 "{word}"
             );
         }

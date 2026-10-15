@@ -616,6 +616,11 @@ fn bubble(
         );
     }
 
+    // The bubble's own area — a click selects the message — goes in
+    // **before** its parts: egui gives a click to the last area registered
+    // under the pointer, so the reply quote (jump to the message it answers),
+    // a picture and a card, all registered below, each win over it.
+    let whole = ui.interact(rect, ui.id().with(("bubble", r.id)), Sense::click());
     let mut click = None;
     let inner_x = rect.left() + PAD_X;
     for (py, part) in parts {
@@ -649,7 +654,9 @@ fn bubble(
                 if response.clicked() {
                     click = Some(Click::Jump(to));
                 }
-                response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Go to the message this answers");
             }
             Part::Media {
                 label,
@@ -798,11 +805,8 @@ fn bubble(
         }
     }
 
-    if click.is_none() {
-        let response = ui.interact(rect, ui.id().with(("bubble", r.id)), Sense::click());
-        if response.clicked() {
-            click = Some(Click::Select(r.id));
-        }
+    if click.is_none() && whole.clicked() {
+        click = Some(Click::Select(r.id));
     }
     (height, click)
 }
@@ -1462,6 +1466,75 @@ fn semibold(size: f32) -> FontId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Which of two overlapping click areas a click inside both reaches,
+    /// with `outer` registered first or last.
+    fn clicked(outer_first: bool) -> (bool, bool) {
+        let ctx = egui::Context::default();
+        let outer = Rect::from_min_size(pos2(10.0, 10.0), vec2(200.0, 100.0));
+        let inner = Rect::from_min_size(pos2(20.0, 20.0), vec2(80.0, 30.0));
+        let at = pos2(40.0, 30.0);
+        let mut got = (false, false);
+        let frames = [
+            vec![],
+            vec![egui::Event::PointerMoved(at)],
+            vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            }],
+            vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }],
+        ];
+        for events in frames {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 400.0))),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let add = |rect, name: &str| {
+                        ui.interact(rect, ui.id().with(name), Sense::click())
+                            .clicked()
+                    };
+                    let (o, i) = if outer_first {
+                        let o = add(outer, "outer");
+                        (o, add(inner, "inner"))
+                    } else {
+                        let i = add(inner, "inner");
+                        (add(outer, "outer"), i)
+                    };
+                    got.0 |= o;
+                    got.1 |= i;
+                });
+            });
+        }
+        got
+    }
+
+    /// **The last area registered under the pointer takes the click.** The
+    /// bubble's own area (select the message) once came after its parts, so
+    /// a click on a reply's quote — meant to jump to the message it answers —
+    /// or on a picture selected the bubble instead.
+    #[test]
+    fn a_part_registered_after_the_bubble_takes_the_click() {
+        assert_eq!(
+            clicked(false),
+            (true, false),
+            "registered last, the bubble swallows it"
+        );
+        assert_eq!(
+            clicked(true),
+            (false, true),
+            "registered first, the part gets it"
+        );
+    }
 
     fn row(id: i64, from: &str, time: &str) -> Row {
         Row {

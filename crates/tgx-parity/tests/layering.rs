@@ -267,6 +267,32 @@ fn tga_notes_depends_on_neither_the_reader_nor_the_documents() {
     }
 }
 
+/// `tga-sum` is handed rows and talks to a model on loopback. It reads no
+/// export, so the reading — and every rule about dates, names and documents
+/// that comes with it — stays in `tga-run`, written once for the digest and
+/// the summary alike. And it has no toolkit: the command line drives it too.
+#[test]
+fn tga_sum_reads_no_export_and_has_no_window() {
+    let names = dependency_names(&manifest("tga-sum"));
+    for banned in [
+        "tga-read",
+        "tga-db",
+        "tga-docs",
+        "tga-metrics",
+        "tga-run",
+        "tgx-archive",
+        "tgx-ui",
+        "eframe",
+        "egui",
+    ] {
+        assert!(
+            !names.iter().any(|n| n == banned),
+            "tga-sum/Cargo.toml depends on {banned} — the summary is handed digest rows by \
+             tga-run and renders nothing. See docs/SUMMARIES.md."
+        );
+    }
+}
+
 /// `tga-docs` links a zip reader, an XML parser and a PDF parser that panics
 /// on bad input, and `tga-db` links the store. Neither belongs anywhere near
 /// the report, so the one crate that drives a run is the only one that may

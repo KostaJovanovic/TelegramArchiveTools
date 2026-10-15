@@ -40,7 +40,7 @@ you won't do this again. **Sign out**, in the same place, ends the session at
 Telegram and deletes it from this computer; it is also how you switch
 accounts.
 
-The rail has four places:
+The rail has five places:
 
 - **Chats** — tick the chats you want and press **Export** at the top right.
   **Reload** fetches the list again; **Count** asks how many messages each chat
@@ -55,6 +55,10 @@ The rail has four places:
   **Make report**, **Open report**, **Read** a database in the window, or
   **Show in folder**. Rows that need a report are ticked already. The search
   box on the right looks inside the messages of every database.
+- **Summaries** — what happened in a chat between two days, written by a
+  local model (see below). Pick a chat, the days, **Short**, **Detailed** or
+  **Sections**, the whole group or by topic, and the language; press
+  **Summarise**.
 - **Settings** — every setting says what it does on the line under it.
 
 Reading a database shows deleted and edited messages, every earlier version,
@@ -62,7 +66,7 @@ and the files it kept — **Save as…** writes one out, **Export as folder…**
 writes the whole chat back out in Desktop's format. Filter by sender, or type
 a day into **Go to date**.
 
-Keys: **Ctrl+1–4** switch views, **Ctrl+F** jumps to the filter, **Ctrl+A**
+Keys: **Ctrl+1–5** switch views, **Ctrl+F** jumps to the filter, **Ctrl+A**
 ticks every chat shown, **Ctrl+E** exports, **F5** reloads, **Esc** clears
 the filter, and **Ctrl +/−/0** zoom. The window remembers its size, place and
 zoom.
@@ -135,6 +139,56 @@ message on one line, with each attached document's text and its real date, for
 a language model to map events onto. **Embed fonts** keeps the report looking
 right on any machine; off, it is about 300 KB smaller.
 
+### Summaries
+
+A summary is written by a model running **on this computer** — a
+[llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` with Gemma
+loaded — and nothing is sent anywhere else: the app only ever talks to
+`127.0.0.1`. You supply both, in one **models folder** — `Models\` beside the
+exe, or any folder you choose in **Settings → Summaries**, which also has a
+short *How to add a model*. [docs/MODELS.md](docs/MODELS.md) is the longer
+version: getting llama.cpp, and picking and downloading a model from Hugging
+Face. **Model** lists what is in the folder; the prompts are written for
+Gemma 4 26B-A4B.
+
+The app starts the server on port 8080 when you press **Summarise** and keeps
+it loaded while you are in Summaries, so a question after a summary is
+answered at once. It stops it two minutes after you leave Summaries, or when
+the window closes. If another program already has Gemma running on the port,
+that one is used and left running.
+
+**Text in photos is read too** — posters, screenshots, photographed pages — by
+an OCR model (PaddleOCR-VL, if you put it in the models folder), before the
+summary is written, so the summary knows what they said. The card holds one
+model at a time, so the app loads the OCR, reads the days' photos, then swaps
+in the summary's model. Each photo is read once and remembered. **Settings →
+Summaries → Read text in photos** turns it off.
+
+If another program's model server is on the port, the Summaries view says so
+under the form — which model it has loaded, and what that means: with Gemma, a
+summary uses it as it is but photos can't be read; with another model, no
+summary can run. **Stop it** (press twice) ends that server. The app never
+does that by itself; if the other program is in the middle of a job, that job
+fails or it starts the server again. Gemma 4 26B needs about 15 GB of video
+memory; close other programs that use the GPU, or it spills into RAM and runs
+a few times slower.
+
+**Ask about the days.** Under the summary is a question box: "who proposed
+the strike?", "what was decided on Tuesday?". The model answers from the same
+days' messages, citing them — click a `[#id]` to open the message — and
+remembers the conversation until you change the days or press **Clear**. You
+can ask without writing a summary first. When the days are too many to read
+at once, it first finds which of the summary's notes the question is about,
+then reads the messages behind those notes and answers from them.
+
+The line under the form says how many messages the days hold and roughly how
+long a summary that is. A short range is read in one go; a long one is read in
+parts, and the parts' notes are kept, so asking again — or for an overlapping
+range — redoes only what changed. **Detailed** and **Sections** cite the
+messages they rest on: click `[#18234]` to open that message. Each summary is
+saved in the chat's folder, under `analysis\summaries\`, and listed under
+**Saved**.
+
 ## Looking after your account
 
 `TelegramToolsData/`, next to the exe, holds your `api_hash` and your
@@ -179,7 +233,13 @@ TelegramTools sync --json                     # the same, with a JSON summary
 
 TelegramTools analyse "Exports\Dev Team"      # write report.html beside it
 TelegramTools analyse Exports --refresh       # every export whose report is behind
+
+TelegramTools summarise "Exports\Dev Team\Dev Team.sqlite" --from 2026-01-05 --to 2026-01-11 --detailed
 ```
+
+`summarise` takes `--short`, `--detailed` or `--sections`, `--by-topic` or
+`--topic <name>`, `--lang sr|en|chat` and `--port`; it needs a model server
+already running (`TelegramTools summarise --help`).
 
 `analyse` also takes `--digest`, `--handles`, `--no-fonts`, `--notes <file>`
 and `--out <path>`. From `cmd.exe`, use `start /wait TelegramTools …` — it is a

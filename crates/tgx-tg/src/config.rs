@@ -255,6 +255,37 @@ pub struct Settings {
     /// line write the same report.
     pub report_handles: bool,
 
+    /// Summaries: the folder holding the models and llama.cpp's
+    /// `llama-server.exe`, each in it or one folder down. `Models` beside the
+    /// executable by default, like `Exports`.
+    pub summary_models: String,
+    /// The `llama-server.exe` to start when nothing is serving on
+    /// [`summary_port`](Self::summary_port), by absolute path. Empty means the
+    /// one in the models folder.
+    pub summary_server: String,
+    /// The `.gguf` it loads, relative to the models folder (an absolute path
+    /// also works); empty, or a file no longer there, means the first Gemma
+    /// in the folder, else its first model.
+    pub summary_model: String,
+    /// The port on 127.0.0.1. The address is never a setting: a summary
+    /// sends other people's conversation to the model, so the model is on
+    /// this machine.
+    pub summary_port: u16,
+    /// Extra options for a server started from here. Empty is ReVision's
+    /// `gemma` profile.
+    pub summary_options: String,
+    /// Minutes a server started from here may sit unused, once the Summaries
+    /// view is left, before it is stopped and its 15 GB of video memory given
+    /// back. While the view is open it stays loaded.
+    pub summary_idle_minutes: u32,
+    /// Read the text in the range's photos (PaddleOCR-VL, in the models
+    /// folder) before the summary is written.
+    pub summary_photos: bool,
+    /// The Summaries view's last choices, so the next summary starts where
+    /// the last one left off: `short`/`detailed`/`sections`, `sr`/`en`/`chat`.
+    pub summary_length: String,
+    pub summary_lang: String,
+
     // Performance
     //
     // **There is no `chat_concurrency`.** This engine exports one chat at a
@@ -396,6 +427,15 @@ impl Default for Settings {
             report_digest: true,
             report_fonts: true,
             report_handles: false,
+            summary_models: app_dir().join("Models").to_string_lossy().into_owned(),
+            summary_server: String::new(),
+            summary_model: String::new(),
+            summary_port: 8080,
+            summary_options: String::new(),
+            summary_idle_minutes: 2,
+            summary_photos: true,
+            summary_length: "short".into(),
+            summary_lang: "sr".into(),
             download_concurrency: 5,
             page_size: 1000,
             sort_mode: "recent".into(),
@@ -411,6 +451,16 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// The models folder: the setting, or `Models` beside the executable
+    /// when it was emptied.
+    pub fn summary_models_dir(&self) -> PathBuf {
+        if self.summary_models.trim().is_empty() {
+            app_dir().join("Models")
+        } else {
+            PathBuf::from(self.summary_models.trim())
+        }
+    }
+
     /// Does this run write Desktop-format folders?
     ///
     /// The one place the Classic/Database choice is turned into "is there a
@@ -553,6 +603,10 @@ impl Settings {
         // `settings.json` instead of being rewritten — which is a smaller price
         // than duplicating the UI's key list across the layer boundary, where
         // the copy would then be free to drift.
+        if out.summary_port == 0 {
+            out.summary_port = 8080;
+        }
+        out.summary_idle_minutes = out.summary_idle_minutes.max(1);
         out.page_size = out.page_size.max(1);
         out.download_concurrency = out.download_concurrency.max(1);
         // Zero means unlimited for both of these, and a negative is neither a

@@ -788,6 +788,9 @@ TelegramTools -- export Telegram chats, and report on what was exported
   TelegramTools analyse <export> [options]
                        offline: write a report on an export or a database;
                        `TelegramTools analyse --help` for its options
+  TelegramTools summarise <export> --from <day> [--to <day>] [options]
+                       a local model's summary of a date range (Gemma on
+                       127.0.0.1, already running); `--help` for its options
   TelegramTools compare <export folder>... [--db <folder>] [--csv <file>]
                        offline: list messages old Desktop-format exports hold
                        that the databases do not (ids and dates only); an

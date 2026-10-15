@@ -198,17 +198,43 @@ pub async fn open_message_media(path: PathBuf, chat_id: i64, id: i64, tx: Events
     }
 }
 
-/// Copy one stored file out to `%TEMP%\tgx-view` and hand it to the system.
+/// What Open hands to Windows to open: pictures, video, sound, PDFs, text
+/// and Office's macro-free documents. Anything else — an `.exe`, a script, a
+/// shortcut, a macro document somebody posted — would run with this
+/// account's rights on one click, so its folder opens instead.
+const OPENABLE: [&str; 27] = [
+    "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "heic", "mp4", "mov", "m4v",
+    "webm", "mkv", "avi", "mp3", "m4a", "ogg", "oga", "opus", "wav", "flac", "pdf", "txt",
+    "docx", "xlsx", "pptx",
+];
+
+/// Whether a file of this name is opened, rather than shown in its folder.
+fn openable(name: &str) -> bool {
+    std::path::Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| OPENABLE.iter().any(|o| o.eq_ignore_ascii_case(e)))
+}
+
+/// Copy one stored file out to `%TEMP%\tgx-view` and hand it to the system
+/// — or, for a type that could run ([`OPENABLE`]), open its folder.
 ///
 /// The status line says which file opened; a failure is a warning, naming
 /// the file and the reason — a file name is not message text.
 pub async fn open_media(path: PathBuf, media: Media, tx: Events) {
+    let opens = openable(&media.name);
     let opened = match viewer::extract(&path, &media).await {
-        Ok(file) => super::open_path(&file),
+        Ok(file) if opens => super::open_path(&file),
+        Ok(file) => super::open_path(file.parent().unwrap_or(&file)),
         Err(e) => Err(e),
     };
     let _ = tx.send(match opened {
-        Ok(()) => Event::Status(format!("Opened {}", media.name)),
+        Ok(()) if opens => Event::Status(format!("Opened {}", media.name)),
+        Ok(()) => Event::Status(format!(
+            "Showed {} in its folder: a file of that type could be a program, so it is \
+             not opened from here",
+            media.name
+        )),
         Err(e) => Event::Warn(format!("Could not open {}: {e}", media.name)),
     });
 }
@@ -241,5 +267,25 @@ mod tests {
         let big = decode_first(&[png(2000, 1000)]).unwrap();
         assert_eq!(big.size, [PICTURE_SIDE as usize, PICTURE_SIDE as usize / 2]);
         assert!(decode_first(&[]).is_none());
+    }
+
+    #[test]
+    fn only_a_type_that_cannot_run_is_opened() {
+        for name in ["photo.JPG", "clip.mp4", "Zapisnik 01.12.docx", "scan.pdf"] {
+            assert!(openable(name), "{name}");
+        }
+        for name in [
+            "invoice.exe",
+            "x.js",
+            "x.hta",
+            "report.pdf.lnk",
+            "run.bat",
+            "macro.docm",
+            "old.doc",
+            "page.html",
+            "README",
+        ] {
+            assert!(!openable(name), "{name}");
+        }
     }
 }

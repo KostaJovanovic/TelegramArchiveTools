@@ -7,6 +7,8 @@
 //! - [`job`] — that function on a worker thread, a queue of rows at a time.
 //! - [`state`] — every rule the library window applies, testable without it.
 //! - [`open`] — handing a finished report to whatever opens HTML.
+//! - [`summary`] — `TelegramTools summarise`: a local model's summary of a
+//!   date range, through `tga-sum`.
 
 use std::path::Path;
 
@@ -15,6 +17,11 @@ pub mod job;
 pub mod open;
 pub mod refresh;
 pub mod state;
+pub mod summary;
+
+/// The summary's vocabulary — lengths, languages, events, the server keeper —
+/// for the window, which may name no `tga-*` crate but this one.
+pub use tga_sum;
 
 /// Whether something dropped on the window is an export the library can take:
 /// a folder, or a file that is one of the exporter's databases.

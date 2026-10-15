@@ -34,6 +34,7 @@
 //! unreliable. An old `settings.json` naming it still loads, because unknown
 //! keys are dropped per field.
 
+use super::summaries::Found;
 use super::{list, Shell, THEMES};
 use eframe::egui::{self, Ui};
 use tgx_ui::components::{
@@ -111,6 +112,7 @@ impl Shell {
 
                     self.media_section(&mut cols[1]);
                     self.reports_section(&mut cols[1]);
+                    self.summaries_section(&mut cols[1]);
                     self.appearance_section(&mut cols[1]);
                     self.advanced_section(&mut cols[1]);
                 });
@@ -453,6 +455,233 @@ impl Shell {
         }
     }
 
+    /// The local model the Summaries view talks to. **A port, never an
+    /// address**: the model reads other people's conversation, so it is on
+    /// this machine.
+    fn summaries_section(&mut self, ui: &mut Ui) {
+        let p = self.palette;
+        section(ui, "Summaries", &p);
+        let (mut open, mut pick_folder, mut server, mut commit) = (false, false, false, false);
+        let folder = self.settings.summary_models_dir();
+        let stale = self
+            .summaries
+            .found
+            .as_ref()
+            .is_none_or(|f| f.folder != folder || f.at.elapsed() > Found::FOR);
+        if stale {
+            self.summaries.found = Some(Found::look(folder.clone()));
+        }
+        let found = self.summaries.found.as_ref().expect("looked just now");
+        let (models, found_server) = (found.models.clone(), found.server.clone());
+        let in_folder = |path: &std::path::Path| {
+            path.strip_prefix(&folder)
+                .unwrap_or(path)
+                .display()
+                .to_string()
+        };
+
+        setting_row(
+            ui,
+            "Models folder",
+            "The models and llama-server.exe, each in it or in a folder of its own inside it.",
+            &p,
+            |ui| {
+                pick_folder = button(ui, "Browse", true, false, &p).clicked();
+                open = button(ui, "Open", true, false, &p).clicked();
+            },
+        );
+        row(ui, |ui| {
+            commit |= ui
+                .add(
+                    field(&mut self.form.summary_models, &p)
+                        .hint_text("Where the models are")
+                        .desired_width(ui.available_width()),
+                )
+                .lost_focus();
+        });
+
+        let chosen = super::summaries::chosen_model(&self.settings, &models);
+        let about_model = if models.is_empty() {
+            "None in the folder yet: see How to add a model, below.".to_string()
+        } else {
+            format!(
+                "{} in the folder. The prompts are written for Gemma.",
+                match models.len() {
+                    1 => "One model".to_string(),
+                    n => format!("{n} models"),
+                }
+            )
+        };
+        let mut picked: Option<String> = None;
+        setting_row(ui, "Model", &about_model, &p, |ui| {
+            let shown = chosen
+                .as_deref()
+                .map(&in_folder)
+                .unwrap_or_else(|| "None".into());
+            egui::ComboBox::from_id_salt("summary-model")
+                .selected_text(shown)
+                .width(MODEL_W)
+                .show_ui(ui, |ui| {
+                    for m in &models {
+                        let name = in_folder(m);
+                        if ui
+                            .selectable_label(chosen.as_ref() == Some(m), &name)
+                            .clicked()
+                        {
+                            picked = Some(name);
+                        }
+                    }
+                });
+        });
+
+        let about_server = if !self.settings.summary_server.is_empty() {
+            "Chosen below; the models folder's is not used.".to_string()
+        } else if let Some(exe) = &found_server {
+            format!("{}, in the models folder.", in_folder(exe))
+        } else {
+            "Not in the models folder: see How to add a model, below, or choose one.".to_string()
+        };
+        setting_row(ui, "Model server", &about_server, &p, |ui| {
+            server = button(ui, "Browse", true, false, &p).clicked();
+        });
+        row(ui, |ui| {
+            commit |= ui
+                .add(
+                    field(&mut self.form.summary_server, &p)
+                        .hint_text("Blank: llama-server.exe in the models folder")
+                        .desired_width(ui.available_width()),
+                )
+                .lost_focus();
+        });
+        commit |= self.number_row(
+            ui,
+            "Port",
+            "On 127.0.0.1; a Gemma already serving there is used as it is.",
+            true,
+            |f| &mut f.summary_port,
+        );
+        setting_row(
+            ui,
+            "Server options",
+            "For a server started from here. Blank suits Gemma 4 26B on a 16 GB card.",
+            &p,
+            |_| {},
+        );
+        row(ui, |ui| {
+            commit |= ui
+                .add(
+                    field(&mut self.form.summary_options, &p)
+                        .hint_text(tga_run::tga_sum::server::DEFAULT_OPTIONS)
+                        .desired_width(ui.available_width()),
+                )
+                .lost_focus();
+        });
+        commit |= self.number_row(
+            ui,
+            "Unload after",
+            "Minutes after you leave Summaries before a server started here is stopped.",
+            true,
+            |f| &mut f.summary_idle,
+        );
+        let photos = switch_row(
+            ui,
+            "Read text in photos",
+            "PaddleOCR-VL, if it is in the models folder, reads the days' photos first, \
+             then makes way for the model.",
+            self.settings.summary_photos,
+            true,
+            &p,
+        );
+        self.how_to_add_a_model(ui, &folder);
+        if commit {
+            self.commit_settings();
+        }
+        if photos {
+            self.toggle_setting(|s| s.summary_photos = !s.summary_photos);
+        }
+        if let Some(name) = picked {
+            self.toggle_setting(|s| s.summary_model = name);
+        }
+        if open {
+            // Made on first open, so there is somewhere to put the files.
+            let _ = std::fs::create_dir_all(&folder);
+            self.open_or_warn(&folder);
+        }
+        if pick_folder {
+            self.browse_for_models_folder();
+        }
+        if server {
+            self.browse_for_server();
+        }
+    }
+
+    /// The short version of `docs/MODELS.md`, folded away under the section.
+    fn how_to_add_a_model(&mut self, ui: &mut Ui, folder: &std::path::Path) {
+        let p = self.palette;
+        let mut open = false;
+        block(ui, |ui| {
+            egui::CollapsingHeader::new(text("How to add a model", &p))
+                .id_salt("summary-how-to")
+                .show(ui, |ui| {
+                    for (i, step) in ADD_A_MODEL.iter().enumerate() {
+                        ui.label(meta(format!("{}. {step}", i + 1), &p));
+                        ui.add_space(space::TIGHT);
+                    }
+                    ui.horizontal(|ui| {
+                        for (label, url) in [
+                            ("llama.cpp releases", LLAMA_RELEASES),
+                            ("Hugging Face", HUGGING_FACE),
+                        ] {
+                            // A link is the accent's one exception, as on the
+                            // sign-in dialog.
+                            let label = egui::RichText::new(label)
+                                .font(tgx_ui::fonts::sans(tgx_ui::tokens::window::READING))
+                                .color(p.accent);
+                            if action(ui, label, true).clicked() {
+                                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                            }
+                        }
+                        open = button(ui, "Open the models folder", true, false, &p).clicked();
+                    });
+                });
+        });
+        if open {
+            let _ = std::fs::create_dir_all(folder);
+            self.open_or_warn(folder);
+        }
+    }
+
+    /// Browse for the models folder.
+    fn browse_for_models_folder(&mut self) {
+        let Some(dir) = rfd::FileDialog::new()
+            .set_title("Choose the models folder")
+            .set_directory(self.settings.summary_models_dir())
+            .pick_folder()
+        else {
+            return;
+        };
+        // The other fields first, as Browse for the destination does.
+        self.form.collect(&mut self.settings);
+        self.settings.summary_models = dir.to_string_lossy().into_owned();
+        self.form.sync(&self.settings);
+        self.commit_settings();
+    }
+
+    /// Browse for a `llama-server.exe` outside the models folder.
+    fn browse_for_server(&mut self) {
+        let Some(file) = rfd::FileDialog::new()
+            .set_title("Choose llama-server.exe")
+            .add_filter("Program", &["exe"])
+            .pick_file()
+        else {
+            return;
+        };
+        self.form.collect(&mut self.settings);
+        self.settings.summary_server = file.to_string_lossy().into_owned();
+        self.form.sync(&self.settings);
+        self.commit_settings();
+    }
+
     /// **The appearance is a setting, and this is where settings live.**
     fn appearance_section(&mut self, ui: &mut Ui) {
         let p = self.palette;
@@ -588,7 +817,7 @@ impl Shell {
         }
         row(ui, |ui| {
             ui.label(meta(
-                "Keys: Ctrl+1–4 views · Ctrl+F filter · Ctrl+A tick all shown · \
+                "Keys: Ctrl+1–5 views · Ctrl+F filter · Ctrl+A tick all shown · \
                  Ctrl+E export · F5 reload · Esc clear filter",
                 &p,
             ));
@@ -611,7 +840,8 @@ impl Shell {
     /// Reset settings, on the second press: every setting to its default
     /// **except** what is not a preference — the api_id, api_hash and phone
     /// the sign-in needs, the destination (the Library and every database
-    /// path hang off it), and the saved selections, which are work.
+    /// path hang off it), the models folder (gigabytes the account holder put
+    /// somewhere on purpose), and the saved selections, which are work.
     pub(super) fn reset_settings(&mut self) {
         if self.exporting {
             return;
@@ -627,6 +857,7 @@ impl Shell {
             api_hash: old.api_hash,
             phone: old.phone,
             output_dir: old.output_dir,
+            summary_models: old.summary_models,
             saved_selections: old.saved_selections,
             window: old.window,
             window_maximized: old.window_maximized,
@@ -740,6 +971,30 @@ type Flip = fn(&mut tgx_tg::config::Settings);
 /// How wide a number field is. Every value in this panel is at most five
 /// digits, and a field sized for a sentence invites one.
 const NUMBER_W: f32 = 80.0;
+/// How wide the model dropdown is: a quantised model's long file name.
+const MODEL_W: f32 = 320.0;
+
+/// Settings › Summaries › How to add a model. `docs/MODELS.md` is the long
+/// version; keep the two saying the same.
+const ADD_A_MODEL: [&str; 5] = [
+    "Once: get llama.cpp from its releases page. For an NVIDIA card take the \
+     llama-…-bin-win-cuda-…-x64.zip and the cudart-llama-bin-win-cuda-…-x64.zip of the \
+     same CUDA version (for AMD or Intel, the bin-win-vulkan-x64.zip), and unzip both into \
+     one folder inside the models folder.",
+    "On Hugging Face, search for the model's name and GGUF — \"gemma 4 26B A4B GGUF\" — \
+     and open a repository that lists .gguf files under Files and versions.",
+    "Download one .gguf. Pick the size by your graphics card: the file a few GB smaller \
+     than its memory, for the context. Q4_K_M is the usual choice. Leave the mmproj files: \
+     they are for pictures. A model split into …-00001-of-00003.gguf needs every piece, in \
+     one folder.",
+    "Put it in the models folder, or a folder of its own inside it, and choose it under \
+     Model above. Some models ask you to sign in and accept a licence on their page first.",
+    "Text in photos, if you want it: search \"PaddleOCR-VL GGUF\" and put the model, its \
+     mmproj and chat_template.jinja, if there is one, in a folder of their own inside the \
+     models folder.",
+];
+const LLAMA_RELEASES: &str = "https://github.com/ggml-org/llama.cpp/releases";
+const HUGGING_FACE: &str = "https://huggingface.co/models?library=gguf";
 /// How wide a date field is: `2026-01-31` and a little air.
 const DATE_W: f32 = 104.0;
 

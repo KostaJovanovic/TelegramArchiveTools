@@ -19,6 +19,7 @@ members = [
     "crates/tga-stats",
     "crates/tga-metrics",
     "crates/tga-report",
+    "crates/tga-sum",
     "crates/tga-run",
     # The one executable, TelegramTools.exe: both windows' views, and both
     # command lines behind its argv.

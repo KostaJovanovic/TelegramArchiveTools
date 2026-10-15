@@ -2,7 +2,7 @@
 //!
 //! | keys            | does                                              |
 //! |-----------------|---------------------------------------------------|
-//! | Ctrl+1 … Ctrl+4 | Chats, Activity, Library, Settings                |
+//! | Ctrl+1 … Ctrl+5 | Chats, Activity, Library, Summaries, Settings     |
 //! | Ctrl+F          | the view's filter or search box                   |
 //! | Ctrl+A          | tick every chat shown (Chats, outside a text box) |
 //! | Ctrl+E          | Export — the Chats view's primary                 |
@@ -38,7 +38,7 @@ impl Shell {
         let cmd = |key| KeyboardShortcut::new(Modifiers::COMMAND, key);
         let mut asked = Vec::new();
         ctx.input_mut(|i| {
-            for (n, view) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4]
+            for (n, view) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5]
                 .into_iter()
                 .zip(View::ALL)
             {
@@ -78,6 +78,7 @@ impl Shell {
             Shortcut::Find => match self.body {
                 View::Chats | View::Viewer => self.focus_filter = true,
                 View::Library => self.library.focus_filter = true,
+                View::Summaries => self.summaries.focus_filter = true,
                 View::Queue | View::Settings => {}
             },
             Shortcut::TickAll if self.body == View::Chats => {
@@ -97,7 +98,7 @@ impl Shell {
                 View::Chats if self.signed_in && !self.exporting && !self.counting => {
                     self.start_refresh()
                 }
-                View::Library => self.library.reload(ctx),
+                View::Library | View::Summaries => self.library.reload(ctx),
                 _ => {}
             },
             Shortcut::ClearFilter => {

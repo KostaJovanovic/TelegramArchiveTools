@@ -446,30 +446,45 @@ pub(crate) fn digest_rows(
         .msgs
         .iter()
         .map(|msg| tga_notes::Row {
-            id: msg.id,
-            t: msg.when.format("%Y-%m-%d %H:%M").to_string(),
-            topic: msg.topic,
-            who: if msg.sender.is_empty() && msg.name.is_empty() {
-                String::new()
-            } else {
-                people.name_of(&people.key_of(msg))
-            },
-            service: if msg.service {
-                Some(msg.action.clone())
-            } else {
-                None
-            },
             text: tga_notes::digest::squeeze(&msg.text),
-            re: msg.reply_to,
-            media: msg.media.clone(),
-            doc: attachment(export, msg, stored),
-            reactions: if msg.reactions.is_empty() {
-                None
-            } else {
-                Some(msg.reaction_total())
-            },
+            ..digest_row(export, msg, people, stored)
         })
         .collect()
+}
+
+/// One message as a digest row, its text whole. The digest squeezes the text
+/// to its budget; a summary keeps it, and cuts it where it renders a line.
+pub(crate) fn digest_row(
+    export: &tga_read::Export,
+    msg: &tga_read::Msg,
+    people: &tga_metrics::People,
+    stored: Option<&Stored>,
+) -> tga_notes::Row {
+    tga_notes::Row {
+        id: msg.id,
+        t: msg.when.format("%Y-%m-%d %H:%M").to_string(),
+        topic: msg.topic,
+        who: if msg.sender.is_empty() && msg.name.is_empty() {
+            String::new()
+        } else {
+            people.name_of(&people.key_of(msg))
+        },
+        service: if msg.service {
+            Some(msg.action.clone())
+        } else {
+            None
+        },
+        text: msg.text.clone(),
+        re: msg.reply_to,
+        media: msg.media.clone(),
+        doc: attachment(export, msg, stored),
+        reactions: if msg.reactions.is_empty() {
+            None
+        } else {
+            Some(msg.reaction_total())
+        },
+        photo_text: String::new(),
+    }
 }
 
 /// Read the document a message carries, if it carries one this build can open.
@@ -535,9 +550,12 @@ fn attachment(
 /// whose file is a document this build can open.
 pub(crate) struct Stored {
     db: PathBuf,
-    /// Message id to `(file_id, kind)`, the `file` role only: that is the one
-    /// a document is filed under; `photo` and `thumbnail` are pictures.
+    /// Message id to `(file_id, kind)`, the `file` role: that is the one a
+    /// document is filed under, and an image sent as a file.
     files: std::collections::HashMap<i64, (i64, String)>,
+    /// The same for the `photo` role: a photo sent as one. `thumbnail` is
+    /// neither.
+    photos: std::collections::HashMap<i64, (i64, String)>,
 }
 
 impl Stored {
@@ -546,21 +564,40 @@ impl Stored {
     /// the table. A digest without attachment text is what it wrote before.
     pub(crate) fn open(db: &Path, export: &tga_read::Export) -> Option<Self> {
         let chat_id = export.topics.iter().find_map(|t| t.chat_id)?;
-        let files = tga_db::media_index(db, chat_id)
-            .ok()?
-            .into_iter()
-            .filter(|((_, role), _)| role == "file")
-            .map(|((id, _), file)| (id, file))
-            .collect();
+        let mut files = std::collections::HashMap::new();
+        let mut photos = std::collections::HashMap::new();
+        for ((id, role), file) in tga_db::media_index(db, chat_id).ok()? {
+            match role.as_str() {
+                "file" => files.insert(id, file),
+                "photo" => photos.insert(id, file),
+                _ => None,
+            };
+        }
         Some(Stored {
             db: db.to_path_buf(),
             files,
+            photos,
         })
     }
 
     fn bytes_of(&self, message_id: i64) -> Option<Vec<u8>> {
         let (file_id, kind) = self.files.get(&message_id)?;
         tga_db::blob(&self.db, *file_id, kind).ok().flatten()
+    }
+
+    /// The stored picture of a message whose media is a photo: what a photo
+    /// is filed under, else what an image sent as a file is. A name that
+    /// stays the same across syncs, and a way to its bytes.
+    pub(crate) fn picture(&self, message_id: i64) -> Option<(String, i64, String)> {
+        let (file_id, kind) = self
+            .photos
+            .get(&message_id)
+            .or_else(|| self.files.get(&message_id))?;
+        Some((format!("{kind}:{file_id}"), *file_id, kind.clone()))
+    }
+
+    pub(crate) fn blob(&self, file_id: i64, kind: &str) -> Option<Vec<u8>> {
+        tga_db::blob(&self.db, file_id, kind).ok().flatten()
     }
 }
 
@@ -573,7 +610,7 @@ fn write_utf8(path: &Path, text: &str) -> std::io::Result<()> {
     std::fs::write(path, text)
 }
 
-fn thousands(n: usize) -> String {
+pub(crate) fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, ch) in digits.chars().enumerate() {

@@ -25,7 +25,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('chats', 'settings', 'queue', 'viewer', 'library')]
+    [ValidateSet('chats', 'settings', 'queue', 'viewer', 'library', 'summaries')]
     [string]$View = 'chats',
     [string]$Out = "$env:TEMP\tgx-shot.png",
     [string]$Exe = "dist\TelegramTools.exe",

@@ -33,6 +33,11 @@ pub const MEMBER_RANGE: (i64, i64) = (0, 1_000_000);
 pub const REREAD_RANGE: (i64, i64) = (0, 10_000);
 /// Hours between scheduled syncs. `0` is off; the ceiling is a week.
 pub const SYNC_RANGE: (i64, i64) = (0, 168);
+/// The model server's port. Below 1024 is the system's.
+pub const PORT_RANGE: (i64, i64) = (1024, 65_535);
+/// Minutes before an idle model server started from here is stopped. At least
+/// one, so a summary and the next are not each a fresh load; at most a day.
+pub const IDLE_RANGE: (i64, i64) = (1, 1_440);
 
 /// Read a number out of a text field.
 ///
@@ -67,6 +72,14 @@ pub struct SettingsForm {
     /// see `Settings::date_range` — with the panel saying so under the field.
     pub date_from: String,
     pub date_until: String,
+    /// Settings › Summaries: the models folder, the server, the port, the
+    /// extra options and the idle minutes. The model is a dropdown, which
+    /// writes the setting itself.
+    pub summary_models: String,
+    pub summary_server: String,
+    pub summary_port: String,
+    pub summary_options: String,
+    pub summary_idle: String,
 }
 
 impl SettingsForm {
@@ -108,6 +121,26 @@ impl SettingsForm {
         ) as u32;
         settings.date_from = self.date_from.trim().to_string();
         settings.date_until = self.date_until.trim().to_string();
+        // Paths as typed, quotes from Explorer's "Copy as path" taken off. A
+        // blank models folder is the default one, said in the field.
+        let models = self.summary_models.trim().trim_matches('"');
+        settings.summary_models = if models.is_empty() {
+            Settings::default().summary_models
+        } else {
+            models.to_string()
+        };
+        settings.summary_server = self.summary_server.trim().trim_matches('"').to_string();
+        settings.summary_port = number(
+            &self.summary_port,
+            PORT_RANGE,
+            i64::from(settings.summary_port),
+        ) as u16;
+        settings.summary_options = self.summary_options.trim().to_string();
+        settings.summary_idle_minutes = number(
+            &self.summary_idle,
+            IDLE_RANGE,
+            i64::from(settings.summary_idle_minutes),
+        ) as u32;
     }
 
     /// Write the stored values back into the fields.
@@ -135,6 +168,14 @@ impl SettingsForm {
         set(&mut self.sync_every, &settings.sync_every_hours.to_string());
         set(&mut self.date_from, &settings.date_from);
         set(&mut self.date_until, &settings.date_until);
+        set(&mut self.summary_models, &settings.summary_models);
+        set(&mut self.summary_server, &settings.summary_server);
+        set(&mut self.summary_port, &settings.summary_port.to_string());
+        set(&mut self.summary_options, &settings.summary_options);
+        set(
+            &mut self.summary_idle,
+            &settings.summary_idle_minutes.to_string(),
+        );
     }
 }
 

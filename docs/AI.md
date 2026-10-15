@@ -135,6 +135,23 @@ citing the message ids it rests on) into `Exports\<chat>\` or
 to the report's timeline. A new or changed `events.json` counts as a change, so
 `--refresh` picks it up without `--force`.
 
+### 4. (Optional) Have the local model summarise a range
+
+```powershell
+& "C:\path\to\TelegramTools.exe" summarise "<databases folder>\<chat>\<chat>.sqlite" --from 2026-01-05 --to 2026-01-11 --detailed
+```
+
+Offline but for `127.0.0.1`: it needs a llama-server already running on this
+machine (port 8080, or `--port`) with a Gemma loaded, and refuses another
+model unless given `--any-model`. **stdout is the summary**, streamed as it is
+written; stderr narrates counts and timings. The summary is also saved under
+`<chat folder>\analysis\summaries\`. `--short`, `--detailed`, `--sections`,
+`--by-topic`, `--topic <name>` and `--lang sr|en|chat` choose its shape;
+`TelegramTools summarise --help` lists them. The window's **Summaries** view
+does the same, and can start the server itself; it also reads the text in the
+range's photos first. The command line uses those readings where the window
+has made them, and reads no photos itself.
+
 ## Other read-only commands an agent may use
 
 None of these writes anything, and all but `chats` are offline:

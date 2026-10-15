@@ -50,6 +50,9 @@ pub struct Row {
     /// Set only for an attachment this build can read the inside of.
     pub doc: Option<Attachment>,
     pub reactions: Option<i64>,
+    /// The text in the message's photo, when something read it: a summary's
+    /// OCR (`tga-sum`). The digest neither fills nor writes it.
+    pub photo_text: String,
 }
 
 /// A document attachment, read.

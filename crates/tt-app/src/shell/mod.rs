@@ -25,6 +25,7 @@ mod library;
 mod queue;
 mod settings;
 mod signin;
+mod summaries;
 mod viewer;
 
 pub(crate) use chrome::RAIL_WIDTH;
@@ -84,11 +85,21 @@ pub enum View {
     /// Every export on disk, and a report for each: what was the analyser's
     /// whole window, and now also the way into the Viewer. See [`library`].
     Library,
+    /// What happened in a chat between two days, written by the local model.
+    /// See [`summaries`].
+    Summaries,
 }
 
 impl View {
-    /// The rail, in order. The Viewer is reached through the Library.
-    pub const ALL: [View; 4] = [View::Chats, View::Queue, View::Library, View::Settings];
+    /// The rail, in order. The Viewer is reached through the Library, or
+    /// through a summary's citation.
+    pub const ALL: [View; 5] = [
+        View::Chats,
+        View::Queue,
+        View::Library,
+        View::Summaries,
+        View::Settings,
+    ];
 
     /// Which rail entry is lit while this view shows: the Viewer's is the
     /// Library's, because that is where it was opened from and where its back
@@ -111,6 +122,7 @@ impl View {
             View::Queue => "Activity",
             View::Viewer => "Read",
             View::Library => "Library",
+            View::Summaries => "Summaries",
         }
     }
 }
@@ -298,6 +310,9 @@ pub struct Shell {
     /// The Library's state: its folder, its rows, and the analyser run. See
     /// [`library::Library`].
     library: library::Library,
+    /// The Summaries view's state, and the model server it started, if it
+    /// did. See [`summaries`].
+    summaries: summaries::SummariesState,
 }
 
 impl Shell {
@@ -356,7 +371,13 @@ impl Shell {
             ..Default::default()
         };
         let next_sync = schedule_from(&settings, std::time::Instant::now());
+        // The last summary's length and language: the next starts there.
+        let mut summaries = summaries::SummariesState::default();
+        summaries.length =
+            tga_run::tga_sum::Length::parse(&settings.summary_length).unwrap_or_default();
+        summaries.lang = tga_run::tga_sum::Lang::parse(&settings.summary_lang).unwrap_or_default();
         Self {
+            summaries,
             next_sync,
             bridge,
             palette,
@@ -573,6 +594,7 @@ impl Shell {
         if !self.viewer.is_open(&db.path, db.chat_id) {
             self.viewer_open(db, None);
         }
+        self.viewer.back = None;
         self.show(View::Viewer);
     }
 
@@ -683,7 +705,7 @@ fn schedule_from(settings: &Settings, now: std::time::Instant) -> Option<std::ti
 /// `u32`s. Raw because a PNG encoder is a dependency this app has no other use
 /// for; `tools/shot.ps1` turns it into an image.
 ///
-/// `TGX_SHOT_VIEW=chats|settings|queue|viewer|library` picks which view to draw
+/// `TGX_SHOT_VIEW=chats|settings|queue|viewer|library|summaries` picks which view to draw
 /// first, `TGX_SHOT_DB=<part of a title>` which database the viewer opens, and
 /// `TGX_SHOT_LIBRARY=<folder>` which folder the Library lists — never the
 /// real destination, which is other people's chat titles.
@@ -768,6 +790,7 @@ mod shot {
             "queue" | "activity" => Some(View::Queue),
             "viewer" => Some(View::Viewer),
             "library" => Some(View::Library),
+            "summaries" => Some(View::Summaries),
             _ => None,
         }
     }
@@ -854,6 +877,13 @@ impl eframe::App for Shell {
             self.library.follow(&self.settings.output_dir, ctx);
             self.library.dropped(ctx);
         }
+        // The Summaries view lists the Library's chats, so it opens the same
+        // folder the first time it is shown.
+        if self.body == View::Summaries {
+            self.library.follow(&self.settings.output_dir, ctx);
+        }
+        self.summaries.drain();
+        self.summaries_idle(ctx);
         // egui draws nothing on an idle window, so the timer has to ask for the
         // frame it will fire on — otherwise the sync waits for a mouse move.
         if let Some(wait) = self.tick_schedule(std::time::Instant::now()) {
@@ -930,10 +960,15 @@ impl eframe::App for Shell {
                 View::Queue => self.queue_view(ui),
                 View::Viewer => self.viewer_panel(ui),
                 View::Library => self.library.panel(ui, &p),
+                View::Summaries => self.summaries_panel(ui, ctx),
             });
         // A row's Read, pressed in the frame just drawn.
         if let Some(read) = self.library.read.take() {
             self.read(read);
+        }
+        // A summary's citation, clicked.
+        if let Some((read, id)) = self.summaries.cite.take() {
+            self.summaries_cite(read, id);
         }
         if let Some((needle, dir)) = self.library.search_all.take() {
             self.search_everywhere(needle, dir);
@@ -953,7 +988,11 @@ impl eframe::App for Shell {
                 .values()
                 .chain(self.viewer.userpics.values())
                 .any(|p| matches!(p, bubbles::Pic::Loading | bubbles::Pic::Decoded(_)));
-            if self.viewer.listing || self.viewer.loading || pictures_pending || self.library.busy()
+            if self.viewer.listing
+                || self.viewer.loading
+                || pictures_pending
+                || self.library.busy()
+                || self.summaries.busy()
             {
                 self.shot_busy_until = self.frame_no;
             }
@@ -980,6 +1019,11 @@ impl eframe::App for Shell {
         // own window. A report being written at the moment of quitting is
         // lost rather than cut short: `refresh::one` renames it into place.
         self.library.stop();
+        // A summary being written is abandoned; the notes of every part it
+        // finished are already kept. A model server this window started goes
+        // with it — 15 GB of video memory is not something to leave behind.
+        self.summaries.stop();
+        self.summaries.keeper.stop();
         self.bridge.shutdown(std::time::Duration::from_secs(10));
         // After the drain, so an Open media still writing is not raced. See
         // `tgx_tg::viewer::temp_dir` for why the copies do not outlive the
@@ -1030,6 +1074,8 @@ pub(super) fn system_palette(theme: Option<egui::Theme>) -> Palette {
 impl Drop for Shell {
     fn drop(&mut self) {
         self.cancel.cancel();
+        self.summaries.stop();
+        self.summaries.keeper.stop();
         self.bridge.shutdown(std::time::Duration::from_secs(10));
     }
 }

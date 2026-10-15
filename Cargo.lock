@@ -3593,6 +3593,7 @@ dependencies = [
  "tga-read",
  "tga-report",
  "tga-stats",
+ "tga-sum",
  "tgx-archive",
  "tokio",
 ]
@@ -3603,6 +3604,16 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "tga-sum"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde_json",
+ "tga-notes",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

@@ -1,7 +1,7 @@
 //! The frame around the panels: the rail, the top bar and the status bar.
 //!
 //! The panels themselves are the sibling modules -- chats, queue, settings,
-//! signin, viewer, library.
+//! signin, viewer, library, summaries.
 
 use super::*;
 use eframe::egui::{Layout, Ui};
@@ -185,6 +185,7 @@ impl Shell {
                     View::Library => self.library.bar(ui, ctx, &p),
                     View::Chats => self.chats_actions(ui),
                     View::Queue => self.activity_actions(ui),
+                    View::Summaries => self.summaries_actions(ui, ctx),
                     View::Settings | View::Viewer => {}
                 }
             });
@@ -297,7 +298,12 @@ impl Shell {
         let reporting = !self.exporting
             && self.count_progress.is_none()
             && (self.body == View::Library || self.library.fill().is_some());
-        let (status, right) = if reporting {
+        // The Summaries view speaks for itself while it is on screen and the
+        // exporter is quiet.
+        let summarising = self.body == View::Summaries && !self.exporting;
+        let (status, right) = if summarising {
+            self.summaries_status()
+        } else if reporting {
             self.library.status()
         } else if self.exporting {
             let right = self
@@ -316,7 +322,7 @@ impl Shell {
 
         // A report run's bar takes the rule's place, at the same height
         // either way, so the line under it does not jump when one starts.
-        match self.library.fill().filter(|_| reporting) {
+        match self.library.fill().filter(|_| reporting && !summarising) {
             Some(fraction) => tgx_ui::components::progress_bar(ui, Some(fraction), &p),
             None => edge_rule(ui, &p),
         }

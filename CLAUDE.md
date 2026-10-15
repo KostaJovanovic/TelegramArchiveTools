@@ -10,7 +10,8 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
   keep each chat as an accumulating `<chat>.sqlite`.
 - **The analyser** (`tga-*`) reads a finished export, a folder or a database,
   and writes one self-contained `report.html` beside it. It never touches the
-  network.
+  network — except that a **summary** (`tga-sum`) talks to a model server on
+  `127.0.0.1`, and only when asked for one.
 
 They were two repositories until 2026-10-12; `TELEGRAMTOOLS.md` is the merge
 plan and its log, and says which phase is done. They ship as one binary,
@@ -72,6 +73,9 @@ cargo run -p tt-app -- analyse <folder or .sqlite>
         [--stats P] [--notes P] [--stamp T]
 cargo run -p tt-app -- analyse <output folder> --refresh [--force]
 cargo run -p tt-app -- analyse --from-stats <s.json> --out <p>
+cargo run -p tt-app -- summarise <folder or .sqlite> --from D [--to D]
+        [--short|--detailed|--sections] [--by-topic|--topic T] [--lang sr|en|chat]
+cargo test -p tga-sum --test fake_server        # the whole summary pipeline, no GPU
 ```
 
 A release build is a GUI-subsystem exe, so **cmd.exe does not wait for it**:
@@ -153,9 +157,13 @@ tga-stats    the shape of every figure, and the dump's format. Data only.
 tga-metrics  every figure, one pass. No I/O. Fills in a tga_stats::Stats.
 tga-report   the ramp, the SVG marks, the one HTML file. Reads a Stats.
              MUST NOT depend on tga-read or tga-metrics.
-tga-run      running an analysis: the `analyse` command line, the library of
-             exports, the worker. No toolkit. The only crate that reaches
-             tga-docs and tga-db.
+tga-sum      a local model's summary of a date range: digest rows in, text out.
+             Line rendering, cutting into parts, prompts, notes cache, a loopback
+             HTTP client on std::net, the llama-server keeper. Reads no export.
+             MUST NOT depend on tga-read, tga-db, tga-docs, tga-metrics or a toolkit.
+tga-run      running an analysis: the `analyse` and `summarise` command lines,
+             the library of exports, the workers. No toolkit. The only crate
+             that reaches tga-docs and tga-db.
 
 tt-app       TelegramTools.exe: the window, and both command lines behind its
              argv. Depends only on tgx-ui + tgx-tg + tga-run.
@@ -294,8 +302,9 @@ self-contained `report.html` beside it. In the window it is the **Library**
 view (`tt-app/src/shell/library.rs`): every export under a folder is a row,
 with what needs a report already ticked. The folder it opens on is the
 exporter's destination, and it lists the Classic folders there one per chat
-beside the databases. A row's **Read** is the only way into the Viewer, which
-is not on the rail. "Report after export" hands each finished chat to it
+beside the databases. A row's **Read** is the way into the Viewer, which is
+not on the rail; a summary's citation is the other, and its way back returns
+to Summaries (`ViewerState::back`). "Report after export" hands each finished chat to it
 (`Library::report_later`). Its workers report on their own `mpsc` channels, not
 the bridge's, and wake the window through `tga_run::job::Wake` — a callback,
 so `tga-run` has no toolkit in it.
@@ -384,6 +393,88 @@ a missing file far more often than a broken parser.
 The committed fixtures (`tga-report/tests/fixture.stats.json`,
 `tests/synthetic/`) are hand-written and name nobody, which is why they can be
 committed and never skip.
+
+### Summaries
+
+The **Summaries** view (`tt-app/src/shell/summaries.rs`) and `TelegramTools
+summarise` ask a local model what happened in a chat between two days.
+`docs/SUMMARIES.md` is the design record. What must hold:
+
+- **Loopback only.** `tga_sum::Client` takes a port, never a host, and
+  `server::arguments` drops any `--host`/`--port`/`-m` from the user's server
+  options. The summary sends other people's conversation to the model, so the
+  model is on this machine.
+- **The narration never carries a message.** `Event::Say`, the status line and
+  `tgx.log` name counts, parts and timings; `the_narration_never_carries_a_message`
+  holds it.
+- **Input is the digest's row.** `tga_run::cli::digest_row` is shared with the
+  digest — same names, same document reading — with the text kept whole; the
+  range is picked by `Msg::when`, so a day is a calendar day.
+- **Independent of ReVision: one models folder.** `summary_models` (default
+  `Models\` beside the exe, gitignored; kept by Reset) holds the `.gguf` files
+  and llama.cpp's `llama-server.exe`, each in it or one folder down
+  (`server::server_in`, `server::models_in`). Settings › Summaries chooses the
+  folder, lists its models in a dropdown (`summary_model`, relative to the
+  folder; empty or gone → `server::default_model`, the first Gemma), and
+  carries a short *How to add a model* whose long version is
+  `docs/MODELS.md`. Keep those two in step. Nothing looks for ReVision's
+  folder any more (2026-10-15, the account holder's ask, which reverses the
+  earlier one to share ReVision's). Its numbers stay: the options and sizes
+  were measured there.
+- **Attach before start; never stop what we did not start — unless asked.** A
+  Gemma, or the chosen file, already on the port is used; otherwise `Keeper` starts
+  `llama-server` by absolute path with `CREATE_NO_WINDOW`, and the window
+  stops it after `summary_idle_minutes` **once the Summaries view is left**
+  (a citation's trip to the Viewer is not leaving; while the view is open
+  `summaries_idle` keeps touching it) and on exit. Two copies of a 15 GB model
+  do not fit the 16 GB card. Somebody else's server on the port is looked at
+  every 5 s while the view is idle (`tt-app/src/holder.rs`: the TCP table's
+  owning PID, its image path) and **reported** under the form — what it has
+  loaded, what that costs — with **Stop it**, pressed
+  twice. Only a `llama-server.exe`, re-checked by PID and path before
+  `TerminateProcess`. Nothing stops it on its own.
+- **Photos are read first, by PaddleOCR-VL** (`tga_sum::ocr`, from the
+  models folder or a folder of its own in it, with ReVision's profile and
+  prompt, its Cyrillic fix and loop cut). The card holds one model, so `Keeper::ensure(.., Want)` stops
+  the server *it* started when the other model is wanted: OCR, then Gemma.
+  Readings are kept in `cache\photos.json`, keyed by the OCR's file and the
+  picture (`kind:file_id`, or a folder export's path and size), and land in
+  `Row::photo_text`, which the digest never fills. Another program's Gemma on
+  the port means the photos are skipped and said, never that its server is stopped. Only
+  JPEG and PNG are sent: no image decoder is linked, so WebP is skipped and
+  nothing is shrunk.
+- **ReVision's sizes, not ours.** Raw messages are read in parts of
+  `PART_TOKENS` = 4,500 (ReVision's `CHUNK_TOKENS`, where its extraction found
+  79% of events, not 47%), and a summary reads raw messages in one call only up
+  to that size (`SINGLE_TOKENS`); any other call reads at most `INPUT_TOKENS` =
+  14,000 (its `INPUT_CAP`). Messages are cut at 1,500 characters, and "haha",
+  "ok" and a lone sticker are dropped unless answered (`lines::trivial`). These
+  were 8,000/16,000/1,200 and kept, until a summary skipped a discussion that
+  mattered. Change one and say why, against a measurement.
+- **A conversation rests on the same reading.** The question box under the
+  summary (`tga_sum::ground` + `answer`, `tga_run::summary::ask`) reads the
+  form's days whole up to `INPUT_TOKENS`, else the summary's own cached notes,
+  and keeps that `Grounding` for every question about the same days. A
+  question's words never reach the log, only its length.
+- **Over notes, a question reads the messages.** A note can be wrong about who
+  held which position, and that is what questions ask. So `answer` first has
+  the model pick the notes the question turns on (`prompt::pick`, JSON), then
+  reads those notes' messages ±3 (fewer, then fewer notes, until it fits) and
+  each one's reply parent, and may cite only those. Reading all the notes is
+  the fallback when nothing is picked, not the plan.
+- **Every citation is checked** against the ids the model was given
+  (`cite::Filter`, on the stream). A citation to the wrong message is worse
+  than none. Brackets side by side are one citation, kept to `cite::MOST` = 3
+  ids; the stream holds a finished citation back until the next character
+  shows whether another joins it.
+- **Notes are cached by what the model read** (`cache::key`: prompt version,
+  model, language, the part's text). Change a prompt in `prompt.rs` and bump
+  `prompt::VERSION`.
+
+No test here judges whether a summary is *good*; the fake server
+(`tga-sum/tests/fake_server.rs`) proves the plumbing only. Quality is judged by
+the account holder on real chats — and the summaries, like the chats, are not
+for Claude to read unless they approve that chat.
 
 ## Byte-exactness invariants
 

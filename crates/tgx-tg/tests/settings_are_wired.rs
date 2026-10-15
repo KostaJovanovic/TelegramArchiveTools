@@ -100,7 +100,12 @@ fn every_setting_is_read_by_something_that_exports() {
     // Read through a method rather than by name. `size_limit_mb` is only ever
     // reached via `size_limit_bytes()`, which is the right way round — the
     // multiplication belongs with the field, not at every call site.
-    let via_method = [("size_limit_mb", "size_limit_bytes")];
+    // `summary_models` likewise through `summary_models_dir()`, which turns an
+    // emptied field into the default folder.
+    let via_method = [
+        ("size_limit_mb", "size_limit_bytes"),
+        ("summary_models", "summary_models_dir"),
+    ];
 
     let mut dead: Vec<&str> = Vec::new();
     for f in &fields {

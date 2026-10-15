@@ -1,0 +1,24 @@
+[package]
+name = "tga-sum"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "A summary of a chat's date range, written by a local model over loopback."
+
+# **Digest rows in, text out.** The caller (`tga-run`) reads the export and
+# maps it to `tga_notes::Row`, as it does for the digest; this crate renders
+# those rows for a model, cuts them into parts that fit its context, and talks
+# to a llama-server on 127.0.0.1. It reads no export and opens no database,
+# which `layering.rs` holds it to.
+#
+# **No HTTP client crate.** The only server it ever talks to is on this
+# machine, over plain HTTP/1.1, so `client.rs` is a few dozen lines on
+# `std::net` — and it takes a port, never a host, so the loopback rule is the
+# type's shape rather than a check somebody could skip.
+[dependencies]
+tga-notes = { path = "../tga-notes" }
+
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
