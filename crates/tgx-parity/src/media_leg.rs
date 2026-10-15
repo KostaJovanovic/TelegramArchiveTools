@@ -194,7 +194,7 @@ fn check(topic: &Path) -> Result<Report> {
         // A placeholder still consumed a name, but Desktop wrote no path for
         // it, so there is nothing to compare against — it is counted only by
         // its effect on the numbering of everything after it.
-        let placeholder = recorded.starts_with("(File");
+        let placeholder = tgx_format::placeholder::is_skipped(recorded);
 
         let given = m.get("file_name").and_then(Value::as_str);
         let stamp = m

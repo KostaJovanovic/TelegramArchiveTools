@@ -17,6 +17,7 @@
 pub mod json;
 pub mod order;
 pub mod peer;
+pub mod placeholder;
 pub mod size;
 pub mod text;
 

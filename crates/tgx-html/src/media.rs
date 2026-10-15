@@ -22,9 +22,6 @@ const TOO_LARGE_HTML: &str = "Exceeds maximum size, change data exporting settin
 const NOT_INCLUDED_HTML: &str = "Not included, change data exporting settings to download.";
 const UNAVAILABLE_HTML: &str = "Unavailable, please try again later.";
 
-/// Every placeholder Desktop writes into `file` / `photo` starts with this.
-pub const PLACEHOLDER_PREFIX: &str = "(File";
-
 /// Media Desktop shows as a coloured row rather than an inline preview.
 ///
 /// `media_type -> (row css class, fixed title)`. A `None` title means the row
@@ -53,10 +50,11 @@ pub fn placeholder_text(value: &str) -> &'static str {
     }
 }
 
+/// Whether `file` / `photo` holds one of Desktop's "not saved" sentences.
 pub fn is_placeholder(value: Option<&Value>) -> bool {
     value
         .and_then(Value::as_str)
-        .is_some_and(|s| s.starts_with(PLACEHOLDER_PREFIX))
+        .is_some_and(tgx_format::placeholder::is_skipped)
 }
 
 /// One media row's content.

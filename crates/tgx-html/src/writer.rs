@@ -83,6 +83,19 @@ impl HtmlWriter {
         self
     }
 
+    /// Write `suffix` after every tooltip's time instead of this machine's
+    /// standard offset ([`utc_suffix`]).
+    ///
+    /// For a replay. The reference's tooltips say `UTC+01:00` because that is
+    /// where Desktop ran; read from the host instead, the html leg passed only
+    /// on a machine in that zone, and on any other every one of 3,752 tooltips
+    /// differed and looked like a writer regression. A live export keeps the
+    /// host's, as Desktop does.
+    pub fn with_utc_suffix(mut self, suffix: impl Into<String>) -> Self {
+        self.utc_suffix = suffix.into();
+        self
+    }
+
     fn ensure_page(&mut self) -> io::Result<()> {
         if self.tree.is_some() && self.on_page < self.page_size {
             return Ok(());
@@ -302,6 +315,27 @@ mod tests {
         }));
         assert!(out.contains("\n09:05\n"), "got:\n{out}");
         assert!(out.contains("18.12.2025 09:05:02 UTC"), "got:\n{out}");
+    }
+
+    #[test]
+    fn a_replay_can_pin_the_zone_its_reference_was_written_in() {
+        // The html leg's reference says UTC+01:00 on every tooltip; with the
+        // host's own zone the leg passed only on a machine in that one.
+        let dir = std::env::temp_dir().join("tgx-writer-pinned-zone");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut w = HtmlWriter::new(&dir, "t", 1000).with_utc_suffix("UTC-07:30");
+        w.add(&obj(
+            json!({ "id": 1, "type": "message", "date": "2025-12-18T09:05:02",
+                    "from": "A", "from_id": "user1", "text": "x" }),
+        ))
+        .unwrap();
+        w.close().unwrap();
+        let out = std::fs::read_to_string(dir.join("messages.html")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            out.contains("title=\"18.12.2025 09:05:02 UTC-07:30\""),
+            "got:\n{out}"
+        );
     }
 
     #[test]

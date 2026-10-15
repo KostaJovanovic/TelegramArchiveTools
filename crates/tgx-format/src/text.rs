@@ -25,17 +25,6 @@ pub fn units(text: &str) -> Vec<u16> {
     text.encode_utf16().collect()
 }
 
-/// Decode a slice of code units, replacing any unpaired surrogate with U+FFFD.
-///
-/// Dropping lone surrogates and joining the units, in one pass. A lone
-/// surrogate cannot be encoded as UTF-8, so one reaching a writer takes down
-/// the export of the whole chat; `snap_cuts` stops entity boundaries from
-/// creating them and this is the backstop for anything that arrives already
-/// broken.
-pub fn decode_lossy(slice: &[u16]) -> String {
-    String::from_utf16_lossy(slice)
-}
-
 /// True when this code unit is a low (trailing) surrogate.
 fn is_low_surrogate(unit: u16) -> bool {
     (0xDC00..=0xDFFF).contains(&unit)
@@ -118,7 +107,11 @@ pub fn build_text_entities(text: &str, entities: &[Entity]) -> Vec<Value> {
         if lo >= hi {
             continue;
         }
-        let chunk = decode_lossy(&units[lo..hi]);
+        // Lossy on purpose: a lone surrogate cannot be encoded as UTF-8, so
+        // one reaching a writer takes down the export of the whole chat.
+        // `snap_cuts` stops entity boundaries from creating them, and U+FFFD
+        // here is the backstop for a text that arrives already broken.
+        let chunk = String::from_utf16_lossy(&units[lo..hi]);
         if chunk.is_empty() {
             continue;
         }
@@ -275,7 +268,7 @@ mod tests {
         assert_eq!(snapped, vec![0, 1, 4]);
         // Every resulting segment must be encodable.
         for w in snapped.windows(2) {
-            let s = decode_lossy(&units[w[0]..w[1]]);
+            let s = String::from_utf16_lossy(&units[w[0]..w[1]]);
             assert!(!s.contains('\u{FFFD}'), "segment {s:?} lost a character");
         }
     }

@@ -52,23 +52,6 @@ impl PeerKey {
             id,
         }
     }
-
-    /// Parse the `user123` form back. Used by the parity harness, which reads
-    /// `from_id` out of a reference `result.json` as a string.
-    pub fn parse(s: &str) -> Option<Self> {
-        for (prefix, kind) in [
-            ("channel", PeerKind::Channel),
-            ("chat", PeerKind::Chat),
-            ("user", PeerKind::User),
-        ] {
-            if let Some(rest) = s.strip_prefix(prefix) {
-                if let Ok(id) = rest.parse::<i64>() {
-                    return Some(Self { kind, id });
-                }
-            }
-        }
-        None
-    }
 }
 
 impl fmt::Display for PeerKey {
@@ -216,24 +199,6 @@ mod tests {
         assert_eq!(PeerKey::user(123).to_string(), "user123");
         assert_eq!(PeerKey::chat(123).to_string(), "chat123");
         assert_eq!(PeerKey::channel(123).to_string(), "channel123");
-    }
-
-    #[test]
-    fn peer_keys_round_trip() {
-        for k in [
-            PeerKey::user(1),
-            PeerKey::chat(22),
-            PeerKey::channel(3586682625),
-        ] {
-            assert_eq!(PeerKey::parse(&k.to_string()), Some(k));
-        }
-        assert_eq!(PeerKey::parse("nonsense"), None);
-    }
-
-    #[test]
-    fn channel_parses_before_chat() {
-        // "channel5" must not be read as chat-with-a-weird-suffix.
-        assert_eq!(PeerKey::parse("channel5"), Some(PeerKey::channel(5)));
     }
 
     #[test]

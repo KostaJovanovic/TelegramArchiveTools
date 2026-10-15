@@ -80,8 +80,8 @@ pub const VOLATILE: &[&str] = &[
     "poll",
 ];
 
-/// Media keys, and the prefix of the strings Desktop writes when it saved no
-/// file: *"(File not included…"*, *"(File exceeds maximum size…"*.
+/// Media keys that may hold one of Desktop's "not saved" sentences
+/// ([`tgx_format::placeholder`]), each with the key recording its size.
 ///
 /// A stored placeholder is not history to be preserved — it is a record that
 /// the run declined to fetch something, and the moment a later run does fetch
@@ -92,11 +92,20 @@ pub const VOLATILE: &[&str] = &[
 ///
 /// Without this, raising the size limit and re-syncing puts the bytes in
 /// `blobs` and leaves the payload still saying the file was too large.
-/// `tgx-tg`'s `the_skip_placeholders_keep_the_shape_the_archive_matches_on`
-/// ties the prefix here to `plan::NOT_INCLUDED` and `plan::TOO_LARGE`, which
-/// this layer may not import.
-const MEDIA_KEYS: &[&str] = &["file", "photo", "thumbnail", "file_size", "photo_file_size"];
-const SKIPPED_PREFIX: &str = "(File ";
+///
+/// **The size follows the key it describes.** It is a number, so it can never
+/// be a placeholder itself — `file_size` and `photo_file_size` were once listed
+/// here as keys of their own and could never match. The planner writes the
+/// same size whether or not the file was saved, so carrying it usually
+/// changes nothing; it is carried anyway because an earlier planner wrote
+/// `thumbnail_file_size` only beside a saved thumbnail, and a placeholder
+/// stored by one of those would otherwise gain a path and never its size. A
+/// fresh payload without the size leaves the stored one alone.
+const MEDIA_KEYS: &[(&str, &str)] = &[
+    ("file", "file_size"),
+    ("photo", "photo_file_size"),
+    ("thumbnail", "thumbnail_file_size"),
+];
 
 /// A chat with no topics, and a forum's General topic, are both id 1 — mirrors
 /// `tgx_media::topics::GENERAL_TOPIC_ID`, which this layer may not depend on.
@@ -389,11 +398,11 @@ pub fn merge_volatile(
     // A media key the earlier run declined to fetch. See [`MEDIA_KEYS`]: the
     // placeholder is a record of a refusal, not of what the message carried,
     // and a run that has now fetched the file must be allowed to say so.
-    for key in MEDIA_KEYS {
+    for (key, size) in MEDIA_KEYS {
         let was_skipped = out
             .get(*key)
             .and_then(Value::as_str)
-            .is_some_and(|s| s.starts_with(SKIPPED_PREFIX));
+            .is_some_and(tgx_format::placeholder::is_skipped);
         if !was_skipped {
             continue;
         }
@@ -404,6 +413,9 @@ pub fn merge_volatile(
             None => {
                 out.remove(*key);
             }
+        }
+        if let Some(v) = fresh.get(*size) {
+            out.insert((*size).to_string(), v.clone());
         }
     }
     tgx_format::order::ordered(&out)
@@ -493,6 +505,10 @@ impl Store {
             Some(row) => row.get::<String>(0).unwrap_or_default(),
             None => String::new(),
         };
+        // Released before the schema is made: a statement stepped once and
+        // still alive is "in progress" to SQLite, and `make_schema`'s COMMIT
+        // would be refused for it.
+        drop(rows);
         if !mode.eq_ignore_ascii_case("wal") {
             log::warn!(
                 "{}: journal mode is {mode:?}, not WAL — a reader cannot open this file while \
@@ -673,24 +689,46 @@ impl Store {
                 "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
             )
             .await?;
-        let found = self
-            .row("SELECT value FROM meta WHERE key = 'schema_version'", ())
-            .await?
-            .map(|r| r.get::<String>(0).unwrap_or_default());
-        match found {
-            Some(v) => {
-                // A value that is not a number is a file this build cannot
-                // account for, which is the same answer as a version it does
-                // not know: refuse it. `-1` can never equal SCHEMA_VERSION.
-                let found: i64 = v.trim().parse().unwrap_or(-1);
-                if found != SCHEMA_VERSION {
-                    return Err(Error::Schema {
-                        found,
-                        wanted: SCHEMA_VERSION,
-                    });
-                }
+        let mut found = self.schema_version().await?;
+        if found.is_none() {
+            found = self.make_schema().await?;
+        }
+        // `None` here means the schema was made just now, by this call.
+        if let Some(v) = found {
+            // A value that is not a number is a file this build cannot
+            // account for, which is the same answer as a version it does
+            // not know: refuse it. `-1` can never equal SCHEMA_VERSION.
+            let found: i64 = v.trim().parse().unwrap_or(-1);
+            if found != SCHEMA_VERSION {
+                return Err(Error::Schema {
+                    found,
+                    wanted: SCHEMA_VERSION,
+                });
             }
-            None => {
+        }
+        self.conn.execute_batch(USERPICS).await?;
+        Ok(())
+    }
+
+    /// Create [`SCHEMA`] and its version row, unless another opener got there
+    /// first; answers the version that opener wrote, or `None` if this made it.
+    ///
+    /// **One transaction, version row included.** The tables used to be
+    /// created first and the version row inserted after, so a kill or a full
+    /// disk in between left a file with `chats` and no version: every later
+    /// open ran SCHEMA again and died on "table chats already exists", and the
+    /// user had to find and delete the file. SQLite's DDL is transactional, so
+    /// now the file is either ours or still empty.
+    ///
+    /// IMMEDIATE takes the write lock up front, and the version is read again
+    /// under it: the window and the CLI can share an export root, and the
+    /// second opener of a fresh file must find the first one's schema rather
+    /// than create it twice.
+    async fn make_schema(&self) -> Result<Option<String>, Error> {
+        self.conn.execute_batch("BEGIN IMMEDIATE;").await?;
+        let made = async {
+            let found = self.schema_version().await?;
+            if found.is_none() {
                 self.conn.execute_batch(SCHEMA).await?;
                 self.conn
                     .execute(
@@ -699,9 +737,32 @@ impl Store {
                     )
                     .await?;
             }
+            self.conn.execute_batch("COMMIT;").await?;
+            Ok::<_, Error>(found)
         }
-        self.conn.execute_batch(USERPICS).await?;
-        Ok(())
+        .await;
+        if made.is_err() && !self.conn.is_autocommit() {
+            let _ = self.conn.execute_batch("ROLLBACK;").await;
+        }
+        made
+    }
+
+    /// The `schema_version` row of `meta`, as stored.
+    ///
+    /// **Read to the end, not to the first row.** [`Self::make_schema`] asks
+    /// this inside its transaction, and a statement stepped once and not run
+    /// to completion is still "in progress" to SQLite, which then refuses the
+    /// COMMIT.
+    async fn schema_version(&self) -> Result<Option<String>, Error> {
+        let mut rows = self
+            .conn
+            .query("SELECT value FROM meta WHERE key = 'schema_version'", ())
+            .await?;
+        let mut found = None;
+        while let Some(r) = rows.next().await? {
+            found.get_or_insert_with(|| r.get::<String>(0).unwrap_or_default());
+        }
+        Ok(found)
     }
 
     /// Whether this file has the [`USERPICS`] table: one a build before it
@@ -2100,6 +2161,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_schema_that_fails_partway_leaves_the_file_openable() {
+        // A `runs` table is in the way, so the schema batch fails on its
+        // *last* statement, after `chats` and every other table were made.
+        // Without the transaction those stayed, with no version row, and the
+        // file could never be opened again: "table chats already exists".
+        let path = tmp("schema-partway");
+        {
+            let db = libsql::Builder::new_local(&path).build().await.unwrap();
+            db.connect()
+                .unwrap()
+                .execute_batch("CREATE TABLE runs (x INTEGER);")
+                .await
+                .unwrap();
+        }
+        assert!(Store::open(&path).await.is_err(), "runs is in the way");
+        {
+            let db = libsql::Builder::new_local(&path).build().await.unwrap();
+            let conn = db.connect().unwrap();
+            let mut rows = conn
+                .query(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'chats'",
+                    (),
+                )
+                .await
+                .unwrap();
+            assert!(
+                rows.next().await.unwrap().is_none(),
+                "the failed schema left `chats` behind"
+            );
+            drop(rows);
+            conn.execute_batch("DROP TABLE runs;").await.unwrap();
+        }
+        let s = Store::open(&path)
+            .await
+            .expect("the file opens once cleared");
+        s.upsert_chat(7, "Dev Team", "public_supergroup", 100)
+            .await
+            .unwrap();
+        drop(s);
+        // And it is now an ordinary file of ours.
+        assert!(Store::open(&path).await.is_ok());
+    }
+
+    #[tokio::test]
     async fn a_run_records_what_it_did() {
         let s = store("runs").await;
         let id = s
@@ -2322,6 +2427,41 @@ mod tests {
             json!("video_files/clip.mp4"),
             "a placeholder is a record of a refusal, not of what the message carried"
         );
+    }
+
+    #[test]
+    fn a_filled_in_file_brings_its_size_and_leaves_a_real_ones_alone() {
+        // Stored by a planner that wrote no thumbnail size beside a skipped
+        // thumbnail, and with a file size that is now different.
+        let mut stored = msg(10, "x");
+        stored.insert("file".into(), json!(tgx_format::placeholder::TOO_LARGE));
+        stored.insert("file_size".into(), json!(1));
+        stored.insert(
+            "thumbnail".into(),
+            json!(tgx_format::placeholder::TOO_LARGE),
+        );
+        stored.insert("photo".into(), json!("photos/photo_1@s.jpg"));
+        stored.insert("photo_file_size".into(), json!(7));
+        let mut fresh = msg(10, "x");
+        fresh.insert("file".into(), json!("video_files/clip.mp4"));
+        fresh.insert("file_size".into(), json!(48_000_000));
+        fresh.insert("thumbnail".into(), json!("video_files/clip.mp4_thumb.jpg"));
+        fresh.insert("thumbnail_file_size".into(), json!(9_000));
+        fresh.insert("photo".into(), json!("photos/photo_1@s (1).jpg"));
+        fresh.insert("photo_file_size".into(), json!(8));
+
+        let out = merge_volatile(&stored, &fresh);
+        assert_eq!(out["file"], json!("video_files/clip.mp4"));
+        assert_eq!(out["file_size"], json!(48_000_000));
+        assert_eq!(out["thumbnail"], json!("video_files/clip.mp4_thumb.jpg"));
+        assert_eq!(out["thumbnail_file_size"], json!(9_000));
+        // A real path is history, and so is the size recorded with it.
+        assert_eq!(out["photo"], json!("photos/photo_1@s.jpg"));
+        assert_eq!(out["photo_file_size"], json!(7));
+
+        // A fresh payload with no size does not take the stored one away.
+        fresh.remove("file_size");
+        assert_eq!(merge_volatile(&stored, &fresh)["file_size"], json!(1));
     }
 
     #[test]

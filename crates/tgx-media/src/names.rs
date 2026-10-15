@@ -22,8 +22,22 @@
 use std::collections::{HashMap, HashSet};
 
 /// Characters Windows refuses in a path component.
-fn is_illegal(c: char) -> bool {
+///
+/// Shared with [`crate::topics::sanitize_component`], which names the chat
+/// folder and its database, so the two cannot disagree about what is legal.
+pub(crate) fn is_illegal(c: char) -> bool {
     matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || (c as u32) < 0x20
+}
+
+/// Whether Windows takes `name` for a device.
+///
+/// It reserves CON, CON.txt and CON.txt.bak alike — it is the part before the
+/// *first* dot that matters, not the last. `topics` once kept its own copy
+/// that matched only the whole name, so a chat titled `aux.chat` got the
+/// folder `aux.chat` and the database `aux.chat.sqlite`.
+pub(crate) fn is_reserved(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    reserved_stems().contains(&stem.to_uppercase())
 }
 
 fn reserved_stems() -> &'static HashSet<String> {
@@ -52,10 +66,7 @@ pub fn sanitize_filename(name: &str, fallback: &str) -> String {
     if trimmed.is_empty() {
         return fallback.to_string();
     }
-    // Windows reserves CON, CON.txt and CON.txt.bak alike — it is the part
-    // before the *first* dot that matters, not the last.
-    let stem = trimmed.split('.').next().unwrap_or(trimmed);
-    let candidate = if reserved_stems().contains(&stem.to_uppercase()) {
+    let candidate = if is_reserved(trimmed) {
         format!("_{trimmed}")
     } else {
         trimmed.to_string()
@@ -188,6 +199,11 @@ pub struct NameBook {
     /// One counter per synthesised prefix, not one shared `file_N`.
     synth: HashMap<String, u64>,
     used: HashSet<String>,
+    /// Per lowercased `subdir/name` asked for, the first collision rung
+    /// [`Self::claim`] has not yet found taken. Telegram names every sticker
+    /// `sticker.webp`, so restarting at `(1)` each time made the k-th claim
+    /// cost k probes.
+    next_rung: HashMap<String, u64>,
     /// Where each Telegram file id was already saved, so a repeat reuses it.
     ///
     /// **Per folder, like everything else here**, which is what a topic split
@@ -233,21 +249,25 @@ impl NameBook {
             Some((s, e)) => (s.to_string(), Some(e.to_string())),
             None => (name.to_string(), None),
         };
-        let mut candidate = name.to_string();
-        let mut i = 1;
-        while self
-            .used
-            .contains(&format!("{subdir}/{candidate}").to_lowercase())
-        {
-            candidate = match &ext {
-                Some(e) => format!("{stem} ({i}).{e}"),
-                None => format!("{stem} ({i})"),
+        let key = format!("{subdir}/{name}").to_lowercase();
+        // Rung 0 is the bare name, rung i is `stem (i)`. Nothing is ever
+        // released, so every rung below the one taken last time is still
+        // taken, and the probe can start where it left off: the same answer
+        // as starting from 0, without re-probing every earlier `sticker (i)`.
+        let mut i = self.next_rung.get(&key).copied().unwrap_or(0);
+        loop {
+            let candidate = match (i, &ext) {
+                (0, _) => name.to_string(),
+                (_, Some(e)) => format!("{stem} ({i}).{e}"),
+                (_, None) => format!("{stem} ({i})"),
             };
+            let path = format!("{subdir}/{candidate}");
+            if self.used.insert(path.to_lowercase()) {
+                self.next_rung.insert(key, i + 1);
+                return path;
+            }
             i += 1;
         }
-        self.used
-            .insert(format!("{subdir}/{candidate}").to_lowercase());
-        format!("{subdir}/{candidate}")
     }
 
     /// Decide the file name, advancing the synthesised counter if needed.
@@ -538,6 +558,69 @@ mod tests {
             b.claim("stickers", "sticker.webp"),
             "stickers/sticker (2).webp"
         );
+    }
+
+    /// The probe as it was before it remembered its rung: from `(1)` every
+    /// time. Kept here only as the oracle the resumed probe must agree with.
+    fn claim_from_the_start(used: &mut HashSet<String>, subdir: &str, name: &str) -> String {
+        let (stem, ext) = match name.rsplit_once('.') {
+            Some((s, e)) => (s.to_string(), Some(e.to_string())),
+            None => (name.to_string(), None),
+        };
+        let mut candidate = name.to_string();
+        let mut i = 1;
+        while used.contains(&format!("{subdir}/{candidate}").to_lowercase()) {
+            candidate = match &ext {
+                Some(e) => format!("{stem} ({i}).{e}"),
+                None => format!("{stem} ({i})"),
+            };
+            i += 1;
+        }
+        used.insert(format!("{subdir}/{candidate}").to_lowercase());
+        format!("{subdir}/{candidate}")
+    }
+
+    #[test]
+    fn a_resumed_probe_names_exactly_what_a_full_one_did() {
+        // Interleaved on purpose: a name asked for in another case, a name
+        // that is itself somebody's suffix, an extensionless one, two folders.
+        let asks = [
+            ("stickers", "sticker.webp"),
+            ("stickers", "sticker (2).webp"),
+            ("stickers", "Sticker.WEBP"),
+            ("stickers", "sticker.webp"),
+            ("files", "sticker.webp"),
+            ("stickers", "sticker (1).webp"),
+            ("stickers", "sticker.webp"),
+            ("files", "README"),
+            ("files", "README (1)"),
+            ("files", "readme"),
+            ("files", "README"),
+            ("stickers", "sticker.webp"),
+        ];
+        let mut b = NameBook::new();
+        let mut old = HashSet::new();
+        for (subdir, name) in asks.iter().cycle().take(asks.len() * 40) {
+            assert_eq!(
+                b.claim(subdir, name),
+                claim_from_the_start(&mut old, subdir, name),
+                "{subdir}/{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn thousands_of_stickers_with_one_name_each_get_the_next_suffix() {
+        // Every sticker Telegram sends is `sticker.webp`; the reference
+        // already reaches `sticker (61).webp` in 6,643 messages.
+        let mut b = NameBook::new();
+        assert_eq!(b.claim("stickers", "sticker.webp"), "stickers/sticker.webp");
+        for i in 1..5_000 {
+            assert_eq!(
+                b.claim("stickers", "sticker.webp"),
+                format!("stickers/sticker ({i}).webp")
+            );
+        }
     }
 
     #[test]

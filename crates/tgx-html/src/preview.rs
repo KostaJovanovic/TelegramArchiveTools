@@ -82,7 +82,7 @@ pub fn preview_of(m: &Map<String, Value>) -> Option<Value> {
     let kind = s("media_type");
     let photo = s("photo");
     let file = s("file");
-    let is_placeholder = |v: &str| v.starts_with("(File");
+    let is_placeholder = tgx_format::placeholder::is_skipped;
 
     let sized = |src: &str, box_size: i64| {
         let w = m.get("width").and_then(Value::as_i64).unwrap_or(0);

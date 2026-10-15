@@ -13,26 +13,13 @@
 pub const GENERAL_TOPIC_ID: i64 = 1;
 pub const GENERAL_TITLE: &str = "General";
 
-fn is_illegal(c: char) -> bool {
-    matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || (c as u32) < 0x20
-}
-
-fn is_reserved(name: &str) -> bool {
-    let upper = name.to_uppercase();
-    if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
-        return true;
-    }
-    for prefix in ["COM", "LPT"] {
-        if let Some(rest) = upper.strip_prefix(prefix) {
-            if rest.len() == 1 && matches!(rest.chars().next(), Some('1'..='9')) {
-                return true;
-            }
-        }
-    }
-    false
-}
+use crate::names::{is_illegal, is_reserved};
 
 /// Windows-safe single path component, **emoji preserved**.
+///
+/// It names the chat folder and `<title>.sqlite` as well as topic folders, so
+/// the reserved-name test is the file names' own, stem before the first dot:
+/// `nul.x` is a device on Windows just as `nul` is.
 pub fn sanitize_component(name: &str, fallback: &str) -> String {
     let replaced: String = name
         .chars()
@@ -205,6 +192,20 @@ mod tests {
         assert_eq!(sanitize_component("CON", "x"), "_CON");
         assert_eq!(sanitize_component("com1", "x"), "_com1");
         assert_eq!(sanitize_component("COM10", "x"), "COM10");
+    }
+
+    #[test]
+    fn a_reserved_stem_is_escaped_whatever_follows_its_first_dot() {
+        // The chat folder and its database are named here, so a chat titled
+        // "aux.chat" gave the folder "aux.chat" and "aux.chat.sqlite", both
+        // device names to Windows, while "Aux" alone was escaped.
+        assert_eq!(sanitize_component("CON.x", "x"), "_CON.x");
+        assert_eq!(sanitize_component("nul.sqlite", "x"), "_nul.sqlite");
+        assert_eq!(sanitize_component("aux.chat", "x"), "_aux.chat");
+        assert_eq!(sanitize_component("Lpt3.a.b", "x"), "_Lpt3.a.b");
+        // Only the stem counts, so the letters elsewhere are fine.
+        assert_eq!(sanitize_component("CONTRACT.x", "x"), "CONTRACT.x");
+        assert_eq!(sanitize_component("x.CON", "x"), "x.CON");
     }
 
     #[test]

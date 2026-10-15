@@ -216,6 +216,7 @@ pub(super) fn compare(ours_root: &Path, theirs: &Path) -> Result<Report> {
     let a = messages_by_id(ours_root)?;
     let b = messages_by_id(theirs)?;
     let stated = stated_gaps(ours_root);
+    let show = crate::show_text();
 
     let ids_a: BTreeSet<i64> = a.keys().copied().collect();
     let ids_b: BTreeSet<i64> = b.keys().copied().collect();
@@ -296,7 +297,9 @@ pub(super) fn compare(ours_root: &Path, theirs: &Path) -> Result<Report> {
             }
             *report.dangling.entry(key.to_string()).or_default() += 1;
             if report.dangling_examples.len() < 5 {
-                report.dangling_examples.push(format!("{id} {key}: {v}"));
+                report
+                    .dangling_examples
+                    .push(format!("{id} {key}: {}", path_shape(v, show)));
             }
         }
 
@@ -381,8 +384,8 @@ pub(super) fn compare(ours_root: &Path, theirs: &Path) -> Result<Report> {
             let field = bad[0];
             report.examples.push(format!(
                 "{id} {field}: ours {}, reference {}",
-                brief(m.get(field)),
-                brief(n.get(field))
+                brief(field, m.get(field), show),
+                brief(field, n.get(field), show)
             ));
         }
     }

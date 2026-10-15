@@ -205,8 +205,19 @@ pub fn run(ours: &Path, theirs: &Path) -> Result<u32> {
             "              {n} differ only in display name ({} distinct people)",
             totals.renames.len()
         );
+        // The peer key is an id; the names are people's, so shown only under
+        // the variable that asks for the chat's own words.
+        let show = crate::show_text();
         for (peer, (a, b, n)) in totals.renames.iter().take(10) {
-            println!("              {peer}: ours {a:?}, reference {b:?} ({n})");
+            if show {
+                println!("              {peer}: ours {a:?}, reference {b:?} ({n})");
+            } else {
+                println!(
+                    "              {peer}: ours {}, reference {} ({n})",
+                    detail::shape(&Value::from(a.as_str())),
+                    detail::shape(&Value::from(b.as_str()))
+                );
+            }
         }
     }
     if !totals.absent.is_empty() {
@@ -258,7 +269,7 @@ use detail::topics_by_name;
 // Test-only: the classification cases are exercised from this module's own
 // tests, where the rename-vs-mismatch rules were written.
 #[cfg(test)]
-use detail::{brief, decision, stated_gaps, Decision};
+use detail::{brief, decision, path_shape, stated_gaps, Decision};
 
 #[cfg(test)]
 mod tests {
@@ -307,6 +318,38 @@ mod tests {
         let a = topics_by_name(&ours).unwrap();
         let b = topics_by_name(&theirs).unwrap();
         assert_eq!(a.keys().collect::<Vec<_>>(), b.keys().collect::<Vec<_>>());
+        let _ = std::fs::remove_dir_all(&ours);
+        let _ = std::fs::remove_dir_all(&theirs);
+    }
+
+    #[test]
+    fn two_topics_with_one_title_are_refused_not_overwritten() {
+        // Our folders keep them apart by id; the title inside each is the
+        // same. Keyed on the title alone, one silently replaced the other and
+        // that topic's messages were never compared, with nothing reported.
+        let msgs = json!([{"id": 1, "type": "message", "text": "x"}]);
+        let ours = root("dup-ours");
+        write_topic(
+            &ours,
+            "0001 - Announcements",
+            "Announcements",
+            5,
+            msgs.clone(),
+        );
+        write_topic(
+            &ours,
+            "0002 - Announcements",
+            "Announcements",
+            5,
+            msgs.clone(),
+        );
+        let theirs = root("dup-theirs");
+        write_topic(&theirs, "Announcements", "Announcements", 5, msgs);
+
+        let err = topics_by_name(&ours).unwrap_err().to_string();
+        assert!(err.contains("0001 - Announcements"), "{err}");
+        assert!(err.contains("0002 - Announcements"), "{err}");
+        assert!(run(&ours, &theirs).is_err(), "the leg must not pass");
         let _ = std::fs::remove_dir_all(&ours);
         let _ = std::fs::remove_dir_all(&theirs);
     }
@@ -645,8 +688,40 @@ mod tests {
     #[test]
     fn brief_truncates_without_splitting_a_character() {
         let long = json!("ћ".repeat(200));
-        let out = brief(Some(&long));
+        let out = brief("mime_type", Some(&long), false);
         assert!(out.chars().count() <= 61, "{out}");
         assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn an_example_line_shows_the_shape_of_somebodys_words_not_the_words() {
+        // `text`, a name and a file name are the chat's; an example line used
+        // to print 57 characters of each into whatever ran the leg.
+        let words = json!("meet me at the old bridge");
+        for field in ["text", "from", "actor", "forwarded_from", "file_name"] {
+            let out = brief(field, Some(&words), false);
+            assert_eq!(out, "a string of 25 chars", "{field}");
+        }
+        assert_eq!(brief("from", Some(&json!("")), false), "\"\"");
+        assert_eq!(
+            brief("text", Some(&json!(["a", {"type": "bold"}])), false),
+            "an array of 2"
+        );
+        // Desktop's own vocabulary is shown as it is.
+        assert_eq!(
+            brief("media_type", Some(&json!("sticker")), false),
+            "\"sticker\""
+        );
+        // And the variable brings the words back.
+        assert!(brief("text", Some(&words), true).contains("bridge"));
+
+        assert_eq!(
+            path_shape("files/Contract for Ana.pdf", false),
+            "files/<20 chars>.pdf"
+        );
+        assert_eq!(
+            path_shape("files/Contract for Ana.pdf", true),
+            "files/Contract for Ana.pdf"
+        );
     }
 }

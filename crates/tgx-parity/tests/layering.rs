@@ -110,6 +110,119 @@ fn tgx_archive_does_not_depend_on_tgx_tg() {
     );
 }
 
+/// What no crate of the byte-exact core may link: the wire, the runtime the
+/// wire runs on, a window, a network client, or the store's SQLite.
+fn is_outside_the_core(name: &str) -> bool {
+    name.starts_with("grammers")
+        || name.starts_with("tga-")
+        || name.starts_with("tt-")
+        || [
+            "tgx-tg",
+            "tgx-ui",
+            "tokio",
+            "eframe",
+            "egui",
+            "egui_extras",
+            "reqwest",
+            "hyper",
+            "ureq",
+            "libsql",
+        ]
+        .contains(&name)
+}
+
+/// **`tgx-format` is the floor: Desktop's schema, with no I/O, network or UI.**
+/// Every leg and the live exporter both stand on it, so a convenience
+/// dependency here — a wire type to save a conversion, a runtime for one
+/// helper — would link that into every replay while `cargo test --all` stayed
+/// green. It depends on no crate of this workspace at all.
+#[test]
+fn tgx_format_depends_on_nothing_of_ours_and_nothing_with_a_wire() {
+    let offenders: Vec<String> = dependency_names(&manifest("tgx-format"))
+        .into_iter()
+        .filter(|n| is_outside_the_core(n) || n.starts_with("tgx-"))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "tgx-format/Cargo.toml depends on {offenders:?} — it is Desktop's JSON schema, \
+         with no I/O, network or UI, and the floor every other crate stands on, so it \
+         depends on no crate of this workspace. See CLAUDE.md's Architecture section."
+    );
+}
+
+/// `tgx-media` names files and folders from values already read off the wire,
+/// which is what lets the media leg replay a reference's names with no
+/// connection. Of this workspace it may see only `tgx-format`.
+#[test]
+fn tgx_media_sees_only_the_format_below_it() {
+    let offenders: Vec<String> = dependency_names(&manifest("tgx-media"))
+        .into_iter()
+        .filter(|n| is_outside_the_core(n) || (n.starts_with("tgx-") && n != "tgx-format"))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "tgx-media/Cargo.toml depends on {offenders:?} — it decides names and folders from \
+         plain values, below the writers and the engine, so the media leg can replay it \
+         offline. Of this workspace it may depend on tgx-format alone. See CLAUDE.md's \
+         Architecture section."
+    );
+}
+
+/// The two writers beside each other: neither reaches the other, the engine or
+/// a runtime. `tgx-html` renders pages and `tgx-archive` renders nothing; both
+/// take the same map, and a dependency between them would let one output start
+/// depending on how the other was made. `tokio` is fine in the archive's
+/// *dev*-dependencies only, which this checks by section.
+#[test]
+fn the_writers_reach_neither_each_other_nor_the_engine() {
+    for (name, other) in [("tgx-html", "tgx-archive"), ("tgx-archive", "tgx-html")] {
+        let text = manifest(name);
+        let offenders: Vec<String> = dependency_names(&text)
+            .into_iter()
+            .filter(|n| n == other || n == "tgx-tg" || n == "tgx-ui")
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "{name}/Cargo.toml depends on {offenders:?} — the HTML writer and the store take \
+             the same map and sit side by side below the engine. See CLAUDE.md's \
+             Architecture section."
+        );
+        let runtime: Vec<String> = dependency_names(&without_dev_dependencies(&text))
+            .into_iter()
+            .filter(|n| n == "tokio")
+            .collect();
+        assert!(
+            runtime.is_empty(),
+            "{name}/Cargo.toml depends on tokio outside [dev-dependencies] — the runtime is \
+             whoever calls it, the engine's or a test's."
+        );
+    }
+}
+
+/// `manifest_toml` with every `dev-dependencies` table removed, so a check can
+/// tell what ships from what only a test links.
+fn without_dev_dependencies(manifest_toml: &str) -> String {
+    let mut out = String::new();
+    let mut in_dev = false;
+    for line in manifest_toml.lines() {
+        if let Some(header) = line.trim().strip_prefix('[') {
+            in_dev = header.trim_end_matches(']').ends_with("dev-dependencies");
+        }
+        if !in_dev {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+#[test]
+fn the_dependency_reader_tells_a_test_only_dependency_apart() {
+    let toml = "[dependencies]\nserde = \"1\"\n[dev-dependencies]\ntokio = \"1\"\n";
+    assert_eq!(dependency_names(toml), ["serde", "tokio"]);
+    assert_eq!(dependency_names(&without_dev_dependencies(toml)), ["serde"]);
+}
+
 /// `tt-app` is the window. It reaches Telegram only through `tgx-tg`, which
 /// owns the client, the engine and every typed error the UI is allowed to see.
 /// A direct `grammers-*` dependency lets a wire type reach the widgets, and the
