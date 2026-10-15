@@ -546,12 +546,19 @@ impl Settings {
     /// file — about 25 on a full one, which is immaterial next to the file read
     /// that preceded it.
     pub fn load_from_str(raw: &str) -> Self {
+        Self::parse(raw).unwrap_or_default()
+    }
+
+    /// [`Self::load_from_str`], with `None` for a file that is not a JSON
+    /// object at all — the one case where no field could be kept, and the one
+    /// [`Self::load`] must not let a save paper over.
+    fn parse(raw: &str) -> Option<Self> {
         let Ok(Value::Object(map)) = serde_json::from_str::<Value>(raw) else {
-            return Self::default();
+            return None;
         };
         let defaults = Self::default();
         let Ok(Value::Object(mut base)) = serde_json::to_value(&defaults) else {
-            return defaults;
+            return Some(defaults);
         };
 
         for (key, value) in map {
@@ -624,7 +631,7 @@ impl Settings {
         // A week, the panel's `SYNC_RANGE`. Past that a window left open is not
         // what anyone is relying on.
         out.sync_every_hours = out.sync_every_hours.min(168);
-        out
+        Some(out)
     }
 
     /// The settings as a record of what a run was configured to do, **with the
@@ -657,14 +664,65 @@ impl Settings {
         value
     }
 
+    /// Read `settings.json`, or the defaults when there is none.
+    ///
+    /// **Only a file that is not there means defaults.** Every read error used
+    /// to, so a file held for a moment by an antivirus scan or a sync tool
+    /// brought the app up with no `api_id`, no `api_hash` and no phone — and
+    /// the next tick of any box saved that whole struct over the credentials.
+    /// A file that will not read, or reads as no JSON object, still gives
+    /// defaults, so the app starts; but a copy is kept as `settings.json.bad`
+    /// and [`Self::save`] refuses to replace the file until the user says so
+    /// ([`allow_settings_overwrite`]) or a later load reads it.
     pub fn load() -> Self {
-        match std::fs::read_to_string(settings_file()) {
-            Ok(raw) => Self::load_from_str(&raw),
-            Err(_) => Self::default(),
+        let (settings, unreadable) = Self::load_at(&settings_file());
+        if let Ok(mut flag) = UNREADABLE.lock() {
+            *flag = unreadable;
+        }
+        settings
+    }
+
+    /// [`Self::load`] against any path, answering why the file could not be
+    /// used when it could not. Keeps the `.bad` copy; sets nothing global.
+    fn load_at(path: &std::path::Path) -> (Self, Option<String>) {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Self::default(), None),
+            Err(e) => {
+                let kept = keep_bad_copy(path);
+                return (
+                    Self::default(),
+                    Some(format!("it could not be read ({e}){kept}")),
+                );
+            }
+        };
+        // Nothing in it is nothing to lose, and refusing every save over an
+        // empty file would only stop the app remembering anything.
+        if raw.trim().is_empty() {
+            return (Self::default(), None);
+        }
+        match Self::parse(&raw) {
+            Some(settings) => (settings, None),
+            None => {
+                let kept = keep_bad_copy(path);
+                (
+                    Self::default(),
+                    Some(format!("it is not a settings file{kept}")),
+                )
+            }
         }
     }
 
     pub fn save(&self) -> std::io::Result<()> {
+        // Before anything else, the data folder included: a refusal touches
+        // nothing.
+        if let Some(why) = settings_unreadable() {
+            return Err(std::io::Error::other(format!(
+                "{} was not saved over: {why}. Your settings there may still hold \
+                 your credentials, so it is left as it is",
+                settings_file().display()
+            )));
+        }
         ensure_data_dir()?;
         let body = serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".into());
         write_atomically(&settings_file(), body.as_bytes())
@@ -697,6 +755,41 @@ fn write_atomically(target: &std::path::Path, body: &[u8]) -> std::io::Result<()
         return Err(e);
     }
     Ok(())
+}
+
+/// Why the last [`Settings::load`] could not use the file, while that holds.
+///
+/// Process-wide because the load and the save are far apart — the window
+/// loads once at start and saves from a dozen places — and a refusal that each
+/// caller had to remember to pass along would be skipped by the one that did
+/// not.
+static UNREADABLE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Why `settings.json` could not be read on the last load, if it could not.
+/// While this is `Some`, [`Settings::save`] refuses.
+pub fn settings_unreadable() -> Option<String> {
+    UNREADABLE.lock().ok().and_then(|g| g.clone())
+}
+
+/// The user has seen [`settings_unreadable`] and chosen to save over the
+/// file. The copy in `settings.json.bad` stays.
+pub fn allow_settings_overwrite() {
+    if let Ok(mut flag) = UNREADABLE.lock() {
+        *flag = None;
+    }
+}
+
+/// Copy an unusable `settings.json` aside as `settings.json.bad`, and say what
+/// became of it. The newest bad copy replaces an older one: this is a
+/// safety net for the file in hand, not a history.
+fn keep_bad_copy(path: &std::path::Path) -> String {
+    let mut bad = path.as_os_str().to_owned();
+    bad.push(".bad");
+    let bad = PathBuf::from(bad);
+    match std::fs::copy(path, &bad) {
+        Ok(_) => format!("; a copy is kept as {}", bad.display()),
+        Err(e) => format!("; no copy could be kept ({e})"),
+    }
 }
 
 /// Do these two values have the same JSON shape?
@@ -1164,6 +1257,47 @@ mod tests {
         // No debris left beside it.
         assert!(!dir.join("settings.json.tmp").exists());
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn only_a_missing_settings_file_means_defaults_without_a_word() {
+        // Against a temporary folder, never `load()`: that sets the flag
+        // `save()` reads, and `save()` writes this machine's real settings.
+        let dir = std::env::temp_dir().join(format!("tgx-badsettings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("settings.json");
+        let bad = dir.join("settings.json.bad");
+
+        assert_eq!(Settings::load_at(&target), (Settings::default(), None));
+        std::fs::write(&target, "  \n").unwrap();
+        assert_eq!(Settings::load_at(&target), (Settings::default(), None));
+        assert!(!bad.exists());
+
+        // A half-written file: the credentials are in it, and nothing can be
+        // read back out. Defaults so the app starts, a copy aside, and a reason.
+        let torn = r#"{"api_id": 12345, "api_hash": "abc"#;
+        std::fs::write(&target, torn).unwrap();
+        let (s, why) = Settings::load_at(&target);
+        assert_eq!(s, Settings::default());
+        let why = why.expect("an unreadable file must be said");
+        assert!(why.contains("settings.json.bad"), "{why}");
+        assert_eq!(std::fs::read_to_string(&bad).unwrap(), torn);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), torn, "touched");
+
+        // A folder where the file should be: a read error that is not
+        // NotFound.
+        std::fs::remove_file(&target).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        let (_, why) = Settings::load_at(&target);
+        assert!(why.is_some_and(|w| w.contains("could not be read")));
+
+        // And a file that reads loads as it always did.
+        std::fs::remove_dir(&target).unwrap();
+        std::fs::write(&target, r#"{"page_size": 7}"#).unwrap();
+        let (s, why) = Settings::load_at(&target);
+        assert_eq!((s.page_size, why), (7, None));
         std::fs::remove_dir_all(&dir).ok();
     }
 

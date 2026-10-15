@@ -33,17 +33,28 @@ pub struct Done {
 /// The name is the one [`crate::engine`] opens for the chat — its sanitised
 /// title, or `<title> (<id>)` when that file belongs to somebody else — so the
 /// next sync finds the history this put there.
+///
+/// **A name an earlier chat of this same plan took is taken too**, though no
+/// file holds it yet. The test on disk alone sent "Admini" and "admini" — one
+/// folder on Windows — or two chats of one title into the same destination,
+/// and `split` then copied both conversations into one database: the mix-up a
+/// file per chat exists to prevent. A sync applies the same rule at open time,
+/// so it finds the second chat under `<title> (<id>)` exactly as this left it.
 pub async fn plan(file: &Path, into: &Path) -> Result<Vec<Planned>, tgx_archive::Error> {
     let ext = tgx_archive::FILE_EXT;
     let mut out = Vec::new();
+    // Lower-cased, because the filesystem this runs on compares names that
+    // way. On a case-sensitive one it costs a suffix nobody needed.
+    let mut planned = std::collections::HashSet::new();
     for chat in tgx_archive::Store::chats_in(file).await? {
         let base = tgx_media::topics::sanitize_component(&chat.title, "chat");
         let mut name = base.clone();
         let own = |name: &str| into.join(name).join(format!("{name}.{ext}"));
-        let taken_by_other = match tgx_archive::Store::chats_in(&own(&name)).await {
-            Ok(chats) => chats.iter().any(|c| c.id != chat.id),
-            Err(_) => own(&name).exists(),
-        };
+        let taken_by_other = planned.contains(&name.to_lowercase())
+            || match tgx_archive::Store::chats_in(&own(&name)).await {
+                Ok(chats) => chats.iter().any(|c| c.id != chat.id),
+                Err(_) => own(&name).exists(),
+            };
         // A chat named after the file being split would have it moved into
         // its folder as its own flat database. **Compared as files, not as
         // strings**: chat 777000 is "Telegram", and on Windows
@@ -52,6 +63,7 @@ pub async fn plan(file: &Path, into: &Path) -> Result<Vec<Planned>, tgx_archive:
         if taken_by_other || is_source {
             name = format!("{base} ({})", chat.id);
         }
+        planned.insert(name.to_lowercase());
         let dest = own(&name);
         out.push(Planned {
             chat_id: chat.id,
@@ -199,6 +211,46 @@ mod tests {
         let mum = dir.join("Mum").join("Mum.sqlite");
         let chats = tgx_archive::Store::chats_in(&mum).await.unwrap();
         assert_eq!(chats.iter().map(|c| c.id).collect::<Vec<_>>(), vec![2]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn two_chats_of_one_name_get_a_file_each() {
+        let dir = tmp("same-name");
+        let old = dir.join("telegram.sqlite");
+        {
+            let store = tgx_archive::Store::open(&old).await.unwrap();
+            // One folder on Windows, and an identical title is enough anywhere.
+            for (chat, title) in [(1, "Admini"), (2, "admini"), (3, "Admini")] {
+                store
+                    .upsert_chat(chat, title, "private_group", 1)
+                    .await
+                    .unwrap();
+                let m = json!({"id": 1, "type": "message", "date": "d", "text": ""});
+                store
+                    .merge(chat, 1, None, m.as_object().unwrap(), 1)
+                    .await
+                    .unwrap();
+            }
+        }
+        let planned = plan(&old, &dir).await.unwrap();
+        let names: std::collections::HashSet<String> = planned
+            .iter()
+            .map(|p| p.dest.to_string_lossy().to_lowercase())
+            .collect();
+        assert_eq!(names.len(), 3, "{planned:?}");
+
+        let done = split(&old, &dir).await.unwrap();
+        assert!(done.iter().all(|d| d.lacking == Ok(0)), "{done:?}");
+        for p in &planned {
+            let chats = tgx_archive::Store::chats_in(&p.dest).await.unwrap();
+            assert_eq!(
+                chats.iter().map(|c| c.id).collect::<Vec<_>>(),
+                vec![p.chat_id],
+                "{:?} holds another chat",
+                p.dest
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

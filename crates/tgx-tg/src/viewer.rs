@@ -625,22 +625,18 @@ pub async fn save(path: &Path, media: &Media, to: &Path) -> Result<(), String> {
 /// The name comes out of the database, and a database is a file somebody may
 /// have handed over: `..\..\Startup\x.bat` must land inside the temp folder
 /// as `x.bat`, not two levels above it.
+///
+/// The rest is the export's own filename rule,
+/// [`tgx_media::names::sanitize_filename`], rather than a second copy of it:
+/// that one also defuses Windows' device names, so a stored `NUL.jpg` or
+/// `CON` is written as `_NUL.jpg` and not handed to a device that swallows the
+/// bytes.
 fn safe_name(name: &str, file_id: i64) -> String {
-    let last = name.rsplit(['/', '\\']).next().unwrap_or("").trim();
-    let cleaned: String = last
-        .chars()
-        .map(|c| match c {
-            ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            c if c.is_control() => '_',
-            c => c,
-        })
-        .collect();
-    let cleaned = cleaned.trim_matches(['.', ' ']).to_string();
-    if cleaned.is_empty() {
-        format!("file_{file_id}")
-    } else {
-        cleaned
-    }
+    let last = name.rsplit(['/', '\\']).next().unwrap_or("");
+    // Leading dots too: `..` is not a name, and a file that hides itself is
+    // not what Open or Save meant to hand anyone.
+    let last = last.trim_start_matches(['.', ' ']);
+    tgx_media::names::sanitize_filename(last, &format!("file_{file_id}"))
 }
 
 // --- flattening ---------------------------------------------------------------
@@ -1392,5 +1388,18 @@ mod tests {
         assert_eq!(safe_name("photos/", 5), "file_5");
         assert_eq!(safe_name("a:b?.pdf", 5), "a_b_.pdf");
         assert_eq!(safe_name("photos/photo_1.jpg", 5), "photo_1.jpg");
+        assert_eq!(safe_name(r"..\..\Startup\x.bat", 5), "x.bat");
+        assert_eq!(safe_name("..", 5), "file_5");
+        assert_eq!(safe_name(" .hidden. ", 5), "hidden");
+    }
+
+    #[test]
+    fn a_device_name_is_written_as_a_file() {
+        // From a database somebody handed over: `NUL.jpg` opened for writing
+        // on Windows is the null device, and the bytes go nowhere.
+        assert_eq!(safe_name("NUL.jpg", 5), "_NUL.jpg");
+        assert_eq!(safe_name(r"x\con", 5), "_con");
+        assert_eq!(safe_name("com1.tar.gz", 5), "_com1.tar.gz");
+        assert_eq!(safe_name("CONTRACT.pdf", 5), "CONTRACT.pdf");
     }
 }

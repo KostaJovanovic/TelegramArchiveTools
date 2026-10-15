@@ -434,9 +434,17 @@ pub struct Verdict {
     pub synced: Option<i64>,
     pub stored: usize,
     pub stored_deleted: usize,
-    /// In an export, not in the database: the messages only an old export
-    /// still has.
+    /// In an export, not in the database, and no newer than the newest
+    /// message the database holds: the messages only an old export still has.
     pub missing: Vec<Seen>,
+    /// In an export and past the newest message the database holds: sent
+    /// after its last sync, so never seen rather than deleted. Kept apart
+    /// because an import marks what is `missing` deleted, and a Desktop
+    /// export taken after the last sync would otherwise stamp Tuesday's live
+    /// messages deleted on a database last synced on Monday. A database
+    /// holding nothing for the chat has no newest message, so everything the
+    /// export holds lands here.
+    pub newer: Vec<Seen>,
     /// In the database and inside the export's id range, but not in any
     /// export — sent and deleted between two exports, or skipped by one.
     pub only_in_database: usize,
@@ -483,6 +491,7 @@ pub async fn compare(
             stored: 0,
             stored_deleted: 0,
             missing: Vec::new(),
+            newer: Vec::new(),
             only_in_database: 0,
         };
         // A database that will not open is reported with the other unreadable
@@ -502,12 +511,18 @@ pub async fn compare(
         v.stored = stored.len();
         v.stored_deleted = stored.values().filter(|d| **d).count();
         if v.database.is_some() {
-            v.missing = exported
+            // Bounded by id, not by date. A message id only grows within a
+            // chat, so one under the newest stored id was sent before a
+            // message the database has read, and the walk that read it went
+            // past; an export's dates are a local wall clock and `synced` is
+            // not, so the two cannot be compared to the hour.
+            let newest = stored.keys().max().copied();
+            (v.newer, v.missing) = exported
                 .messages
                 .values()
                 .filter(|m| !stored.contains_key(&m.id))
                 .cloned()
-                .collect();
+                .partition(|m| newest.is_none_or(|n| m.id > n));
             if let (Some(lo), Some(hi)) = (
                 exported.messages.keys().next(),
                 exported.messages.keys().next_back(),
@@ -674,6 +689,7 @@ mod tests {
         let dev = verdicts.iter().find(|v| v.chat_id == 7).unwrap();
         let missing: Vec<i64> = dev.missing.iter().map(|m| m.id).collect();
         assert_eq!(missing, vec![1, 4]);
+        assert!(dev.newer.is_empty());
         assert_eq!(dev.stored, 3);
         // 3 is inside the export's range and not in it; 5 is newer than it.
         assert_eq!(dev.only_in_database, 1);

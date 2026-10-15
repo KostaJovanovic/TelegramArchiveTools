@@ -317,10 +317,14 @@ async fn history_of(client: &Client, face: &Face) -> Result<Vec<Want>, String> {
     }
     .into();
     let mut out = Vec::new();
+    // Entries received, empty ones included: Telegram's offset counts those.
+    // Paging on `out.len()` asked again for one photo per empty entry, and could
+    // reach `total` with the oldest never requested.
+    let mut seen = 0;
     loop {
         let request = tl::functions::photos::GetUserPhotos {
             user_id: user.clone(),
-            offset: out.len() as i32,
+            offset: seen as i32,
             max_id: 0,
             limit: PAGE,
         };
@@ -330,11 +334,9 @@ async fn history_of(client: &Client, face: &Face) -> Result<Vec<Want>, String> {
             Err(e) => return Err(classify(&e).to_string()),
         };
         let got = photos.len();
-        out.extend(photos.iter().filter_map(|p| match p {
-            tl::enums::Photo::Photo(p) => Some(dated(face, p)),
-            tl::enums::Photo::Empty(_) => None,
-        }));
-        if got == 0 || total.is_none_or(|t| out.len() >= t) {
+        seen += got;
+        take_page(face, &photos, &mut out);
+        if got == 0 || total.is_none_or(|t| seen >= t) {
             break;
         }
     }
@@ -344,6 +346,19 @@ async fn history_of(client: &Client, face: &Face) -> Result<Vec<Want>, String> {
         out.push(current_of(face));
     }
     Ok(out)
+}
+
+/// One page of a picture history into `out`: the real photos, each once. A
+/// list that shifts between two pages — a picture added or removed meanwhile —
+/// hands one back twice, and it is one picture.
+fn take_page(face: &Face, photos: &[tl::enums::Photo], out: &mut Vec<Want>) {
+    for p in photos {
+        if let tl::enums::Photo::Photo(p) = p {
+            if !out.iter().any(|w| w.photo_id == p.id) {
+                out.push(dated(face, p));
+            }
+        }
+    }
 }
 
 fn dated(face: &Face, p: &tl::types::Photo) -> Want {
@@ -467,5 +482,36 @@ mod tests {
             "c"
         );
         assert_eq!(largest_size(&[]), "c");
+    }
+
+    #[test]
+    fn an_empty_entry_is_skipped_and_a_repeat_is_one_picture() {
+        let face = Face {
+            user_id: 1,
+            access_hash: 10,
+            photo_id: 500,
+        };
+        let photo = |id: i64| -> tl::enums::Photo {
+            tl::types::Photo {
+                has_stickers: false,
+                id,
+                access_hash: 0,
+                file_reference: vec![],
+                date: 0,
+                sizes: vec![],
+                video_sizes: None,
+                dc_id: 2,
+            }
+            .into()
+        };
+        let empty: tl::enums::Photo = tl::types::PhotoEmpty { id: 9 }.into();
+        let mut out = Vec::new();
+        take_page(&face, &[photo(500), empty, photo(499)], &mut out);
+        // A list that moved between two pages hands one back again, and it is
+        // still one picture.
+        take_page(&face, &[photo(499), photo(498)], &mut out);
+        let ids: Vec<i64> = out.iter().map(|w| w.photo_id).collect();
+        assert_eq!(ids, vec![500, 499, 498]);
+        assert!(out[0].current && !out[1].current);
     }
 }

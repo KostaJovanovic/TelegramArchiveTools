@@ -105,6 +105,42 @@ fn wanted_level() -> (log::LevelFilter, Option<String>) {
     }
 }
 
+/// The last line of the header; every line after it is a record.
+const LEGEND: &str = "seconds since start, then level, target, message";
+
+/// The target of the records `init` writes itself.
+const OWN_TARGET: &str = module_path!();
+
+/// Whether the log at `path` holds anything past what [`init`] writes into
+/// every log: the header, and its own records ("logging to …", the lockdown
+/// warning), which come from this module's target.
+///
+/// A log that cannot be read, or has no legend line — another build's, or a
+/// torn one — counts as holding something: keeping a file nobody needed costs
+/// less than losing one somebody did.
+fn holds_a_record(path: &std::path::Path) -> bool {
+    use std::io::BufRead;
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) => return e.kind() != std::io::ErrorKind::NotFound,
+    };
+    let own = format!("  {OWN_TARGET}  ");
+    let mut past_header = false;
+    let mut any = false;
+    for line in std::io::BufReader::new(file).lines() {
+        let Ok(line) = line else {
+            return true;
+        };
+        any = true;
+        if !past_header {
+            past_header = line == LEGEND;
+        } else if !line.contains(&own) {
+            return true;
+        }
+    }
+    any && !past_header
+}
+
 /// Start logging, and answer where it went.
 ///
 /// Failing to open the log must never stop the app: it is a diagnostic, and
@@ -122,7 +158,13 @@ pub fn init() -> Result<PathBuf, String> {
     // looking for, so it is moved rather than overwritten; two runs is enough
     // to be useful and bounded enough that a portable folder does not grow
     // without limit.
-    if path.is_file() {
+    //
+    // **Only a log with something in it.** Every command starts here, so a
+    // run that recorded nothing past its own header used to push the failed
+    // export's log out of `tgx.prev.log` — two quick commands to look around
+    // after a failure and the evidence was gone. Such a log is overwritten
+    // instead: it held nothing anyone could want.
+    if holds_a_record(&path) {
         let _ = std::fs::rename(&path, data_dir().join(PREVIOUS_LOG_NAME));
     }
 
@@ -140,7 +182,7 @@ pub fn init() -> Result<PathBuf, String> {
         let mut out = logger.out.lock().unwrap();
         let _ = writeln!(
             out,
-            "TelegramExporter {} — started {} — level {level}",
+            "TelegramTools {} — started {} — level {level}",
             env!("CARGO_PKG_VERSION"),
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f %:z"),
         );
@@ -150,7 +192,7 @@ pub fn init() -> Result<PathBuf, String> {
                 "(RUST_LOG={raw:?} is not a plain level name; using {level})"
             );
         }
-        let _ = writeln!(out, "seconds since start, then level, target, message");
+        let _ = writeln!(out, "{LEGEND}");
         let _ = out.flush();
     }
 
@@ -193,5 +235,38 @@ mod tests {
         // the run someone is trying to read.
         assert_ne!(LOG_NAME, PREVIOUS_LOG_NAME);
         assert!(log_file().ends_with(LOG_NAME));
+    }
+
+    #[test]
+    fn a_log_of_nothing_but_its_header_does_not_push_out_the_last_one() {
+        let dir = std::env::temp_dir().join(format!("tgx-logrotate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join(LOG_NAME);
+        assert!(!holds_a_record(&log), "no log at all");
+
+        let own = OWN_TARGET;
+        let header = format!(
+            "TelegramTools 0.0.0 — started 2026-10-15 10:00:00.000 +02:00 — level INFO\n\
+             {LEGEND}\n\
+             \x20   0.001  INFO   {own}  logging to x\\tgx.log\n\
+             \x20   0.001  WARN   {own}  x is NOT restricted to your user\n"
+        );
+        std::fs::write(&log, &header).unwrap();
+        assert!(!holds_a_record(&log), "only what init writes");
+
+        std::fs::write(
+            &log,
+            format!("{header}    2.500  INFO   grammers_mtsender  connecting...\n"),
+        )
+        .unwrap();
+        assert!(holds_a_record(&log), "a run that did something");
+
+        // Something that is not one of ours is kept rather than judged.
+        std::fs::write(&log, "a line with no header\n").unwrap();
+        assert!(holds_a_record(&log));
+        std::fs::write(&log, "").unwrap();
+        assert!(!holds_a_record(&log));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -114,19 +114,10 @@ pub fn presentation(
         p.insert("colours".into(), Value::Object(colours));
     }
 
-    // Which reactions *we* pressed, in the order they appear.
     if let Some(r) = &m.reactions {
         let tl::enums::MessageReactions::Reactions(r) = r;
-        let chosen: Vec<Value> = r
-            .results
-            .iter()
-            .map(|e| {
-                let tl::enums::ReactionCount::Count(e) = e;
-                json!(e.chosen_order.is_some())
-            })
-            .collect();
-        if chosen.iter().any(|v| v == &json!(true)) {
-            p.insert("reactions_chosen".into(), Value::Array(chosen));
+        if let Some(chosen) = reactions_chosen(r) {
+            p.insert("reactions_chosen".into(), chosen);
         }
     }
 
@@ -134,6 +125,26 @@ pub fn presentation(
         p.insert("preview".into(), pv);
     }
     (!p.is_empty()).then_some(p)
+}
+
+/// Which reactions *we* pressed, one flag per entry of `reactions`, or `None`
+/// when we pressed none.
+///
+/// Over the entries [`reactions_of`] writes and no others, because the writer
+/// reads the two arrays side by side by index — see [`reaction_identity`].
+fn reactions_chosen(r: &tl::types::MessageReactions) -> Option<Value> {
+    let chosen: Vec<Value> = r
+        .results
+        .iter()
+        .filter_map(|e| {
+            let tl::enums::ReactionCount::Count(e) = e;
+            reaction_identity(&e.reaction).map(|_| json!(e.chosen_order.is_some()))
+        })
+        .collect();
+    chosen
+        .iter()
+        .any(|v| v == &json!(true))
+        .then_some(Value::Array(chosen))
 }
 
 /// The `<img>` Desktop would put inline for this message, and its CSS size.
@@ -204,4 +215,55 @@ fn preview_of(out: &Map<String, Value>, preview_src: Option<&str>) -> Option<Val
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn count(reaction: tl::enums::Reaction, chosen: bool) -> tl::enums::ReactionCount {
+        tl::enums::ReactionCount::Count(tl::types::ReactionCount {
+            chosen_order: chosen.then_some(1),
+            reaction,
+            count: 3,
+        })
+    }
+
+    fn heart() -> tl::enums::Reaction {
+        tl::enums::Reaction::Emoji(tl::types::ReactionEmoji {
+            emoticon: "❤".into(),
+        })
+    }
+
+    fn reactions(results: Vec<tl::enums::ReactionCount>) -> tl::types::MessageReactions {
+        tl::types::MessageReactions {
+            min: false,
+            can_see_list: true,
+            reactions_as_tags: false,
+            results,
+            recent_reactions: None,
+            top_reactors: None,
+        }
+    }
+
+    #[test]
+    fn a_skipped_reaction_does_not_move_the_highlight() {
+        // A paid reaction first, then the heart we pressed. `reactions` writes
+        // only the heart, so the flag for it has to be the first flag.
+        let r = reactions(vec![
+            count(tl::enums::Reaction::Paid, false),
+            count(heart(), true),
+        ]);
+        let written = reactions_of(&r, None, &NameBook::default()).expect("the heart");
+        let chosen = reactions_chosen(&r).expect("we pressed one");
+        assert_eq!(written.as_array().map(Vec::len), Some(1));
+        assert_eq!(chosen, json!([true]));
+
+        // The other way round, the highlight must not land on the heart.
+        let r = reactions(vec![
+            count(heart(), false),
+            count(tl::enums::Reaction::Paid, true),
+        ]);
+        assert_eq!(reactions_chosen(&r), None);
+    }
 }

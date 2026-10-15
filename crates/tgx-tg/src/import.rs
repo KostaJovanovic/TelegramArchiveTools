@@ -38,10 +38,19 @@ pub struct ChatImport {
     pub title: String,
     pub database: PathBuf,
     pub outcome: Outcome,
+    /// Messages the comparison found missing that no file gave back on the
+    /// second read — a file that has since moved, changed or stopped parsing.
+    /// Counted rather than skipped in silence: "imported 0" beside nothing
+    /// else reads as "nothing was missing".
+    pub unread: usize,
 }
 
 /// Import everything `verdicts` found missing, reading the messages back out
 /// of `files` — the same `result.json` files the comparison read.
+///
+/// Only `missing`, never `newer`: a message past the newest one the database
+/// holds was sent after its last sync, and marking it deleted would be a claim
+/// about something no walk has looked for. See [`Verdict::newer`].
 pub async fn import(
     verdicts: &[Verdict],
     files: &[PathBuf],
@@ -62,6 +71,7 @@ pub async fn import(
             title: v.title.clone(),
             database: database.clone(),
             outcome,
+            unread: 0,
         };
         if v.synced.is_none() {
             out.push(entry(Outcome::NotSynced));
@@ -77,12 +87,31 @@ pub async fn import(
         return (out, Vec::new());
     }
 
-    let (payloads, skipped) = {
+    // A read that died is every wanted chat failing, said as such. It was
+    // `unwrap_or_default()`, which handed on no payloads at all, and each chat
+    // then reported "imported 0" — the answer that says nothing was missing.
+    let read = {
         let files = files.to_vec();
         let wanted = wanted.clone();
-        tokio::task::spawn_blocking(move || compare::payloads(&files, &wanted))
-            .await
-            .unwrap_or_default()
+        tokio::task::spawn_blocking(move || compare::payloads(&files, &wanted)).await
+    };
+    let (payloads, skipped) = match read {
+        Ok(read) => read,
+        Err(e) => {
+            for v in verdicts {
+                let (Some(ids), Some(database)) = (wanted.get(&v.chat_id), &v.database) else {
+                    continue;
+                };
+                out.push(ChatImport {
+                    chat_id: v.chat_id,
+                    title: v.title.clone(),
+                    database: database.clone(),
+                    outcome: Outcome::Failed(format!("reading the exports back failed: {e}")),
+                    unread: ids.len(),
+                });
+            }
+            return (out, Vec::new());
+        }
     };
 
     for v in verdicts {
@@ -95,15 +124,27 @@ pub async fn import(
         let root = v.export_files.first().and_then(|f| f.parent());
         let mut ids: Vec<i64> = ids.iter().copied().collect();
         ids.sort_unstable();
-        let outcome = match into_store(database, v.chat_id, &ids, &payloads, root, now).await {
-            Ok(n) => Outcome::Imported { messages: n },
-            Err(e) => Outcome::Failed(e.to_string()),
+        let unread = ids
+            .iter()
+            .filter(|id| !payloads.contains_key(&(v.chat_id, **id)))
+            .count();
+        let outcome = if unread == ids.len() {
+            // Nothing to write, and no `import` run to record for it.
+            Outcome::Failed(format!(
+                "none of the {unread} missing message(s) could be read back out of the exports"
+            ))
+        } else {
+            match into_store(database, v.chat_id, &ids, &payloads, root, now).await {
+                Ok(n) => Outcome::Imported { messages: n },
+                Err(e) => Outcome::Failed(e.to_string()),
+            }
         };
         out.push(ChatImport {
             chat_id: v.chat_id,
             title: v.title.clone(),
             database: database.clone(),
             outcome,
+            unread,
         });
     }
     (out, skipped)
@@ -213,6 +254,61 @@ mod tests {
 
         // Nothing is missing any more, so a second import has nothing to do.
         assert!(run(&dir, &files, false, 200).await.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_message_newer_than_the_database_is_not_marked_deleted() {
+        // The database's newest message is 2. A Desktop export taken after its
+        // last sync holds 3: sent since, not deleted before — importing it
+        // would stamp a live message deleted.
+        let dir = tmp("newer");
+        let path = database(&dir, true).await;
+        let export = dir.join("export");
+        std::fs::create_dir_all(&export).unwrap();
+        std::fs::write(
+            export.join("result.json"),
+            r#"{"name":"Dev","type":"private_group","id":7,"messages":[
+                {"id":1,"type":"message","date":"2024-05-01T00:00:00","text":"gone"},
+                {"id":2,"type":"message","date":"2024-05-02T00:00:00","text":""},
+                {"id":3,"type":"message","date":"2024-05-03T00:00:00","text":"new"}]}"#,
+        )
+        .unwrap();
+        let files = compare::find_results(&[export], 4);
+        let done = run(&dir, &files, false, 100).await;
+        assert_eq!(done[0].outcome, Outcome::Imported { messages: 1 });
+        let store = tgx_archive::Store::open(&path).await.unwrap();
+        assert!(store.get(7, 1).await.unwrap().is_some());
+        assert!(
+            store.get(7, 3).await.unwrap().is_none(),
+            "a message past the last sync was imported as deleted"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_export_that_cannot_be_read_back_is_a_failure_not_zero() {
+        // Compared, then gone before the import read it again. "Imported 0"
+        // would say nothing was missing.
+        let dir = tmp("unread");
+        let path = database(&dir, true).await;
+        let files = export(&dir);
+        let (chats, _) = compare::read_exports(&files);
+        let (verdicts, _) = compare::compare(chats, &dir.join("db")).await.unwrap();
+        std::fs::write(&files[0], "{not json").unwrap();
+        let (done, skipped) = import(&verdicts, &files, false, 100).await;
+        assert!(
+            matches!(&done[0].outcome, Outcome::Failed(why) if why.contains("read back")),
+            "{:?}",
+            done[0].outcome
+        );
+        assert_eq!(done[0].unread, 1);
+        assert_eq!(skipped.len(), 1, "the file that would not parse is named");
+        let store = tgx_archive::Store::open(&path).await.unwrap();
+        assert!(
+            store.recovered(7).await.unwrap().is_empty(),
+            "a run recorded"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

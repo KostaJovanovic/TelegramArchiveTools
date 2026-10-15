@@ -165,18 +165,10 @@ pub fn reactions_of(
     let mut out = Vec::new();
     for entry in &r.results {
         let tl::enums::ReactionCount::Count(entry) = entry;
-        let mut one = Map::new();
-        let (kind, key, value) = match &entry.reaction {
-            tl::enums::Reaction::Emoji(e) => ("emoji", "emoji", json!(e.emoticon)),
-            tl::enums::Reaction::CustomEmoji(e) => (
-                "custom_emoji",
-                "document_id",
-                json!(e.document_id.to_string()),
-            ),
-            // `reactionEmpty` and anything Telegram adds later. Skipped rather
-            // than written as a reaction with no identity.
-            _ => continue,
+        let Some((kind, key, value)) = reaction_identity(&entry.reaction) else {
+            continue;
         };
+        let mut one = Map::new();
         one.insert("type".into(), json!(kind));
         one.insert("count".into(), json!(entry.count));
         one.insert(key.into(), value);
@@ -206,6 +198,28 @@ pub fn reactions_of(
         out.push(Value::Object(one));
     }
     (!out.is_empty()).then(|| Value::Array(out))
+}
+
+/// A reaction's `type`, the key naming it and that key's value — or `None`
+/// for `reactionEmpty`, a paid star reaction and anything Telegram adds later,
+/// which are skipped rather than written as a reaction with no identity.
+///
+/// **One predicate for both arrays that describe the reactions.** The HTML
+/// pairs `reactions` with `_p.reactions_chosen` by index, and the second was
+/// built over every entry while the first skipped some: a paid reaction ahead
+/// of the heart we pressed moved the highlight off it.
+pub(crate) fn reaction_identity(
+    reaction: &tl::enums::Reaction,
+) -> Option<(&'static str, &'static str, Value)> {
+    match reaction {
+        tl::enums::Reaction::Emoji(e) => Some(("emoji", "emoji", json!(e.emoticon))),
+        tl::enums::Reaction::CustomEmoji(e) => Some((
+            "custom_emoji",
+            "document_id",
+            json!(e.document_id.to_string()),
+        )),
+        _ => None,
+    }
 }
 
 fn same_reaction(a: &tl::enums::Reaction, b: &tl::enums::Reaction) -> bool {

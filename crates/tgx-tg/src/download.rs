@@ -160,6 +160,14 @@ pub type Reporter = tokio::sync::mpsc::UnboundedSender<crate::engine::Progress>;
 /// the HTML already links to, which is the thing this whole module argues
 /// against. Every job that never ran is recorded in `missing` and so reaches
 /// `missing_media.txt`: a stated gap, not a dangling reference.
+///
+/// **A repeat runs after the file it repeats.** An `already_saved` job writes
+/// no bytes of its own, but it reads them: its preview can be a copy of the
+/// file. Run beside its owner, it could copy a half-written file, or count a
+/// success for one the owner then failed to fetch. So the owners go first,
+/// the repeats once every owner has finished, and the tail of a batch is the
+/// only concurrency that costs. An owner in an earlier batch has already
+/// finished.
 pub async fn run_all(
     client: &Client,
     root: &Path,
@@ -170,73 +178,123 @@ pub async fn run_all(
     cancel: &Cancel,
 ) -> MediaTally {
     let permits = Arc::new(Semaphore::new(concurrency.max(1)));
-    let mut set = tokio::task::JoinSet::new();
     let queued = jobs.len();
-
-    for pending in jobs {
-        let permits = permits.clone();
-        let client = client.clone();
-        let root = root.to_path_buf();
-        let report = report.clone();
-        let cancel = cancel.clone();
-        set.spawn(async move {
-            let _permit = permits.acquire_owned().await;
-            // Checked *after* the permit, not before: with a concurrency of 5
-            // and 1,781 jobs, 1,776 of them are already spawned and waiting
-            // here when Stop is pressed. Checking on the way in is what makes
-            // the cancel take effect in the time it takes five files to finish
-            // rather than 1,781.
-            if cancel.is_cancelled() {
-                return skipped(&pending.job);
-            }
-            let dest = pending.job.dest.clone();
-            let started = std::time::Instant::now();
-            let one = run_one(&client, &root, pending, refresh, &cancel).await;
-            if let Some(tx) = &report {
-                // The reason, on the line that says FAILED. `RUST_LOG=debug` is
-                // what someone reaches for when files are going missing, and it
-                // was the one view of a failure that named the file and still
-                // would not say what happened to it.
-                let why = one
-                    .missing
-                    .iter()
-                    .find(|m| m.path == dest)
-                    .map(|m| format!(" — {}", m.reason))
-                    .unwrap_or_default();
-                let _ = tx.send(crate::engine::Progress::Detail(format!(
-                    "  {} {dest} ({} in {:.1}s){why}",
-                    if one.failed > 0 { "FAILED" } else { "saved " },
-                    super::engine::human_bytes(one.bytes),
-                    started.elapsed().as_secs_f64()
-                )));
-            }
-            one
-        });
-    }
-
+    let (owners, repeats): (Vec<_>, Vec<_>) = jobs.into_iter().partition(|p| !p.job.already_saved);
     let mut tally = MediaTally::default();
     let mut finished = 0usize;
-    while let Some(joined) = set.join_next().await {
-        match joined {
-            Ok(one) => tally.merge(one),
-            // A panicked task must not take the export with it.
-            Err(_) => tally.failed += 1,
+
+    for phase in [owners, repeats] {
+        let mut set = tokio::task::JoinSet::new();
+        // What each task promised, for the one way a task can end without
+        // handing its tally back. Its bytes, if any, are not needed for that.
+        let mut promises = std::collections::HashMap::new();
+        for pending in phase {
+            let job = DownloadJob {
+                inline_bytes: None,
+                ..pending.job.clone()
+            };
+            let handle = spawn_one(
+                &mut set, &permits, client, root, pending, refresh, &report, cancel,
+            );
+            promises.insert(handle.id(), job);
         }
-        finished += 1;
-        // A heartbeat for the window, which does not see the per-file lines.
-        // Every twenty-fifth, so a big batch shows movement and a small one
-        // says nothing beyond its own summary.
-        if let Some(tx) = &report {
-            if finished.is_multiple_of(25) && finished < queued {
-                let _ = tx.send(crate::engine::Progress::Log(format!(
-                    "  {finished} of {queued} files, {} so far",
-                    super::engine::human_bytes(tally.bytes)
-                )));
+
+        while let Some(joined) = set.join_next().await {
+            match joined {
+                Ok(one) => tally.merge(one),
+                // A panicked task must not take the export with it — nor take
+                // its paths out of `missing_media.txt`. The JSON and the HTML
+                // named all three before the pool started, so a count with no
+                // paths behind it left them dangling with no stated gap, and
+                // the database ingest went looking for a file that was not
+                // there. The panic's own words are not repeated: nothing
+                // vouches for what they carry.
+                Err(e) => {
+                    tally.failed += 1;
+                    if let Some(job) = promises.get(&e.id()) {
+                        let why = if e.is_panic() {
+                            "the download task panicked"
+                        } else {
+                            "the download task was cancelled"
+                        };
+                        tally.missing.extend(promised(job, why));
+                    }
+                }
+            }
+            finished += 1;
+            // A heartbeat for the window, which does not see the per-file
+            // lines. Every twenty-fifth, so a big batch shows movement and a
+            // small one says nothing beyond its own summary.
+            if let Some(tx) = &report {
+                if finished.is_multiple_of(25) && finished < queued {
+                    let _ = tx.send(crate::engine::Progress::Log(format!(
+                        "  {finished} of {queued} files, {} so far",
+                        super::engine::human_bytes(tally.bytes)
+                    )));
+                }
             }
         }
     }
+    // Stable, so of two entries for one path the owner's comes first, and the
+    // owner's reason is the one kept: a repeat whose owner failed names the
+    // same file, and listing it twice would count one gap as two.
     tally.missing.sort_by(|a, b| a.path.cmp(&b.path));
     tally
+        .missing
+        .dedup_by(|later, first| later.path == first.path);
+    tally
+}
+
+/// Start one job on `set`, behind a permit.
+#[allow(clippy::too_many_arguments)]
+fn spawn_one(
+    set: &mut tokio::task::JoinSet<MediaTally>,
+    permits: &Arc<Semaphore>,
+    client: &Client,
+    root: &Path,
+    pending: PendingDownload,
+    refresh: Refresh,
+    report: &Option<Reporter>,
+    cancel: &Cancel,
+) -> tokio::task::AbortHandle {
+    let permits = permits.clone();
+    let client = client.clone();
+    let root = root.to_path_buf();
+    let report = report.clone();
+    let cancel = cancel.clone();
+    set.spawn(async move {
+        let _permit = permits.acquire_owned().await;
+        // Checked *after* the permit, not before: with a concurrency of 5
+        // and 1,781 jobs, 1,776 of them are already spawned and waiting
+        // here when Stop is pressed. Checking on the way in is what makes
+        // the cancel take effect in the time it takes five files to finish
+        // rather than 1,781.
+        if cancel.is_cancelled() {
+            return skipped(&pending.job);
+        }
+        let dest = pending.job.dest.clone();
+        let started = std::time::Instant::now();
+        let one = run_one(&client, &root, pending, refresh, &cancel).await;
+        if let Some(tx) = &report {
+            // The reason, on the line that says FAILED. `RUST_LOG=debug` is
+            // what someone reaches for when files are going missing, and it
+            // was the one view of a failure that named the file and still
+            // would not say what happened to it.
+            let why = one
+                .missing
+                .iter()
+                .find(|m| m.path == dest)
+                .map(|m| format!(" — {}", m.reason))
+                .unwrap_or_default();
+            let _ = tx.send(crate::engine::Progress::Detail(format!(
+                "  {} {dest} ({} in {:.1}s){why}",
+                if one.failed > 0 { "FAILED" } else { "saved " },
+                super::engine::human_bytes(one.bytes),
+                started.elapsed().as_secs_f64()
+            )));
+        }
+        one
+    })
 }
 
 /// Every path this job's message already promised in the JSON and the HTML.
@@ -280,13 +338,27 @@ fn skipped(job: &DownloadJob) -> MediaTally {
 /// Said of a file the pool never got to, and of one a Stop interrupted.
 const STOPPED: &str = "stopped before this file was fetched";
 
-async fn run_one(
-    client: &Client,
-    root: &Path,
-    pending: PendingDownload,
-    refresh: Refresh,
-    cancel: &Cancel,
-) -> MediaTally {
+/// What [`run_one`] decides before it needs a client.
+enum Prepared {
+    /// Nothing left to ask Telegram for: written, or failed, and tallied.
+    Settled(MediaTally),
+    /// Still to fetch: the file, or for a repeat only its thumbnail and
+    /// preview.
+    Fetch {
+        job: DownloadJob,
+        media: Box<Media>,
+        dest: PathBuf,
+    },
+}
+
+/// Every branch of a job that makes no request: the folder, an inline write,
+/// a message with nothing to fetch, and a repeat whose file is not there.
+///
+/// **Split out so the pool's own code runs under test.** The test of the
+/// inline path did its own `fs::write` and asserted on that, because
+/// `run_one` needs a `Client`; a wrong destination or a swallowed write error
+/// in the real branch would have passed it.
+fn prepare(root: &Path, pending: PendingDownload) -> Prepared {
     let mut tally = MediaTally::default();
     let dest = root.join(&pending.job.dest);
 
@@ -297,7 +369,7 @@ async fn run_one(
                 &pending.job,
                 &format!("could not create {parent:?}: {e}"),
             ));
-            return tally;
+            return Prepared::Settled(tally);
         }
     }
 
@@ -316,17 +388,52 @@ async fn run_one(
                 ));
             }
         }
-        return tally;
+        return Prepared::Settled(tally);
     }
 
-    let Some(mut media) = pending.media else {
+    let Some(media) = pending.media else {
         tally.failed += 1;
         tally.missing.extend(promised(
             &pending.job,
             "the message carries no downloadable media",
         ));
-        return tally;
+        return Prepared::Settled(tally);
     };
+
+    // A repeat counts as downloaded only if the file it repeats is there.
+    // `run_all` runs it after its owner, so an absent or empty file is one the
+    // owner failed to fetch, and the thumbnail and preview this job still
+    // owes — the preview may be a copy of that file — go down with it.
+    if pending.job.already_saved
+        && !std::fs::metadata(&dest).is_ok_and(|m| m.is_file() && m.len() > 0)
+    {
+        tally.failed += 1;
+        tally.missing.extend(promised(
+            &pending.job,
+            "an earlier message carried this file, and it was not saved",
+        ));
+        return Prepared::Settled(tally);
+    }
+
+    Prepared::Fetch {
+        job: pending.job,
+        media: Box::new(media),
+        dest,
+    }
+}
+
+async fn run_one(
+    client: &Client,
+    root: &Path,
+    pending: PendingDownload,
+    refresh: Refresh,
+    cancel: &Cancel,
+) -> MediaTally {
+    let (job, mut media, dest) = match prepare(root, pending) {
+        Prepared::Settled(tally) => return tally,
+        Prepared::Fetch { job, media, dest } => (job, *media, dest),
+    };
+    let mut tally = MediaTally::default();
 
     // **Two passes at most.** The first asks with the file reference captured
     // during the read; if that has aged out, the second asks with one re-read
@@ -339,17 +446,17 @@ async fn run_one(
     // that chat's media was refused as expired, against 6 files in the
     // 162,132-message chat exported next to it.
     // An earlier message carried this same file id and it is already on disk
-    // under this name. Its thumbnail and preview took fresh names and are still
-    // owed, so the job continues — only the bytes are skipped. Reported as
-    // downloaded because the export does hold the file; the size is not counted
-    // twice, which is the point of not fetching it.
-    let mut outcome = if pending.job.already_saved {
+    // under this name — `prepare` looked. Its thumbnail and preview took fresh
+    // names and are still owed, so the job continues — only the bytes are
+    // skipped. Reported as downloaded because the export does hold the file;
+    // the size is not counted twice, which is the point of not fetching it.
+    let mut outcome = if job.already_saved {
         Ok(0)
     } else {
         fetch_with_retry(client, &media, &dest, cancel).await
     };
     if outcome.as_ref().err().is_some_and(|f| f.stale) {
-        match refreshed_media(client, refresh, &pending.job).await {
+        match refreshed_media(client, refresh, &job).await {
             Ok(fresh) => {
                 media = fresh;
                 outcome = fetch_with_retry(client, &media, &dest, cancel).await;
@@ -368,26 +475,8 @@ async fn run_one(
         Ok(written) => {
             tally.downloaded += 1;
             tally.bytes += written;
-            fetch_thumb(
-                client,
-                root,
-                &media,
-                &pending.job,
-                refresh,
-                &mut tally,
-                cancel,
-            )
-            .await;
-            fetch_preview(
-                client,
-                root,
-                &media,
-                &pending.job,
-                &dest,
-                &mut tally,
-                cancel,
-            )
-            .await;
+            fetch_thumb(client, root, &media, &job, refresh, &mut tally, cancel).await;
+            fetch_preview(client, root, &media, &job, &dest, &mut tally, cancel).await;
         }
         Err(f) => {
             tally.failed += 1;
@@ -396,7 +485,7 @@ async fn run_one(
             // and the HTML have already named all three. Reporting one of three
             // made `missing_media.txt` an incomplete account of the same run's
             // gaps.
-            tally.missing.extend(promised(&pending.job, &f.reason));
+            tally.missing.extend(promised(&job, &f.reason));
         }
     }
     tally
@@ -423,35 +512,121 @@ mod tests {
         d
     }
 
-    #[tokio::test]
-    async fn an_inline_write_needs_no_request() {
+    fn settled(p: Prepared) -> MediaTally {
+        match p {
+            Prepared::Settled(t) => t,
+            Prepared::Fetch { job, .. } => panic!("{} still wants a request", job.dest),
+        }
+    }
+
+    #[test]
+    fn an_inline_write_needs_no_request() {
         // A stripped thumbnail arrives inside the message; the pool exists
-        // only to keep the disk write off the read loop.
+        // only to keep the disk write off the read loop. Through `prepare`,
+        // the pool's own branch, into a folder that does not exist yet.
         let root = tmp("inline");
         let pending = PendingDownload {
             job: DownloadJob {
-                file_id: 0,
-                kind: "files",
-                mime_type: String::new(),
-                role: "file",
-                already_saved: false,
                 dest: "thumbnails/a.jpg".into(),
-                thumb_dest: None,
-                preview_dest: None,
                 size: 3,
                 inline_bytes: Some(vec![1, 2, 3]),
-                message_id: 1,
+                ..photo_job(3)
             },
             media: None,
         };
-        // Exercised without a client: the inline path returns before using it.
-        let mut tally = MediaTally::default();
-        let dest = root.join("thumbnails/a.jpg");
-        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
-        std::fs::write(&dest, pending.job.inline_bytes.as_ref().unwrap()).unwrap();
-        tally.downloaded += 1;
-        assert_eq!(std::fs::read(&dest).unwrap(), vec![1, 2, 3]);
-        assert_eq!(tally.downloaded, 1);
+        let t = settled(prepare(&root, pending));
+        assert_eq!((t.downloaded, t.failed, t.bytes), (1, 0, 3));
+        assert!(t.missing.is_empty());
+        assert_eq!(
+            std::fs::read(root.join("thumbnails/a.jpg")).unwrap(),
+            vec![1, 2, 3]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_made_states_every_path() {
+        let root = tmp("nofolder");
+        // A file where the folder has to go.
+        std::fs::write(root.join("video_files"), b"x").unwrap();
+        let t = settled(prepare(
+            &root,
+            PendingDownload {
+                job: job_with_all_three(),
+                media: None,
+            },
+        ));
+        assert_eq!((t.downloaded, t.failed), (0, 1));
+        assert_eq!(t.missing.len(), 3);
+        assert!(
+            t.missing[0].reason.contains("could not create"),
+            "{:?}",
+            t.missing[0]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_message_with_nothing_to_fetch_states_every_path() {
+        let root = tmp("nomedia");
+        let t = settled(prepare(
+            &root,
+            PendingDownload {
+                job: job_with_all_three(),
+                media: None,
+            },
+        ));
+        assert_eq!((t.downloaded, t.failed), (0, 1));
+        assert_eq!(t.missing.len(), 3);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_repeat_of_a_file_that_was_not_saved_is_not_a_success() {
+        // It used to count `downloaded` on the plan's word alone, and copy
+        // whatever lay at the path into its preview — a half-written file
+        // beside a running owner, nothing at all beside a failed one.
+        let root = tmp("repeat");
+        let job = DownloadJob {
+            already_saved: true,
+            preview_dest: Some("photos/photo_1@01-01-2026_00-00-00 (1)_thumb.jpg".into()),
+            ..photo_job(9_000)
+        };
+        let media = || plan::downloadable(&photo_media(9_000), true);
+        assert!(media().is_some());
+
+        for absent in [None, Some(&b""[..])] {
+            if let Some(bytes) = absent {
+                std::fs::create_dir_all(root.join("photos")).unwrap();
+                std::fs::write(root.join(&job.dest), bytes).unwrap();
+            }
+            let t = settled(prepare(
+                &root,
+                PendingDownload {
+                    job: job.clone(),
+                    media: media(),
+                },
+            ));
+            assert_eq!((t.downloaded, t.failed), (0, 1));
+            let paths: Vec<&str> = t.missing.iter().map(|m| m.path.as_str()).collect();
+            assert_eq!(
+                paths,
+                vec![job.dest.as_str(), job.preview_dest.as_deref().unwrap()]
+            );
+        }
+
+        // Once the owner has written it, the repeat goes on to its preview.
+        std::fs::write(root.join(&job.dest), b"jpeg").unwrap();
+        assert!(matches!(
+            prepare(
+                &root,
+                PendingDownload {
+                    job: job.clone(),
+                    media: media(),
+                },
+            ),
+            Prepared::Fetch { .. }
+        ));
         let _ = std::fs::remove_dir_all(&root);
     }
 
