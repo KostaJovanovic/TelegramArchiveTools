@@ -299,7 +299,8 @@ fn the_golden_exercises_the_cases_it_was_built_for() {
         ("orphan replies", "11 replies point at a message"),
         (
             "an export with no roster dates",
-            "carries no member list, so arrivals cannot be dated",
+            // The fixture has a member list; it just dates nobody.
+            "The member list carries no join dates, so arrivals cannot be dated",
         ),
         ("skipped media", "of those attachments were over the"),
         ("a quantile caption", "Five shades, one per fifth"),

@@ -59,13 +59,13 @@ pub fn topics(stats: &Stats) -> String {
             short(&topic.top, 22)
         );
     }
-    let headers = "<tr><th>Topic</th><th>Activity</th><th class=\"n\">Messages</th>\
-                   <th class=\"n\">Voices</th><th class=\"n\">Active days</th>\
+    let headers = "<tr><th>Topic</th><th class=\"presence\">Activity</th>\
+                   <th class=\"n\">Messages</th><th class=\"n\">Voices</th><th class=\"n\">Active days</th>\
                    <th class=\"n\">Busiest day</th><th class=\"n\">Words/msg</th>\
                    <th class=\"n\">Media</th><th class=\"n\">Replies</th>\
                    <th class=\"n\">Reactions</th><th>Loudest</th></tr>";
     format!(
-        "{}<table><thead>{headers}</thead><tbody>{body}</tbody></table>\
+        "{}<div class=\"tablewrap\"><table class=\"wide\"><thead>{headers}</thead><tbody>{body}</tbody></table></div>\
          <p class=\"caption\">Same time axis as every other row on this page, \
          and one shading scale across the four. {}</p>{}</section>",
         head("Topics", &rows.len().to_string(), "topics"),
@@ -86,7 +86,10 @@ fn clocks(rows: &[tga_stats::Topic]) -> String {
     if rows.iter().all(|t| t.per_hour.iter().all(|n| *n == 0)) {
         return String::new();
     }
-    let labels: Vec<String> = rows.iter().map(|t| short(&t.name, 22)).collect();
+    // Whole names: `heatrows` clips what it draws and keeps the whole name for
+    // the tooltip. `short` is markup for a table cell, and inside an SVG label
+    // it was escaped a second time and printed as text.
+    let labels: Vec<String> = rows.iter().map(|t| t.name.clone()).collect();
     let hours: Vec<String> = (0..24).map(|h| format!("{h:02}")).collect();
     let cells: Vec<Vec<i64>> = rows.iter().map(|t| t.per_hour.to_vec()).collect();
     let grid = charts::heatrows(&labels, &hours, &cells, WIDTH, 24.0, 190.0);

@@ -162,7 +162,10 @@ fn table(headers: &[(&str, bool)], rows: &[Vec<String>]) -> String {
             format!("<tr>{cells}</tr>")
         })
         .collect();
-    format!("<table class=\"\"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>")
+    format!(
+        "<div class=\"tablewrap\"><table class=\"\"><thead><tr>{head}</tr></thead>\
+         <tbody>{body}</tbody></table></div>"
+    )
 }
 
 /// Every chart's honest twin: the numbers, as text, one click away.

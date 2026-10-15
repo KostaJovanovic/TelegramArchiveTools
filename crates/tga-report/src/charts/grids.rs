@@ -116,7 +116,7 @@ pub fn heatrows(
             "<text class=\"rowlabel\" x=\"{}\" y=\"{}\" text-anchor=\"end\">{}</text>",
             num(gutter - 10.0),
             num(y + size / 2.0 + 4.0),
-            esc(&row_labels[r])
+            esc(&clip_default(&row_labels[r], gutter - 12.0))
         );
         for (c, value) in row.iter().enumerate() {
             let x = gutter + c as f64 * (size + BAR_GAP);

@@ -60,9 +60,15 @@ pub fn churn(stats: &Stats) -> String {
         )
     } else {
         let announced: i64 = churn.announced_joins.iter().sum();
+        // A member list can exist and still date nobody, and saying "no member
+        // list" then contradicts the Members section above it.
+        let why = if churn.roster_size != 0 {
+            "The member list carries no join dates"
+        } else {
+            "This export carries no member list"
+        };
         format!(
-            "<p class=\"caption\">This export carries no member list, so arrivals \
-             cannot be dated{}</p>",
+            "<p class=\"caption\">{why}, so arrivals cannot be dated{}</p>",
             if leaves != 0 || announced != 0 {
                 format!(
                     ". The history does announce {} joins and {} removals, which is \

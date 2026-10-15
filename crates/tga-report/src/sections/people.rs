@@ -49,7 +49,7 @@ pub fn people(stats: &Stats) -> String {
              <td class=\"name\">{}{role}{alias}</td>\
              <td class=\"presence\">{mini}</td>\
              <td class=\"n\">{}</td><td class=\"n\">{}</td><td class=\"n\">{}</td>\
-             <td class=\"n\">{}</td><td class=\"n\">{}</td><td class=\"n\">{}</td></tr>",
+             <td class=\"n\">{}</td><td class=\"n date\">{}</td><td class=\"n date\">{}</td></tr>",
             index + 1,
             esc(&row.name),
             thousands(row.messages),
@@ -61,11 +61,13 @@ pub fn people(stats: &Stats) -> String {
         );
     }
 
-    let headers = "<tr><th></th><th>Name</th><th>Presence</th>\
+    let headers = "<tr><th></th><th>Name</th><th class=\"presence\">Presence</th>\
                    <th class=\"n\">Messages</th><th class=\"n\">Share</th>\
                    <th class=\"n\">Words/msg</th><th class=\"n\">Reactions</th>\
                    <th class=\"n\">First seen</th><th class=\"n\">Last seen</th></tr>";
-    let listing = format!("<table><thead>{headers}</thead><tbody>{body}</tbody></table>");
+    let listing = format!(
+        "<div class=\"tablewrap\"><table><thead>{headers}</thead><tbody>{body}</tbody></table></div>"
+    );
 
     let hidden = rows.len().saturating_sub(PEOPLE_SHOWN);
     let more = if hidden == 0 {

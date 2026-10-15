@@ -83,10 +83,24 @@ pub fn between(stats: &Stats) -> String {
             WIDTH / 2.0 - 28.0,
             190.0,
             3,
-            " median",
+            " s median wait",
             None,
         )
     };
+    // The bars carry seconds and the one direct label is a bare number, so the
+    // caption names the unit and the longest wait in words.
+    let slowest = shown
+        .iter()
+        .enumerate()
+        .max_by_key(|(hour, v)| (**v, std::cmp::Reverse(*hour)))
+        .filter(|(_, v)| **v > 0)
+        .map(|(hour, v)| {
+            format!(
+                " The longest median wait is {}, for messages posted at {hour:02}:00.",
+                duration(*v as f64)
+            )
+        })
+        .unwrap_or_default();
     let answer_rows: Vec<Vec<String>> = medians
         .iter()
         .zip(counts.iter())
@@ -269,8 +283,9 @@ pub fn between(stats: &Stats) -> String {
     let _ = write!(
         out,
         "<div class=\"cols2\"><div><h3>How long until an answer</h3>{}\
-         <p class=\"caption\">By the hour the message being answered was posted, \
-         not the hour the answer arrived. An hour with fewer than {} replies is \
+         <p class=\"caption\">Median wait for an answer, in seconds, by the hour \
+         the message being answered was posted, not the hour the answer arrived.{} \
+         An hour with fewer than {} replies is \
          left blank rather than drawn from too little. {} replies counted, none \
          further apart than {}.</p></div>\
          <div><h3>How far a thread runs</h3>{}\
@@ -284,6 +299,7 @@ pub fn between(stats: &Stats) -> String {
         } else {
             answer_chart
         },
+        slowest,
         thousands(floor),
         thousands(counted),
         duration(answer.cap as f64),

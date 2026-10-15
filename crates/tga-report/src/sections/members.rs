@@ -58,6 +58,10 @@ pub fn members(stats: &Stats) -> String {
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
 
+    // A member list without join dates gets no Joined column. A column empty in
+    // every row reads as a rendering fault, not as "Telegram did not say".
+    let any_joined = listed.iter().any(|r| r.joined.is_some());
+
     let mut body = String::new();
     for (index, row) in listed.iter().enumerate() {
         let handle = if row.username.is_empty() {
@@ -99,21 +103,34 @@ pub fn members(stats: &Stats) -> String {
         } else {
             ""
         };
+        let joined = if any_joined {
+            format!(
+                "<td class=\"n date\">{}</td>",
+                row.joined
+                    .as_deref()
+                    .map(|when| esc(&pretty_date(when)))
+                    .unwrap_or_default()
+            )
+        } else {
+            String::new()
+        };
         let _ = write!(
             body,
             "<tr{cls}><td class=\"name\">{}{flags}</td><td>{handle}</td>\
-             <td class=\"n\">{said}</td><td class=\"n\">{seen}</td>\
-             <td class=\"n\">{}</td></tr>",
+             <td class=\"n\">{said}</td><td class=\"n date\">{seen}</td>{joined}</tr>",
             esc(&row.name),
-            match &row.joined {
-                Some(when) => esc(&pretty_date(when)),
-                None => String::new(),
-            }
         );
     }
 
-    let headers = "<tr><th>Name</th><th>Handle</th><th class=\"n\">Messages</th>\
-                   <th class=\"n\">Seen</th><th class=\"n\">Joined</th></tr>";
+    let headers = format!(
+        "<tr><th>Name</th><th>Handle</th><th class=\"n\">Messages</th>\
+         <th class=\"n\">Seen</th>{}</tr>",
+        if any_joined {
+            "<th class=\"n\">Joined</th>"
+        } else {
+            ""
+        }
+    );
 
     let bots = listed.iter().filter(|r| r.bot).count();
     let quiet = folk.known_members.saturating_sub(folk.members_who_spoke);
@@ -147,8 +164,8 @@ pub fn members(stats: &Stats) -> String {
     };
 
     format!(
-        "{}<p class=\"lede\">{}</p>{}{}<table><thead>{headers}</thead>\
-         <tbody>{body}</tbody></table>{more}{}</section>",
+        "{}<p class=\"lede\">{}</p>{}{}<div class=\"tablewrap\"><table><thead>{headers}</thead>\
+         <tbody>{body}</tbody></table></div>{more}{}</section>",
         head(
             "Members",
             &format!("{} listed", thousands(folk.known_members as i64)),

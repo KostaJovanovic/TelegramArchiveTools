@@ -19,7 +19,9 @@ pub fn said(stats: &Stats) -> String {
                 (
                     k.label.clone(),
                     k.sent as f64,
-                    format!("{}  {}", thousands(k.sent), human_bytes(k.bytes)),
+                    // A middle dot, not two spaces: SVG collapses the spaces,
+                    // and "7 510 5.6 GB" reads as one number.
+                    format!("{} \u{b7} {}", thousands(k.sent), human_bytes(k.bytes)),
                 )
             })
             .collect();
