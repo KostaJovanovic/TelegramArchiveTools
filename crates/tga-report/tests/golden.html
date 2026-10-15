@@ -364,10 +364,14 @@ html.hide-k0 .ev.k0,html.hide-k0 .events li.k0{display:none}html.hide-k1 .ev.k1,
      cell, which is most of the size budget. Every bucket is the same width, so
      the pointer's x IS the bucket index; the label comes from the one shared
      axis list. This also answers over the silent days, where the old per-cell
-     tooltip had no element to hover at all. */
+     tooltip had no element to hover at all.
+     The label is written into the row's own data-tip rather than into the tip:
+     this listener runs in the capture phase, and the frozen one above runs
+     after it, finds no [data-tip], and hides whatever was shown -- which is
+     how these rows went without a tooltip at all. Given one, the frozen
+     listener shows it at the pointer. */
   var axisEl=document.getElementById('axis');
   var DAYS=axisEl?(axisEl.getAttribute('data-days')||'').split('|'):[];
-  var tip=document.getElementById('tip');
   function counts(svg){
     if(svg._n)return svg._n;
     var out={},raw=svg.getAttribute('data-n')||'';
@@ -387,9 +391,7 @@ html.hide-k0 .ev.k0,html.hide-k0 .events li.k0{display:none}html.hide-k1 .ev.k1,
     if(i<0)i=0; if(i>=total)i=total-1;
     var n=counts(svg)[i]||'0';
     var label=DAYS[i]||'';
-    tip.textContent=label?label+' · '+n:n;
-    tip.classList.add('on');
-    tip.style.left=e.clientX+'px';tip.style.top=e.clientY+'px';
+    svg.setAttribute('data-tip',label?label+' · '+n:n);
   },true);
 
   /* -- kind filters ------------------------------------------------------ */

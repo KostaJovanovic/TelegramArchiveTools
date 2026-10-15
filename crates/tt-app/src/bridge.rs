@@ -241,6 +241,12 @@ pub enum Event {
         done: usize,
         total: i64,
     },
+    /// The chat's read is over and this is what it is doing instead: its
+    /// files, the database copy of them, the last commit.
+    Stage {
+        chat_id: i64,
+        stage: tgx_tg::engine::Stage,
+    },
     /// A finished chat. `messages` is what was written.
     ChatDone {
         chat_id: i64,

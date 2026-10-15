@@ -54,6 +54,14 @@ pub const MAX_STALLED_WAITS: u32 = 10;
 /// kept.
 pub const UNAVAILABLE_PAUSE: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How many bytes of files the database ingest stores between commits.
+///
+/// Each commit lets SQLite fold the log back into the file, so this is also
+/// the most the last commit of a chat has left to copy: four seconds of the
+/// 16 MB/s a USB exFAT drive managed on 2026-10-15, where one commit of a
+/// whole 3.1 GB ingest took six minutes.
+const INGEST_COMMIT_BYTES: i64 = 64 * 1024 * 1024;
+
 /// What one chat's export produced.
 ///
 /// **Per-chat tallies live here, never on the exporter.** One exporter serves
@@ -202,6 +210,11 @@ pub enum Progress {
         title: String,
         messages: usize,
     },
+    /// Where a chat has got to **after its read**. The media pass and the
+    /// database's writes count no messages, so without this a 66,212-message
+    /// chat captioned its half-hour of downloads, and the six minutes of its
+    /// last commit, as "66,200 of 66,212 messages · under a minute left".
+    Stage(Stage),
     Log(String),
     /// One line of per-item detail: a message routed, a file fetched.
     ///
@@ -214,6 +227,26 @@ pub enum Progress {
     /// Only emitted when [`detail_wanted`] is true, so the formatting cost is
     /// not paid on an ordinary run.
     Detail(String),
+}
+
+/// The steps of a chat once its messages are read. See [`Progress::Stage`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// Downloading. Counted over **the whole chat**, every topic's batch
+    /// together, so the figure does not restart at each topic. `expected` is
+    /// the sum of Telegram's own sizes, and what arrives can end either side
+    /// of it — a thumbnail is not in it.
+    Files {
+        done: usize,
+        total: usize,
+        bytes: i64,
+        expected: i64,
+    },
+    /// Copying one batch's downloaded files into the database.
+    Storing { done: usize, total: usize },
+    /// The chat's last commit. Nothing in it can be counted: how long it takes
+    /// is the disk's business.
+    Committing,
 }
 
 /// Is anyone listening for per-item detail?
@@ -1739,6 +1772,14 @@ impl<'a> ChatExporter<'a> {
             ids.sort();
             ids
         };
+        // The chat's totals, for `Stage::Files`: the pool counts one batch, and
+        // a forum's files arrive in one batch per topic.
+        let files_total: usize = sinks.values().map(|s| s.jobs.len()).sum();
+        let bytes_total: i64 = sinks
+            .values()
+            .flat_map(|s| s.jobs.iter().map(|j| j.job.size))
+            .sum();
+        let (mut files_before, mut bytes_before) = (0usize, 0i64);
         for id in media_order {
             // The folder's name and root are lifted out of the map so the
             // borrow ends here.
@@ -1808,15 +1849,36 @@ impl<'a> ChatExporter<'a> {
                 cancel,
             );
             tokio::pin!(pool);
+            // The pool's counts are this batch's; the chat's are these plus
+            // the batches before it.
+            let rebase = |p: Progress| match p {
+                Progress::Stage(Stage::Files { done, bytes, .. }) => {
+                    Progress::Stage(Stage::Files {
+                        done: files_before + done,
+                        total: files_total,
+                        bytes: bytes_before + bytes,
+                        expected: bytes_total,
+                    })
+                }
+                p => p,
+            };
+            progress(Progress::Stage(Stage::Files {
+                done: files_before,
+                total: files_total,
+                bytes: bytes_before,
+                expected: bytes_total,
+            }));
             let tally = loop {
                 tokio::select! {
                     t = &mut pool => break t,
-                    Some(p) = rx.recv() => progress(p),
+                    Some(p) = rx.recv() => progress(rebase(p)),
                 }
             };
             while let Ok(p) = rx.try_recv() {
-                progress(p);
+                progress(rebase(p));
             }
+            files_before += queued;
+            bytes_before += tally.bytes;
             let secs = batch_started.elapsed().as_secs_f64();
             // **Both numbers count paths.** This said `tally.failed`, which
             // counts *jobs*, directly above a list of the paths that were lost
@@ -1886,14 +1948,20 @@ impl<'a> ChatExporter<'a> {
                 // Once per batch, not once per job per missing file.
                 let missing: HashSet<&str> =
                     tally.missing.iter().map(|m| m.path.as_str()).collect();
-                for item in &ingest {
-                    // Nothing to store, or nothing that arrived. A job the pool
-                    // could not fetch is in `missing`, and reading its `dest`
-                    // would either fail or — worse — pick up a stale file from
-                    // an earlier export into the same folder.
-                    if item.file_id == 0 || item.inline || missing.contains(item.dest.as_str()) {
-                        continue;
-                    }
+                // Nothing to store, or nothing that arrived. A job the pool
+                // could not fetch is in `missing`, and reading its `dest`
+                // would either fail or — worse — pick up a stale file from an
+                // earlier export into the same folder.
+                let storable: Vec<&Ingest> = ingest
+                    .iter()
+                    .filter(|i| i.file_id != 0 && !i.inline && !missing.contains(i.dest.as_str()))
+                    .collect();
+                let mut uncommitted = 0i64;
+                for (n, item) in storable.iter().enumerate() {
+                    progress(Progress::Stage(Stage::Storing {
+                        done: n,
+                        total: storable.len(),
+                    }));
                     // Already archived, by an earlier run or an earlier message
                     // in this one: `already_saved` jobs share their bytes with a
                     // file the folder wrote once, and re-reading them off disk
@@ -1936,7 +2004,10 @@ impl<'a> ChatExporter<'a> {
                             }
                         };
                         match stored {
-                            Ok(()) => result.db_blobs += 1,
+                            Ok(()) => {
+                                result.db_blobs += 1;
+                                uncommitted += size.as_ref().map_or(0, |s| *s);
+                            }
                             // Not fatal: the folder still has it, and the
                             // `media` row below still records that the message
                             // had an attachment. An export must not fail on one
@@ -1971,7 +2042,23 @@ impl<'a> ChatExporter<'a> {
                             &item.dest,
                         )
                         .await?;
+                    // **Committed as it goes, not once at the end.** The whole
+                    // ingest used to ride the transaction the read left open,
+                    // so a 3.1 GB chat reached `close_all` with all of it
+                    // uncommitted: the commit and the checkpoint behind it
+                    // copied 3.2 GB through the log at 16 MB/s on an exFAT
+                    // drive, six minutes with nothing on screen. Committed in
+                    // slices, the copy happens here, under this loop's count.
+                    if uncommitted >= INGEST_COMMIT_BYTES {
+                        store.commit_batch().await?;
+                        store.begin_batch().await?;
+                        uncommitted = 0;
+                    }
                 }
+                progress(Progress::Stage(Stage::Storing {
+                    done: storable.len(),
+                    total: storable.len(),
+                }));
             }
         }
 

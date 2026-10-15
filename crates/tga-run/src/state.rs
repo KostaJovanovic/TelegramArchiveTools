@@ -199,8 +199,11 @@ pub struct State {
 
     pub status: String,
     pub running: bool,
-    /// Pressed Stop; the row in hand is finishing.
+    /// Pressed Stop; the rows in hand are finishing.
     pub stopping: bool,
+    /// The rows being read now and what each last said, in the order taken.
+    /// A run reads several at once (`job::MAX_WORKERS`).
+    in_hand: Vec<(PathBuf, String)>,
     /// Exports finished in this run, of [`State::of`].
     pub done: usize,
     pub of: usize,
@@ -232,6 +235,7 @@ impl Default for State {
             status: "Choose an export folder.".into(),
             running: false,
             stopping: false,
+            in_hand: Vec::new(),
             done: 0,
             of: 0,
             generation: 0,
@@ -537,9 +541,12 @@ impl State {
 
     pub fn apply(&mut self, event: Progress) {
         match event {
-            Progress::Step { done, label } => {
-                self.done = done;
-                self.status = label;
+            Progress::Step { path, label } => {
+                match self.in_hand.iter_mut().find(|(p, _)| *p == path) {
+                    Some((_, said)) => *said = label,
+                    None => self.in_hand.push((path, label)),
+                }
+                self.say_in_hand();
             }
             Progress::Started(path) => {
                 if let Some(e) = self.entry_mut(&path) {
@@ -547,6 +554,7 @@ impl State {
                 }
             }
             Progress::Wrote { path, written } => {
+                self.put_down(&path);
                 self.written += 1;
                 self.done += 1;
                 if let Some(e) = self.entry_mut(&path) {
@@ -560,6 +568,7 @@ impl State {
                 self.selected.remove(&path);
             }
             Progress::Failed { path, error } => {
+                self.put_down(&path);
                 self.done += 1;
                 let name = self
                     .entry_mut(&path)
@@ -573,6 +582,7 @@ impl State {
             Progress::Finished { stopped } => {
                 self.running = false;
                 self.stopping = false;
+                self.in_hand.clear();
                 for e in &mut self.entries {
                     if e.outcome == Outcome::Queued {
                         e.outcome = Outcome::Idle;
@@ -588,6 +598,29 @@ impl State {
                 self.status = finished_status(self.written, &self.failed, stopped);
             }
         }
+    }
+
+    /// A row is finished with: its line leaves the status.
+    fn put_down(&mut self, path: &Path) {
+        self.in_hand.retain(|(p, _)| p != path);
+        if !self.in_hand.is_empty() {
+            self.say_in_hand();
+        }
+    }
+
+    /// The status line during a run: every row in hand, in the order they
+    /// were taken. One row reads exactly as it did when there was one thread.
+    /// Not while stopping — that line is the one that matters then.
+    fn say_in_hand(&mut self) {
+        if self.stopping {
+            return;
+        }
+        self.status = self
+            .in_hand
+            .iter()
+            .map(|(_, label)| label.as_str())
+            .collect::<Vec<_>>()
+            .join("  ·  ");
     }
 
     /// The rows a finished run's rescan found and nothing has counted yet,
@@ -812,6 +845,27 @@ mod tests {
         assert_eq!(state.fill(), Some(0.5));
         assert!(!state.selected.contains(&path), "done is unticked");
         assert_eq!(state.entries[2].messages, Some(12), "counted by the run");
+    }
+
+    #[test]
+    fn rows_read_at_once_share_the_status_and_leave_it_as_they_finish() {
+        let mut state = library();
+        state.select(Pick::Behind);
+        let run = state.start().expect("a run");
+        let (a, b) = (run[0].path().to_path_buf(), run[1].path().to_path_buf());
+        for (path, label) in [(&a, "1/2  A"), (&b, "2/2  B"), (&a, "1/2  A: reading x")] {
+            state.apply(Progress::Step {
+                path: path.clone(),
+                label: label.into(),
+            });
+        }
+        assert_eq!(state.status, "1/2  A: reading x  ·  2/2  B");
+        state.apply(Progress::Failed {
+            path: a,
+            error: "no messages in it".into(),
+        });
+        assert_eq!(state.status, "2/2  B");
+        assert_eq!(state.done, 1, "a step never moves the count");
     }
 
     #[test]

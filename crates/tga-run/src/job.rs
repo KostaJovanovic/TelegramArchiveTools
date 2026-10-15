@@ -19,12 +19,13 @@
 //! now so this crate has no toolkit in it, and the window passes
 //! `move || ctx.request_repaint()`.
 //!
-//! **A run is a queue of library rows**, one export after another. One that
-//! fails is reported against its own row and the rest carry on: forty chats
-//! should not hang on the one whose file is mid-sync.
+//! **A run is a queue of library rows**, taken by up to [`MAX_WORKERS`]
+//! threads at once. One that fails is reported against its own row and the
+//! rest carry on: forty chats should not hang on the one whose file is
+//! mid-sync.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
@@ -33,9 +34,11 @@ use crate::refresh::{Source, Target, Written};
 /// What the worker tells the window.
 #[derive(Debug, Clone)]
 pub enum Progress {
-    /// `done` exports finished, and what is happening now.
+    /// What is happening now to this row. Several rows are in hand at once,
+    /// so a step names its own; how many are finished is counted from
+    /// `Wrote` and `Failed`, which a step from another row cannot rewind.
     Step {
-        done: usize,
+        path: PathBuf,
         label: String,
     },
     /// This row is the one being read.
@@ -49,7 +52,7 @@ pub enum Progress {
         path: PathBuf,
         error: String,
     },
-    /// The queue is empty, or Stop was pressed and the row in hand finished.
+    /// The queue is empty, or Stop was pressed and the rows in hand finished.
     Finished {
         stopped: bool,
     },
@@ -127,6 +130,61 @@ impl<T> Waking<T> {
     }
 }
 
+/// The most reports written at once.
+///
+/// **A report is one core's work and most of a second of memory per 60,000
+/// messages.** Measured on the release build over the largest database on the
+/// `tga-db` corpus (9.4 GB, ~450k messages): 8.5 s wall, 8.3 s CPU, 704 MB at
+/// the peak — single-threaded and CPU-bound, so a queue run one at a time
+/// leaves the rest of the machine idle. Four of the largest at once is under
+/// 3 GB; more would start to compete with the window and with an export
+/// running beside it, for chats that mostly take well under a second.
+pub const MAX_WORKERS: usize = 4;
+
+/// How many threads a run of `targets` exports gets: one core is left for
+/// the window, and there is never a thread with nothing to take.
+pub fn workers(targets: usize) -> usize {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    cores
+        .saturating_sub(1)
+        .clamp(1, MAX_WORKERS)
+        .min(targets.max(1))
+}
+
+/// Hand `items` out to `workers` threads, each taking the next one as it
+/// finishes its last, until the list is empty or `stop` is set. Returns
+/// whether `stop` left any untaken.
+///
+/// **Stop is checked before a row is taken, never inside one**, as it was
+/// when there was one thread: every row in hand is finished.
+pub(crate) fn in_parallel<T: Sync>(
+    items: &[T],
+    workers: usize,
+    stop: &AtomicBool,
+    work: impl Fn(usize, &T) + Sync,
+) -> bool {
+    let next = AtomicUsize::new(0);
+    let stopped = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        for _ in 0..workers.max(1) {
+            scope.spawn(|| loop {
+                if stop.load(Ordering::Relaxed) {
+                    if next.load(Ordering::Relaxed) < items.len() {
+                        stopped.store(true, Ordering::Relaxed);
+                    }
+                    return;
+                }
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(item) = items.get(index) else {
+                    return;
+                };
+                work(index, item);
+            });
+        }
+    });
+    stopped.load(Ordering::Relaxed)
+}
+
 fn run(request: Request, stop: &AtomicBool, tx: Waking<Progress>) {
     let options = tga_report::Options {
         embed_fonts: request.embed_fonts,
@@ -134,40 +192,38 @@ fn run(request: Request, stop: &AtomicBool, tx: Waking<Progress>) {
         ..Default::default()
     };
     let total = request.targets.len();
-    for (index, target) in request.targets.iter().enumerate() {
-        if stop.load(Ordering::Relaxed) {
-            tx.send(Progress::Finished { stopped: true });
-            return;
-        }
+    let tx = &tx;
+    let stopped = in_parallel(&request.targets, workers(total), stop, |index, target| {
         let name = target.name();
         let head = format!("{}/{total}  {name}", index + 1);
-        tx.send(Progress::Started(target.path().to_path_buf()));
+        let path = target.path().to_path_buf();
+        tx.send(Progress::Started(path.clone()));
         tx.send(Progress::Step {
-            done: index,
+            path: path.clone(),
             label: head.clone(),
         });
         let mut report = |_done: usize, _total: usize, topic: &str| {
             tx.send(Progress::Step {
-                done: index,
+                path: path.clone(),
                 label: format!("{head}: reading {topic}"),
             });
         };
-        let path = target.path().to_path_buf();
-        match crate::refresh::one(
+        let outcome = crate::refresh::one(
             target,
             request.write_digest,
             request.handles_only,
             &options,
             Some(&mut report),
-        ) {
+        );
+        match outcome {
             Ok(written) => tx.send(Progress::Wrote { path, written }),
             Err(e) => tx.send(Progress::Failed {
                 path,
                 error: format!("{e:#}"),
             }),
         }
-    }
-    tx.send(Progress::Finished { stopped: false });
+    });
+    tx.send(Progress::Finished { stopped });
 }
 
 /// What the library learns about a row once its file has been opened.
@@ -294,6 +350,34 @@ mod tests {
         );
         assert!(!out.is_file(), "nothing should have been written");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_item_is_taken_once_across_the_workers() {
+        let items: Vec<usize> = (0..50).collect();
+        let seen = std::sync::Mutex::new(Vec::new());
+        let stopped = in_parallel(&items, 4, &AtomicBool::new(false), |index, item| {
+            assert_eq!(index, *item);
+            seen.lock().unwrap().push(*item);
+        });
+        let mut seen = seen.into_inner().unwrap();
+        seen.sort_unstable();
+        assert_eq!(seen, items);
+        assert!(!stopped);
+    }
+
+    #[test]
+    fn a_stop_mid_run_finishes_what_is_in_hand_and_takes_nothing_more() {
+        let items: Vec<usize> = (0..50).collect();
+        let stop = AtomicBool::new(false);
+        let taken = AtomicUsize::new(0);
+        let stopped = in_parallel(&items, 4, &stop, |_, _| {
+            if taken.fetch_add(1, Ordering::Relaxed) == 3 {
+                stop.store(true, Ordering::Relaxed);
+            }
+        });
+        assert!(stopped);
+        assert!(taken.load(Ordering::Relaxed) < items.len());
     }
 
     #[test]

@@ -47,7 +47,7 @@ pub fn presentation(
 
     // Desktop's HTML name is `first + " " + last` **untrimmed**, which is not
     // the name `result.json` carries — hence a second table rather than a reuse.
-    if let Some(from) = &m.from_id {
+    if let Some(from) = super::sender(m) {
         let key = peer_key(from).to_string();
         let html = names.html_name(&key);
         if !html.is_empty() {

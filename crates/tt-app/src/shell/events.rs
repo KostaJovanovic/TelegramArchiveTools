@@ -196,6 +196,16 @@ impl Shell {
                     self.status = format!("Exporting {title}");
                 }
             }
+            Event::Stage { chat_id, stage } => {
+                self.queue.staged(chat_id, stage);
+                // Bytes, so the speed and the time left are a download's. A
+                // new chat's first file starts below the last chat's total,
+                // which `Pace::sample` takes as starting over.
+                if let tgx_tg::engine::Stage::Files { bytes, .. } = stage {
+                    self.file_pace
+                        .sample(std::time::Instant::now(), bytes.max(0) as usize);
+                }
+            }
             Event::ChatDone {
                 chat_id,
                 messages,

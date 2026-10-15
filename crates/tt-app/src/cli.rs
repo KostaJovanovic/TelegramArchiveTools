@@ -23,7 +23,7 @@ use tgx_tg::cancel::Cancel;
 use tgx_tg::client::{ChatInfo, Migration, Session};
 use tgx_tg::config::Settings;
 use tgx_tg::dialogs;
-use tgx_tg::engine::{ChatExporter, ExportResult, Progress};
+use tgx_tg::engine::{ChatExporter, ExportResult, Progress, Stage};
 
 /// Run one exporter command. `args` is argv with the program name dropped.
 pub fn run(args: Vec<String>) -> Result<()> {
@@ -1247,6 +1247,25 @@ async fn export_one(
                 format!("  {done} of {total}")
             } else {
                 format!("  {done}")
+            };
+            if line != last_line {
+                out.counter(&line);
+                last_line = line;
+            }
+        }
+        Progress::Stage(stage) => {
+            if !counting {
+                return;
+            }
+            let line = match stage {
+                Stage::Files {
+                    done, total, bytes, ..
+                } => format!(
+                    "  {done} of {total} files, {}",
+                    crate::list::human_bytes(bytes.max(0) as u64)
+                ),
+                Stage::Storing { done, total } => format!("  storing {done} of {total} files"),
+                Stage::Committing => "  committing the database".to_string(),
             };
             if line != last_line {
                 out.counter(&line);

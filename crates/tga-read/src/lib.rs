@@ -701,6 +701,38 @@ pub fn header_topic(body: &Value, index: usize, folder: PathBuf) -> Topic {
     }
 }
 
+/// Give a message with no sender the one its chat implies.
+///
+/// **In a 1-on-1 chat or a channel the sender can be the chat itself.**
+/// Telegram leaves `from_id` off a message the other person sent you, and off
+/// a channel's post, because the chat already says who it is. Desktop writes
+/// the chat as `from`/`from_id` there; the exporter did not until 2026-10-15,
+/// so a 66,219-message private chat read as one person talking to nobody, and
+/// a database never rewrites a stored message's sender on a later sync. So
+/// it is filled in here, on every reader's way in, and only where it is empty.
+///
+/// A group gets nothing: a message there with no sender has no one to imply.
+///
+/// **Public for the same reason as [`header_topic`]:** the database reader
+/// applies it too, with the chat's own title as the name.
+pub fn imply_senders(msgs: &mut [Msg], topic: &Topic, chat_name: &str) {
+    let prefix = match topic.chat_type.as_str() {
+        "personal_chat" | "bot_chat" => "user",
+        "public_channel" | "private_channel" => "channel",
+        _ => return,
+    };
+    let Some(id) = topic.chat_id else {
+        return;
+    };
+    let key = format!("{prefix}{id}");
+    for msg in msgs.iter_mut().filter(|m| m.sender.is_empty()) {
+        msg.sender = key.clone();
+        if msg.name.is_empty() {
+            msg.name = chat_name.to_string();
+        }
+    }
+}
+
 fn roster(root: &Path) -> (Vec<Member>, Option<bool>, Option<bool>) {
     let path = root.join("participants.json");
     if !path.is_file() {
@@ -980,6 +1012,11 @@ pub fn load(root: &Path, mut progress: Option<Progress<'_>>) -> Result<Export> {
             }
         }
         topic.messages = export.msgs.len() - start;
+        imply_senders(
+            &mut export.msgs[start..],
+            &topic,
+            &as_text(body.get("name")),
+        );
 
         if export.members_count.is_none() {
             export.members_count = as_i64(body.get("members_count"));
@@ -1221,6 +1258,37 @@ mod tests {
         let out = one(&raw, 0, None).unwrap();
         assert_eq!(out.chars, 8);
         assert_eq!(out.words, 1);
+    }
+
+    #[test]
+    fn a_private_chat_or_a_channel_names_the_sender_it_left_out() {
+        // A database made before the converter wrote the other side of a
+        // 1-on-1 chat: their messages carry no `from_id` at all.
+        let topic = |kind: &str| header_topic(&json!({"type": kind, "id": 345}), 0, PathBuf::new());
+        let read = |kind: &str| {
+            let mut theirs = msg(json!({}));
+            for key in ["from", "from_id"] {
+                theirs.as_object_mut().unwrap().remove(key);
+            }
+            let mut msgs = vec![
+                one(&msg(json!({"from": "Me", "from_id": "user12"})), 0, None).unwrap(),
+                one(&theirs, 0, None).unwrap(),
+            ];
+            imply_senders(&mut msgs, &topic(kind), "Omar");
+            msgs
+        };
+        let private = read("personal_chat");
+        assert_eq!(private[0].sender, "user12", "a sender it has is kept");
+        assert_eq!(
+            (private[1].sender.as_str(), private[1].name.as_str()),
+            ("user345", "Omar")
+        );
+        assert_eq!(read("private_channel")[1].sender, "channel345");
+        assert_eq!(
+            read("private_supergroup")[1].sender,
+            "",
+            "a group implies no one"
+        );
     }
 
     #[test]

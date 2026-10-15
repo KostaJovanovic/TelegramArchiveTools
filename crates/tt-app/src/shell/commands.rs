@@ -222,6 +222,7 @@ impl Shell {
         self.failure = None;
         self.count_progress = None;
         self.pace.start(std::time::Instant::now());
+        self.file_pace.start(std::time::Instant::now());
     }
 
     /// Start a run, **or add to the one already going**.

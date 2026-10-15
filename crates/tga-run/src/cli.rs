@@ -12,6 +12,7 @@
 //! across both changes.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::{bail, Result};
 
@@ -392,46 +393,55 @@ fn refresh_all(
             folder.display()
         );
     }
-    let (mut written, mut current, mut failed) = (0, 0, 0);
-    for target in &plan {
-        let name = target.name();
-        if !target.stale && !force {
-            current += 1;
-            if !quiet {
-                println!("  {name}  up to date");
-            }
-            continue;
-        }
-        let mut progress = |done: usize, total: usize, topic: &str| {
-            if !quiet {
-                println!("  {name}  read {done}/{total}  {topic}");
-            }
-        };
-        match crate::refresh::one(target, digest, handles, options, Some(&mut progress)) {
-            Ok(done) => {
-                written += 1;
-                println!(
-                    "  {name}  {} messages, {} people, {} topics{} -> {}",
-                    thousands(done.messages),
-                    done.people,
-                    done.topics,
-                    if done.events == 0 {
-                        String::new()
-                    } else {
-                        format!(", {} events", done.events)
-                    },
-                    done.out.display()
-                );
-                if let Some(warning) = done.warning {
-                    println!("  {name}  {warning}");
-                }
-            }
-            Err(e) => {
-                failed += 1;
-                eprintln!("  {name}  failed: {e:#}");
-            }
+    let (todo, current): (Vec<_>, Vec<_>) = plan.iter().partition(|t| t.stale || force);
+    if !quiet {
+        for target in &current {
+            println!("  {}  up to date", target.name());
         }
     }
+    let current = current.len();
+    // Several at once, as in the window (`job::MAX_WORKERS`). Every line is
+    // headed by its chat's name, so interleaved lines still say whose they are.
+    let (written, failed) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    let never = AtomicBool::new(false);
+    crate::job::in_parallel(
+        &todo,
+        crate::job::workers(todo.len()),
+        &never,
+        |_, target| {
+            let name = target.name();
+            let mut progress = |done: usize, total: usize, topic: &str| {
+                if !quiet {
+                    println!("  {name}  read {done}/{total}  {topic}");
+                }
+            };
+            match crate::refresh::one(target, digest, handles, options, Some(&mut progress)) {
+                Ok(done) => {
+                    written.fetch_add(1, Ordering::Relaxed);
+                    println!(
+                        "  {name}  {} messages, {} people, {} topics{} -> {}",
+                        thousands(done.messages),
+                        done.people,
+                        done.topics,
+                        if done.events == 0 {
+                            String::new()
+                        } else {
+                            format!(", {} events", done.events)
+                        },
+                        done.out.display()
+                    );
+                    if let Some(warning) = done.warning {
+                        println!("  {name}  {warning}");
+                    }
+                }
+                Err(e) => {
+                    failed.fetch_add(1, Ordering::Relaxed);
+                    eprintln!("  {name}  failed: {e:#}");
+                }
+            }
+        },
+    );
+    let (written, failed) = (written.into_inner(), failed.into_inner());
     println!("{written} written, {current} up to date, {failed} failed");
     if failed > 0 {
         bail!(

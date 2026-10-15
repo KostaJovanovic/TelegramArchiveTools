@@ -258,12 +258,24 @@ pub async fn load(path: &Path, chat_id: i64) -> Result<Loaded, tgx_archive::Erro
             .filter(|m| creates_topic(&m.payload))
             .map(|m| m.id)
             .collect();
+        let implied = store
+            .chat(chat_id)
+            .await?
+            .and_then(|(title, kind)| implied_sender(&kind, chat_id).map(|key| (key, title)));
         let rows = messages
             .into_iter()
             .map(|m| {
                 let mut row = row_of(m, &recovered);
                 if row.reply_to.is_some_and(|id| roots.contains(&id)) {
                     row.reply_to = None;
+                }
+                if let Some((key, title)) = implied.as_ref().filter(|_| row.from_id.is_empty()) {
+                    row.from_id = key.clone();
+                    row.colour = colour_of(key);
+                    if row.from.is_empty() {
+                        row.from = title.clone();
+                        row.initials = tgx_format::peer::initials_from_name(title);
+                    }
                 }
                 row
             })
@@ -339,6 +351,22 @@ fn row_of(m: tgx_archive::StoredMessage, recovered: &std::collections::HashSet<i
         version: m.version,
         recovered: recovered.contains(&m.id),
         service,
+    }
+}
+
+/// The sender a message with none was sent by: the chat itself, in a 1-on-1
+/// chat or a channel.
+///
+/// Telegram leaves `from_id` off the other person's messages there, and the
+/// converter wrote nothing in its place until 2026-10-15; a sync never
+/// rewrites a stored message's sender, so the databases made before then keep
+/// the gap and every reader has to fill it. `tga_read::imply_senders` is the
+/// analyser's copy of this rule — the layering forbids sharing it.
+fn implied_sender(kind: &str, chat_id: i64) -> Option<String> {
+    match kind {
+        "personal_chat" | "bot_chat" => Some(format!("user{chat_id}")),
+        "public_channel" | "private_channel" => Some(format!("channel{chat_id}")),
+        _ => None,
     }
 }
 

@@ -222,10 +222,21 @@ pub async fn run_all(
                 }
             }
             finished += 1;
-            // A heartbeat for the window, which does not see the per-file
-            // lines. Every twenty-fifth, so a big batch shows movement and a
-            // small one says nothing beyond its own summary.
             if let Some(tx) = &report {
+                // Every file, for the progress bar. Counted over this batch
+                // only; the engine adds the batches before it and the
+                // chat's totals, which it alone knows.
+                let _ = tx.send(crate::engine::Progress::Stage(
+                    crate::engine::Stage::Files {
+                        done: finished,
+                        total: queued,
+                        bytes: tally.bytes,
+                        expected: 0,
+                    },
+                ));
+                // A heartbeat for the transcript, which does not see the
+                // per-file lines. Every twenty-fifth, so a big batch shows
+                // movement and a small one says nothing beyond its own summary.
                 if finished.is_multiple_of(25) && finished < queued {
                     let _ = tx.send(crate::engine::Progress::Log(format!(
                         "  {finished} of {queued} files, {} so far",

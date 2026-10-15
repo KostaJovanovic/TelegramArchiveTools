@@ -262,6 +262,9 @@ pub struct Shell {
     count_progress: Option<(usize, usize)>,
     /// The export's clock and speed. See [`crate::pace`].
     pace: crate::pace::Pace,
+    /// The media pass's speed, in bytes: a chat's files are not its messages,
+    /// and the read's rate says nothing about how long they will take.
+    file_pace: crate::pace::Pace,
 
     /// **One dialog, ever.** An `Option`, not a flag plus a stage, so
     /// "is one open?" and "which one?" cannot disagree.
@@ -409,6 +412,7 @@ impl Shell {
             pending: Pending::new(),
             count_progress: None,
             pace: Default::default(),
+            file_pace: Default::default(),
             login: None,
             log_copied: false,
             wants_attention: false,

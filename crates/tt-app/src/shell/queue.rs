@@ -9,6 +9,7 @@ use crate::queue::JobState;
 use eframe::egui::{Align, Layout, Sense, Ui};
 use egui_extras::{Column, TableBuilder};
 use tga_run::state::{Mark, Outcome};
+use tgx_tg::engine::Stage;
 use tgx_ui::components::{
     action, badge, block, dismiss, eyebrow, figure, meta, progress_bar, row, rule, text, thousands,
     title, EmptyState, Tone,
@@ -434,15 +435,35 @@ impl Shell {
     pub(super) fn pace_caption(&self) -> String {
         let now = std::time::Instant::now();
         let mut parts = vec![self.queue.running_caption()];
-        if let Some(rate) = self.pace.rate() {
-            parts.push(crate::pace::rate_text(rate));
-            if let Some(left) = self
-                .queue
-                .remaining_in_flight()
-                .and_then(|n| self.pace.left(n))
-            {
-                parts.push(format!("{} in this chat", crate::pace::left_text(left)));
+        match self.queue.stage_in_flight() {
+            None => {
+                if let Some(rate) = self.pace.rate() {
+                    parts.push(crate::pace::rate_text(rate));
+                    if let Some(left) = self
+                        .queue
+                        .remaining_in_flight()
+                        .and_then(|n| self.pace.left(n))
+                    {
+                        parts.push(format!("{} in this chat", crate::pace::left_text(left)));
+                    }
+                }
             }
+            // The files' own speed. The time left is the bytes Telegram
+            // declared over that speed, so it is not offered once more has
+            // arrived than was declared.
+            Some(Stage::Files {
+                bytes, expected, ..
+            }) => {
+                if let Some(rate) = self.file_pace.rate() {
+                    parts.push(format!("{}/s", crate::list::human_bytes(rate as u64)));
+                    if let Some(left) = self.file_pace.left(expected - bytes) {
+                        parts.push(format!("{} of files", crate::pace::left_text(left)));
+                    }
+                }
+            }
+            // Storing is counted in the caption, and the commit has nothing
+            // true to estimate.
+            Some(_) => {}
         }
         if let Some(elapsed) = self.pace.elapsed(now) {
             parts.push(format!("{} elapsed", crate::pace::clock(elapsed)));

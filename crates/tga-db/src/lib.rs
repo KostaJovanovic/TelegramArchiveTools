@@ -383,6 +383,7 @@ async fn load_from(
         // of the history whether or not it can still be fetched. The count is
         // available separately, through `deleted`, so a caller can say how
         // many of the figures rest on messages nobody can see any more.
+        let start = export.msgs.len();
         for stored in store.messages_of(chat.id, stored.id).await? {
             let raw = Value::Object(stored.payload);
             if let Some(msg) = tga_read::one(&raw, index, topic.root) {
@@ -390,6 +391,9 @@ async fn load_from(
                 topic.messages += 1;
             }
         }
+        // The chat's title, not the topic's: the sender a 1-on-1 chat implies
+        // is the person it is named after.
+        tga_read::imply_senders(&mut export.msgs[start..], &topic, &chat.title);
 
         let label = topic.name.clone();
         export.topics.push(topic);

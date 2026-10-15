@@ -51,9 +51,28 @@ struct FileLogger {
     out: Mutex<File>,
 }
 
+/// Libraries that log a warning for every malformed object inside a file they
+/// parse. Reading one export's PDFs for its report wrote 42,309 such lines
+/// into a single `tgx.log` on 2026-10-15 — 94% of the file, with an export's
+/// own account of itself buried among them. They describe the insides of
+/// somebody's PDF, not what this program did, so they are held to errors
+/// unless the level asks for everything.
+const NOISY: [&str; 2] = ["lopdf", "pdf_extract"];
+
+/// Whether a record from `target` at `level` is written under `wanted`.
+fn admits(wanted: log::LevelFilter, target: &str, level: log::Level) -> bool {
+    let crate_name = target.split("::").next().unwrap_or(target);
+    let wanted = if wanted < log::LevelFilter::Debug && NOISY.contains(&crate_name) {
+        wanted.min(log::LevelFilter::Error)
+    } else {
+        wanted
+    };
+    level <= wanted
+}
+
 impl log::Log for FileLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= self.level
+        admits(self.level, metadata.target(), metadata.level())
     }
 
     fn log(&self, record: &log::Record) {
@@ -227,6 +246,24 @@ mod tests {
         if std::env::var_os("RUST_LOG").is_none() {
             assert_eq!(wanted_level().0, log::LevelFilter::Info);
         }
+    }
+
+    #[test]
+    fn a_pdf_library_is_held_to_errors_unless_everything_is_asked_for() {
+        use log::{Level, LevelFilter};
+        assert!(!admits(LevelFilter::Info, "lopdf::reader", Level::Warn));
+        assert!(!admits(LevelFilter::Info, "pdf_extract", Level::Warn));
+        assert!(admits(LevelFilter::Info, "pdf_extract", Level::Error));
+        assert!(admits(LevelFilter::Debug, "lopdf::parser", Level::Warn));
+        // Everyone else is untouched, and a name that merely starts the same
+        // is someone else.
+        assert!(admits(
+            LevelFilter::Info,
+            "grammers_mtsender::sender",
+            Level::Warn
+        ));
+        assert!(admits(LevelFilter::Info, "lopdfx", Level::Warn));
+        assert!(!admits(LevelFilter::Off, "lopdf", Level::Error));
     }
 
     #[test]

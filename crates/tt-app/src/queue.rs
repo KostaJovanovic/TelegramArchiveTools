@@ -12,6 +12,7 @@
 //! rather than only "what has it done?".
 
 use std::path::PathBuf;
+use tgx_tg::engine::Stage;
 
 /// Where one chat's job has got to.
 ///
@@ -69,6 +70,9 @@ pub struct Job {
     pub media: Option<(usize, usize)>,
     /// Where it was written, so a finished row can be opened.
     pub root: Option<PathBuf>,
+    /// What the chat is doing once its read is over. `None` while it is still
+    /// reading messages — and then the caption counts those.
+    pub stage: Option<Stage>,
 }
 
 impl Job {
@@ -82,6 +86,7 @@ impl Job {
             topics: None,
             media: None,
             root: None,
+            stage: None,
         }
     }
 
@@ -189,7 +194,23 @@ impl Queue {
     pub fn began(&mut self, chat_id: i64) {
         if let Some(job) = self.job_mut(chat_id) {
             job.state = JobState::Exporting;
+            job.stage = None;
         }
+    }
+
+    /// The chat has moved past its read. See [`Job::stage`].
+    pub fn staged(&mut self, chat_id: i64, stage: Stage) {
+        if let Some(job) = self.job_mut(chat_id) {
+            job.stage = Some(stage);
+        }
+    }
+
+    /// The stage of the chat in flight, if it has one.
+    pub fn stage_in_flight(&self) -> Option<Stage> {
+        self.jobs
+            .iter()
+            .find(|j| j.state == JobState::Exporting)
+            .and_then(|j| j.stage)
     }
 
     pub fn set_expected(&mut self, chat_id: i64, total: i64) {
@@ -230,6 +251,7 @@ impl Queue {
     ) {
         if let Some(job) = self.job_mut(chat_id) {
             job.state = JobState::Done;
+            job.stage = None;
             job.messages = messages;
             // **`0` is not a total**, here as everywhere else in this file. A
             // database-only sync sends zero because the chat's size is not its
@@ -268,14 +290,32 @@ impl Queue {
     /// a report on something that has not happened.
     pub fn running_caption(&self) -> String {
         let done = self.jobs.iter().filter(|j| j.state.is_finished()).count();
-        match self.jobs.iter().find(|j| j.state == JobState::Exporting) {
-            Some(job) => match job.expected {
-                Some(total) if total > 0 => {
-                    format!("{} — {} of {} messages", job.title, job.messages, total)
-                }
-                _ => format!("{} — {} messages", job.title, job.messages),
-            },
-            None => format!("{done} of {} chats", self.jobs.len()),
+        let Some(job) = self.jobs.iter().find(|j| j.state == JobState::Exporting) else {
+            return format!("{done} of {} chats", self.jobs.len());
+        };
+        match (job.stage, job.expected) {
+            (
+                Some(Stage::Files {
+                    done, total, bytes, ..
+                }),
+                _,
+            ) => format!(
+                "{} — {done} of {total} files, {} so far",
+                job.title,
+                crate::list::human_bytes(bytes.max(0) as u64)
+            ),
+            (Some(Stage::Storing { done, total }), _) => format!(
+                "{} — storing files in the database, {done} of {total}",
+                job.title
+            ),
+            // No count and no estimate: the commit's length is the disk's.
+            (Some(Stage::Committing), _) => {
+                format!("{} — writing the database to disk", job.title)
+            }
+            (None, Some(total)) if total > 0 => {
+                format!("{} — {} of {} messages", job.title, job.messages, total)
+            }
+            (None, _) => format!("{} — {} messages", job.title, job.messages),
         }
     }
 
@@ -286,8 +326,12 @@ impl Queue {
     }
 
     /// Messages the chat in flight still has to read, when its size is known.
+    /// `None` once the read is over: what is left then is not messages.
     pub fn remaining_in_flight(&self) -> Option<i64> {
         let job = self.jobs.iter().find(|j| j.state == JobState::Exporting)?;
+        if job.stage.is_some() {
+            return None;
+        }
         match job.expected {
             Some(total) if total > 0 => Some((total - job.messages as i64).max(0)),
             _ => None,
@@ -329,6 +373,7 @@ impl Queue {
             if job.state == JobState::Paused {
                 job.state = JobState::Queued;
                 job.messages = 0;
+                job.stage = None;
             }
         }
         self.jobs
@@ -358,19 +403,38 @@ impl Queue {
             return None;
         }
         let finished = self.jobs.iter().filter(|j| j.state.is_finished()).count();
+        let in_flight = self.jobs.iter().find(|j| j.state == JobState::Exporting);
+        // **The last commit is indeterminate.** Nothing in it can be counted,
+        // and a bar standing still at the end for minutes is what read as a
+        // hung export; a marker that moves says it is working without
+        // claiming how far.
+        if in_flight.is_some_and(|j| j.stage == Some(Stage::Committing)) {
+            return None;
+        }
         // The chat in flight contributes its own share, so a single long chat
-        // still moves the bar rather than sitting at 0 until it is done.
-        let running = self
-            .jobs
-            .iter()
-            .find(|j| j.state == JobState::Exporting)
-            .and_then(|j| match j.expected {
-                Some(total) if total > 0 => {
-                    Some((j.messages as f32 / total as f32).clamp(0.0, 1.0))
-                }
-                _ => None,
+        // still moves the bar rather than sitting at 0 until it is done. **Each
+        // stage fills that share again** — the files by bytes, the database
+        // copy by files — because a bar left full through half an hour of
+        // downloads says the chat is finished.
+        let share = |done: f64, total: f64| (total > 0.0).then(|| (done / total).clamp(0.0, 1.0));
+        let running = in_flight
+            .and_then(|j| match (j.stage, j.expected) {
+                (
+                    Some(Stage::Files {
+                        done,
+                        total,
+                        bytes,
+                        expected,
+                    }),
+                    _,
+                ) => share(bytes as f64, expected as f64)
+                    .or_else(|| share(done as f64, total as f64)),
+                (Some(Stage::Storing { done, total }), _) => share(done as f64, total as f64),
+                (Some(Stage::Committing), _) => None,
+                (None, Some(total)) => share(j.messages as f64, total as f64),
+                (None, None) => None,
             })
-            .unwrap_or(0.0);
+            .unwrap_or(0.0) as f32;
         Some(((finished as f32 + running) / self.jobs.len() as f32).clamp(0.0, 1.0))
     }
 
@@ -444,6 +508,66 @@ mod tests {
         assert_eq!(q.fraction(), Some(0.0));
         q.progressed(1, 3000, 6000);
         assert_eq!(q.fraction(), Some(0.5));
+    }
+
+    #[test]
+    fn after_its_read_a_chat_says_what_it_is_doing_instead() {
+        // The run of 2026-10-15: a 66,212-message chat read "66200 of 66212
+        // messages · under a minute left" with a full bar through half an hour
+        // of downloads and six minutes of committing.
+        let mut q = queue_of(1);
+        q.began(1);
+        q.progressed(1, 66_200, 66_212);
+        q.staged(
+            1,
+            Stage::Files {
+                done: 25,
+                total: 100,
+                bytes: 1024 * 1024,
+                expected: 4 * 1024 * 1024,
+            },
+        );
+        assert_eq!(
+            q.running_caption(),
+            "chat 1 — 25 of 100 files, 1.0 MB so far"
+        );
+        assert_eq!(q.fraction(), Some(0.25), "by bytes, not by files");
+        assert_eq!(
+            q.remaining_in_flight(),
+            None,
+            "no messages left to estimate"
+        );
+
+        q.staged(1, Stage::Storing { done: 3, total: 4 });
+        assert_eq!(
+            q.running_caption(),
+            "chat 1 — storing files in the database, 3 of 4"
+        );
+        assert_eq!(q.fraction(), Some(0.75));
+
+        q.staged(1, Stage::Committing);
+        assert_eq!(q.running_caption(), "chat 1 — writing the database to disk");
+        assert_eq!(
+            q.fraction(),
+            None,
+            "a commit cannot be measured, so it is not"
+        );
+
+        q.finished(1, 66_212, 66_212, None, 100, 0, None);
+        assert_eq!(q.jobs()[0].stage, None);
+        assert_eq!(q.fraction(), Some(1.0));
+    }
+
+    #[test]
+    fn a_new_chat_starts_counting_messages_again() {
+        let mut q = queue_of(2);
+        q.began(1);
+        q.staged(1, Stage::Committing);
+        q.finished(1, 10, 10, None, 0, 0, None);
+        q.began(2);
+        q.progressed(2, 5, 10);
+        assert_eq!(q.running_caption(), "chat 2 — 5 of 10 messages");
+        assert_eq!(q.fraction(), Some(0.75));
     }
 
     #[test]

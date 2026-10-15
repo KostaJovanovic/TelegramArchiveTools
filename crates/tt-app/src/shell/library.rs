@@ -239,13 +239,13 @@ impl Library {
         self.run = Some(job::spawn(request, wake(ctx)));
     }
 
-    /// Stop after the report in hand. Also what quitting does — see
+    /// Stop after the reports in hand. Also what quitting does — see
     /// `Shell::on_exit`.
     pub(super) fn stop(&mut self) {
         if let Some(run) = &self.run {
             run.stop();
             self.state.stopping = true;
-            self.state.status = "Stopping after this export".into();
+            self.state.status = "Stopping after the reports in hand".into();
         }
     }
 

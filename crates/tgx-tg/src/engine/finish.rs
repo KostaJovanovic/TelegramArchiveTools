@@ -27,7 +27,19 @@ impl<'a> ChatExporter<'a> {
         progress: ProgressFn<'_>,
     ) -> Result<(), tgx_archive::Error> {
         let committed = match &self.store {
-            Some(store) => store.commit_batch().await,
+            Some(store) => {
+                progress(Progress::Stage(Stage::Committing));
+                let started = std::time::Instant::now();
+                let committed = store.commit_batch().await;
+                // Said only when it was long enough to wonder about: sixty
+                // chats of an Update databases would otherwise each add a line
+                // reading 0.0s.
+                let secs = started.elapsed().as_secs_f64();
+                if secs >= 2.0 {
+                    progress(Progress::Log(format!("database: committed in {secs:.1}s")));
+                }
+                committed
+            }
             None => Ok(()),
         };
         let RunState {

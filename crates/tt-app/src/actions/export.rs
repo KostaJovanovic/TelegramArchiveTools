@@ -308,6 +308,9 @@ pub async fn export(settings: Settings, pending: Pending, cancel: Cancel, tx: Ev
             Progress::FloodWait { seconds } => {
                 let _ = tx2.send(Event::FloodWait(seconds));
             }
+            Progress::Stage(stage) => {
+                let _ = tx2.send(Event::Stage { chat_id, stage });
+            }
             Progress::Topic { title, messages } => {
                 log::info!("{title}: {messages}");
                 let _ = tx2.send(Event::Log(format!("  {title}: {messages}")));
@@ -482,12 +485,17 @@ fn report_result(tx: &Events, title: &str, result: &tgx_tg::engine::ExportResult
         )));
     }
     if result.enrich_deferred > 0 {
+        let n = result.enrich_deferred;
+        let (lookups, were) = if n == 1 {
+            ("lookup", "was")
+        } else {
+            ("lookups", "were")
+        };
         let _ = tx.send(Event::Warn(format!(
-            "{title}: {} extra lookups were lost to rate limits or Telegram \
+            "{title}: {n} extra {lookups} {were} lost to rate limits or Telegram \
              server errors — reaction \
              names, poll results or custom emoji may be missing. Re-exporting \
-             this chat later will fill them in.",
-            result.enrich_deferred
+             this chat later will fill them in."
         )));
     }
     if !result.degraded.is_empty() {

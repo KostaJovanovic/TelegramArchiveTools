@@ -1,10 +1,11 @@
 //! How fast a run is going, and how long it has left.
 //!
-//! **Messages read, not files fetched.** The progress events count messages as
-//! the read loop passes them, and the media pass for a chat runs after its
-//! read — so "time left" is the time left *reading this chat*, and says so. A
-//! figure for the whole queue would need every later chat's size, which is
-//! only known once each one starts.
+//! **One `Pace` per thing counted.** The shell keeps one over messages read
+//! and one over bytes downloaded, because a chat's media pass runs after its
+//! read and goes at a speed of its own — so "time left" is the time left in
+//! *this chat's read*, or in *its files*, and says which. A figure for the
+//! whole queue would need every later chat's size, which is only known once
+//! each one starts.
 //!
 //! The speed is measured over the last [`WINDOW`] rather than since the start,
 //! because a run's speed is not one number: a two-minute rate-limit wait in

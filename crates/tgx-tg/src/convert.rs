@@ -40,6 +40,12 @@ fn put_date(map: &mut Map<String, Value>, key: &str, unix_key: &str, ts: i32) {
     }
 }
 
+/// Who sent an ordinary message: its `from_id`, else the chat it is in. See
+/// [`base_message`].
+pub(crate) fn sender(m: &tl::types::Message) -> Option<&tl::enums::Peer> {
+    m.from_id.as_ref().or(Some(&m.peer_id))
+}
+
 /// The core of an ordinary message, before media and extras.
 pub fn base_message(m: &tl::types::Message, names: &NameBook) -> Map<String, Value> {
     let mut out = Map::new();
@@ -50,7 +56,13 @@ pub fn base_message(m: &tl::types::Message, names: &NameBook) -> Map<String, Val
         put_date(&mut out, "edited", "edited_unixtime", edit);
     }
 
-    if let Some(from) = &m.from_id {
+    // **Falls back to the chat**, as `base_service` does. Telegram leaves
+    // `from_id` off whatever the other person sends you in a 1-on-1 chat, and
+    // off a channel's posts, because the chat already says who it is — and
+    // Desktop writes the chat as `from`/`from_id` there. Keying only on
+    // `from_id` left 38,364 of a 66,219-message private chat with no sender,
+    // and every post of every channel.
+    if let Some(from) = sender(m) {
         let key = peer_key(from);
         out.insert("from".into(), json!(names.get(&key.to_string())));
         out.insert("from_id".into(), json!(key.to_string()));
@@ -405,6 +417,9 @@ mod tests {
         // This is the invariant that keeps the HTML leg at 4 of 4: a branch
         // that fired without its source field would show up as a diff on
         // every page.
+        //
+        // `from` and `from_id` are Desktop's on every message: a message with
+        // no `from_id` of its own was sent by the chat it is in.
         let m = blank_message();
         let out = base_message(&m, &NameBook::default());
         let keys: Vec<&str> = out.keys().map(String::as_str).collect();
@@ -415,10 +430,43 @@ mod tests {
                 "type",
                 "date",
                 "date_unixtime",
+                "from",
+                "from_id",
                 "text",
                 "text_entities"
             ]
         );
+    }
+
+    #[test]
+    fn the_other_side_of_a_private_chat_is_its_sender() {
+        // Telegram sends no `from_id` on what the other person writes in a
+        // 1-on-1 chat; the chat is them. 38,364 of 66,219 messages of one
+        // private chat were stored with no sender before this.
+        let mut names = NameBook::default();
+        names.learn(UserFacts {
+            id: 345,
+            first: "Omar",
+            ..Default::default()
+        });
+        let mut theirs = blank_message();
+        theirs.peer_id = peer_user(345);
+        let out = base_message(&theirs, &names);
+        assert_eq!(out["from_id"], "user345");
+        assert_eq!(out["from"], "Omar");
+
+        // Our own side carries its `from_id`, and keeps it.
+        let mut ours = blank_message();
+        ours.out = true;
+        ours.peer_id = peer_user(345);
+        ours.from_id = Some(peer_user(12));
+        assert_eq!(base_message(&ours, &names)["from_id"], "user12");
+
+        // A channel's post is the channel's.
+        let mut post = blank_message();
+        post.post = true;
+        post.peer_id = tl::enums::Peer::Channel(tl::types::PeerChannel { channel_id: 77 });
+        assert_eq!(base_message(&post, &names)["from_id"], "channel77");
     }
 
     #[test]
