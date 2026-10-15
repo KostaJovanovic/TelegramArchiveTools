@@ -63,6 +63,7 @@ set SAVE_ERROR=0
 set COMMIT_ONLY=0
 set FORCE_MODE=0
 set DO_BUILD=0
+set SKIP_CHECKS=0
 set ACTION=%~1
 
 rem --force pushes with --force-with-lease, not a bare --force: it still
@@ -90,7 +91,7 @@ if /i "%ACTION%"=="--commit"  (set "COMMIT_ONLY=1" & set "ACTION=save")
 if /i "%ACTION%"=="--no-push" (set "COMMIT_ONLY=1" & set "ACTION=save")
 if /i "%ACTION%"=="commit"    (set "COMMIT_ONLY=1" & set "ACTION=save")
 if /i "%ACTION%"=="save"    goto save
-if /i "%ACTION%"=="release" (set "DO_BUILD=1" & goto save)
+if /i "%ACTION%"=="release" (set "DO_BUILD=1" & set "SKIP_CHECKS=1" & goto save)
 if /i "%ACTION%"=="push"    goto push
 if /i "%ACTION%"=="pull"    goto pull
 if /i "%ACTION%"=="build"   goto build
@@ -116,7 +117,7 @@ echo   2  commit   test + commit, no push
 echo   3  push     push current branch
 echo   4  pull     pull current branch
 echo   5  build    cargo build --release
-echo   6  release  test + commit + push + tag + build
+echo   6  release  commit + push + tag + build, no checks
 echo   7  test     fmt + clippy + every suite
 echo   8  parity   diff against a real Desktop export
 echo   9  corpus   cut the 7.8 MB parity corpus out of that export
@@ -137,7 +138,7 @@ if "%CHOICE%"=="2" (set "COMMIT_ONLY=1" & goto save)
 if "%CHOICE%"=="3" goto push
 if "%CHOICE%"=="4" goto pull
 if "%CHOICE%"=="5" goto build
-if "%CHOICE%"=="6" (set "DO_BUILD=1" & goto save)
+if "%CHOICE%"=="6" (set "DO_BUILD=1" & set "SKIP_CHECKS=1" & goto save)
 if "%CHOICE%"=="7" goto test
 if "%CHOICE%"=="8" goto parity
 if "%CHOICE%"=="9" goto corpus
@@ -171,6 +172,14 @@ rem minor counter. Nothing has been crowned yet, so this reads v0.NN.
 set RELEASES=
 for /f %%v in ('powershell -NoProfile -Command "$n=%NEXT_COUNT%; $major=0; $base=0; foreach($r in @(%RELEASES%)){ if($n -ge $r){ $major++; $base=$r } else { break } }; if($major -eq 0){ '0.{0:D2}' -f $n } elseif(($n-$base) -eq 0){ '{0}.0' -f $major } else { '{0}.{1:D2}' -f $major,($n-$base) }"') do set VERLABEL=%%v
 echo bump: v%VERLABEL% (commit %NEXT_COUNT%)
+
+rem A release runs none of the checks below: it commits, pushes, tags and
+rem builds. Run `save.bat test` first if you want them; CI runs them anyway.
+if "%SKIP_CHECKS%"=="1" (
+  echo.
+  echo [skip] checks - release does not run them
+  goto stage
+)
 
 rem Formatting and lints first: they are the fastest to fail and the cheapest to
 rem fix, and CI runs both with -D warnings, so a commit that skips them is a
@@ -212,6 +221,7 @@ rem recording skips, a differing leg fails.
 call :runbaseline
 if errorlevel 1 goto testsfailed
 
+:stage
 echo.
 echo [git]  stage
 git add .
