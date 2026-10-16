@@ -110,6 +110,29 @@ impl EmojiText for Painter {
     }
 }
 
+/// [`EmojiText::galley_e`] for text the reader may select, through egui's
+/// own label selection: drag across it, double-click a word, triple-click a
+/// paragraph, Ctrl+C — and a drag runs on into the next selectable text, as
+/// it does between labels. `response` is the text's own area, sensing click
+/// and drag.
+pub fn selectable_galley(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    pos: Pos2,
+    galley: Arc<Galley>,
+    fallback: Color32,
+) {
+    paint_emoji(ui.painter(), pos, &galley);
+    egui::text_selection::LabelSelectionState::label_text_selection(
+        ui,
+        response,
+        pos,
+        galley,
+        fallback,
+        egui::Stroke::NONE,
+    );
+}
+
 /// Every emoji glyph in `galley`, painted at its slot.
 fn paint_emoji(painter: &Painter, pos: Pos2, galley: &Galley) {
     let ppp = painter.ctx().pixels_per_point();

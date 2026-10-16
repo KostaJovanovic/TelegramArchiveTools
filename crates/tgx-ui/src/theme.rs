@@ -131,6 +131,27 @@ pub fn install(ctx: &Context, palette: &Palette) {
     style.spacing.button_padding = egui::vec2(14.0, 7.0);
     style.spacing.interact_size.y = 30.0;
 
+    // **A scroll bar takes its own room; it never lies over the content.**
+    // egui's default is `floating`: the bar is drawn on top of whatever is at
+    // the edge, so it covered the queue's × buttons and the catch-up strip's
+    // chips, and grabbing it meant missing them or hitting them. `solid` gives
+    // every scroll area a lane for its bar. The handle stays faintly visible at
+    // rest, so a list that scrolls says so before it is hovered.
+    style.spacing.scroll = egui::style::ScrollStyle {
+        dormant_handle_opacity: 0.35,
+        ..egui::style::ScrollStyle::solid()
+    };
+
+    // **Only content is selectable text, as on Windows.** egui makes every
+    // label selectable by default: a text cursor over every heading, button
+    // caption and count, a drag anywhere painting a selection across the
+    // chrome, and a click on a row's words starting a selection instead of
+    // clicking the row. Content turns it back on where it is drawn — a
+    // summary, an answer, the export log, a message in the Viewer — with
+    // `components::selectable`, and there a double-click selects a word and a
+    // triple-click a paragraph.
+    style.interaction.selectable_labels = false;
+
     // **Into both slots, and then the switch is pinned shut.**
     //
     // egui does not hold one style. It holds `light_style` and `dark_style` and

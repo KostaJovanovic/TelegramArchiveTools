@@ -36,16 +36,16 @@ pub const MAX_BAR: f64 = 24.0;
 /// many messages landed on it.
 pub type Day = tga_stats::Count;
 
-mod bars;
 mod frame;
 mod grids;
+mod html;
 mod scale;
 mod text;
 mod time;
 
-pub use bars::*;
 pub use frame::*;
 pub use grids::*;
+pub use html::*;
 pub use scale::*;
 pub use text::*;
 pub use time::*;
@@ -188,28 +188,59 @@ mod tests {
         assert!(caption.ends_with("and 4 messages."));
     }
 
-    #[test]
-    fn a_zero_column_draws_its_label_but_not_a_rect() {
-        // A zero-height rect cannot be seen or hovered, and leaving it in
-        // claims the chart drew something it did not.
-        let labels: Vec<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
-        let svg = columns(&labels, &[0, 4], 200.0, 100.0, 1, "", None);
-        assert_eq!(svg.matches("<rect").count(), 1);
-        assert_eq!(svg.matches("class=\"axis\"").count(), 2);
+    fn cols(labels: &[String], values: &[i64]) -> String {
+        vcols(&Cols {
+            labels,
+            values,
+            shown: &|v| thousands(v),
+            every: 1,
+            id: "",
+        })
     }
 
     #[test]
-    fn an_all_zero_series_draws_its_axis_and_no_bars_rather_than_failing() {
+    fn a_zero_column_draws_its_label_and_no_height() {
+        // A zero-height bar cannot be seen or hovered; it is there to keep
+        // its slot, and says nothing was there.
+        let labels: Vec<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+        let html = cols(&labels, &[0, 4]);
+        assert!(html.contains("<i style=\"height:0%\">"), "{html}");
+        assert!(html.contains("<i style=\"height:100%\">"), "{html}");
+        assert!(html.contains("<span>a</span>"), "{html}");
+        assert!(html.contains("<b class=\"pv\" style=\"bottom:100%\">4</b>"));
+    }
+
+    #[test]
+    fn an_all_zero_series_draws_its_axis_and_no_peak_rather_than_failing() {
         // An export with no participants.json has exactly this shape: every
         // month's arrivals is 0.
         let labels: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
-        let svg = columns(&labels, &[0, 0, 0], 200.0, 100.0, 1, "", None);
-        assert!(!svg.contains("<rect"));
-        assert!(svg.contains("class=\"baseline\""));
-        assert!(
-            !svg.contains("class=\"value\""),
-            "no peak, so no peak label"
-        );
+        let html = cols(&labels, &[0, 0, 0]);
+        assert!(html.contains("class=\"vlabels\""));
+        assert!(!html.contains("class=\"pv\""), "no peak, so no peak label");
+        assert!(!html.contains(" hot"));
+    }
+
+    #[test]
+    fn a_column_says_its_value_in_the_words_it_was_given() {
+        let labels: Vec<String> = vec!["03".into()];
+        let html = vcols(&Cols {
+            labels: &labels,
+            values: &[400],
+            shown: &|v| format!("{} min", v / 60),
+            every: 1,
+            id: "hours",
+        });
+        assert!(html.contains("data-tip=\"03 · 6 min\""), "{html}");
+        assert!(html.contains("id=\"hours\""));
+    }
+
+    #[test]
+    fn every_other_label_is_minor_so_a_phone_can_drop_it() {
+        let labels: Vec<String> = (0..24).map(|h| format!("{h:02}")).collect();
+        let html = cols(&labels, &[1; 24]);
+        assert!(html.contains("<span>00</span>"));
+        assert!(html.contains("<span class=\"m\">01</span>"));
     }
 
     #[test]
@@ -233,35 +264,50 @@ mod tests {
     #[test]
     fn a_year_axis_replaces_months_past_the_point_they_collide() {
         let long = series(&[1; 1200]);
-        let svg = time_axis(&long, 1120.0, 16.0);
-        assert!(svg.contains(">2025<"), "{svg}");
-        assert!(svg.contains(">2028<"), "{svg}");
-        assert!(!svg.contains("Jan 25"));
+        let html = time_axis(&long);
+        assert!(html.contains(">2025<"), "{html}");
+        assert!(html.contains(">2028<"), "{html}");
+        assert!(!html.contains("Jan 25"));
     }
 
     #[test]
     fn a_short_axis_labels_months_and_names_the_year_once() {
-        let svg = time_axis(&series(&[1; 90]), 1120.0, 16.0);
+        let html = time_axis(&series(&[1; 90]));
         assert!(
-            svg.contains(">Jan 25<"),
-            "first mark carries the year: {svg}"
+            html.contains(">Jan 25<"),
+            "first mark carries the year: {html}"
         );
-        assert!(svg.contains(">Feb<"));
-        assert!(svg.contains(">Mar<"));
+        assert!(html.contains(">Feb<"));
+        assert!(html.contains(">Mar<"));
+        // The second label is minor, for a phone to leave out.
+        assert!(html.contains("class=\"t m\""), "{html}");
     }
 
     #[test]
     fn the_calendar_gives_a_silent_day_the_track_and_not_the_palest_step() {
-        let svg = calendar(&series(&[0, 5, 0]), 400.0, None, None);
+        let (svg, width) = calendar(&series(&[0, 5, 0]), 11.0, None);
         assert!(svg.contains("fill=\"var(--track)\""));
         assert!(svg.contains("data-tip=\"2025-01-01 &#183; 0\""));
+        // One week, at fixed squares: as wide as it needs, no wider.
+        assert!(width < 60.0, "{width}");
+    }
+
+    #[test]
+    fn a_long_calendar_keeps_its_squares_and_grows_instead() {
+        let (_, short) = calendar(&series(&[1; 70]), 11.0, None);
+        let (long, wide) = calendar(&series(&[1; 1600]), 11.0, None);
+        assert!(wide > short * 10.0);
+        assert!(long.contains("width=\"11\""));
     }
 
     #[test]
     fn a_matrix_greys_its_own_diagonal_rather_than_letting_it_set_the_scale() {
         let labels: Vec<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
-        let svg = matrix(&labels, &[vec![900, 1], vec![2, 900]], 400.0, 176.0);
+        let keys: Vec<String> = ["k1", "k2"].iter().map(|s| s.to_string()).collect();
+        let svg = matrix(&labels, &keys, &[vec![900, 1], vec![2, 900]], 400.0, 176.0);
         assert_eq!(svg.matches("var(--self)").count(), 2);
+        // Every cell names both of its people, for Focus.
+        assert!(svg.contains("data-who=\"k1 k2\""));
         // 900 on the diagonal must not have set the top: the off-diagonal
         // values are 1 and 2, so 2 is the maximum shade.
         assert!(svg.contains("&#8594;"));
@@ -355,8 +401,41 @@ mod tests {
 
     #[test]
     fn a_bar_row_falls_back_to_its_own_number_when_given_no_note() {
-        let rows = vec![("Ana".to_string(), 12.0, String::new())];
-        let svg = bars_h(&rows, 400.0, 22.0, 150.0, 64.0);
-        assert!(svg.contains(">12<"), "{svg}");
+        let rows = vec![HBar::new("Ana", 12.0, "")];
+        let html = hbars(&rows, None);
+        assert!(html.contains("<span class=\"hv\">12</span>"), "{html}");
+    }
+
+    #[test]
+    fn a_ranked_bar_is_real_text_escaped_and_tied_to_its_person() {
+        let rows = vec![
+            HBar::new("Bob & Co <2>", 10.0, "10").who("user2"),
+            HBar::new("Ana", 5.0, "5").who("user1"),
+        ];
+        let html = hbars(&rows, Some(0));
+        assert!(
+            html.contains("<li class=\"hot\" data-who=\"user2\">"),
+            "{html}"
+        );
+        assert!(html.contains("Bob &amp; Co &lt;2&gt;"));
+        assert!(
+            html.contains("width:50%"),
+            "half the top, half the bar: {html}"
+        );
+    }
+
+    #[test]
+    fn the_ribbon_marks_its_peak_and_carries_its_grid_for_the_script() {
+        let svg = ribbon(&series(&[1, 9, 3]), 100.0, 50.0, None, true, "hero");
+        assert_eq!(svg.matches("ribbon-bar hot").count(), 1);
+        assert!(svg.contains("data-b=\"3\""), "{svg}");
+        assert!(svg.contains("data-top=\"9\""), "{svg}");
+    }
+
+    #[test]
+    fn a_mirror_puts_one_person_above_the_line_and_the_other_below() {
+        let svg = mirror(&series(&[4, 0]), &series(&[0, 2]), 100.0, 60.0);
+        assert_eq!(svg.matches("class=\"one\"").count(), 1);
+        assert_eq!(svg.matches("class=\"two\"").count(), 1);
     }
 }

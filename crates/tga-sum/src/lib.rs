@@ -118,16 +118,35 @@ pub enum Length {
     Detailed,
     /// Headed sections of bullets, cited.
     Sections,
+    /// A catch-up: one bold line, then a few cited bullets. What a catch-up
+    /// across many chats writes for each, to be skimmed one after another.
+    Brief,
 }
 
 impl Length {
-    pub const ALL: [Length; 3] = [Length::Short, Length::Detailed, Length::Sections];
+    pub const ALL: [Length; 4] = [
+        Length::Brief,
+        Length::Short,
+        Length::Detailed,
+        Length::Sections,
+    ];
 
     pub fn code(self) -> &'static str {
         match self {
             Length::Short => "short",
             Length::Detailed => "detailed",
             Length::Sections => "sections",
+            Length::Brief => "brief",
+        }
+    }
+
+    /// What the window calls it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Length::Short => "Short",
+            Length::Detailed => "Detailed",
+            Length::Sections => "Sections",
+            Length::Brief => "Brief",
         }
     }
 
@@ -139,6 +158,7 @@ impl Length {
     fn answer(self) -> usize {
         match self {
             Length::Short => 700,
+            Length::Brief => 1_000,
             Length::Detailed | Length::Sections => 2_500,
         }
     }
@@ -399,7 +419,12 @@ pub fn summarise(
     }
     summary.quiet = groups.quiet;
 
-    if headed && summary.sections.len() > 1 && request.length != Length::Short {
+    // A short or brief summary is the overview already: each topic's opens
+    // on its gist.
+    if headed
+        && summary.sections.len() > 1
+        && matches!(request.length, Length::Detailed | Length::Sections)
+    {
         on(Event::Section(None));
         let (text, cut) = run.overview(&summary.sections, on)?;
         summary.cut |= cut;

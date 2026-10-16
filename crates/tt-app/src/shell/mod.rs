@@ -15,13 +15,14 @@
 //! drains in is one a worker asked for. **Nothing in this crate may send an
 //! event by any route that does not wake the context.**
 
+mod analysis;
 mod bubbles;
+mod catchup;
 mod chats;
 mod chrome;
 mod commands;
 mod events;
 mod keys;
-mod library;
 mod queue;
 mod settings;
 mod signin;
@@ -77,36 +78,36 @@ pub enum View {
     /// Read what the databases hold: one chat at a time, deleted and edited
     /// messages marked, every earlier version, a search.
     ///
-    /// **Not on the rail: a place you go into from the Library**, by a row's
+    /// **Not on the rail: a place you go into from Analysis**, by a row's
     /// Read, with a way back. It was a fourth tab with a database picker of
     /// its own, which made two listings of the same files. It needs no
     /// sign-in and no connection.
     Viewer,
     /// Every export on disk, and a report for each: what was the analyser's
-    /// whole window, and now also the way into the Viewer. See [`library`].
-    Library,
+    /// whole window, and now also the way into the Viewer. See [`analysis`].
+    Analysis,
     /// What happened in a chat between two days, written by the local model.
     /// See [`summaries`].
     Summaries,
 }
 
 impl View {
-    /// The rail, in order. The Viewer is reached through the Library, or
+    /// The rail, in order. The Viewer is reached through Analysis, or
     /// through a summary's citation.
     pub const ALL: [View; 5] = [
         View::Chats,
         View::Queue,
-        View::Library,
+        View::Analysis,
         View::Summaries,
         View::Settings,
     ];
 
     /// Which rail entry is lit while this view shows: the Viewer's is the
-    /// Library's, because that is where it was opened from and where its back
+    /// Analysis's, because that is where it was opened from and where its back
     /// link goes.
     pub fn on_rail(self) -> View {
         match self {
-            View::Viewer => View::Library,
+            View::Viewer => View::Analysis,
             v => v,
         }
     }
@@ -114,14 +115,14 @@ impl View {
     /// The word on the rail and the top bar (TELEGRAMTOOLS.md §4.4). The
     /// enum keeps its old names; what a person reads is Activity, because the
     /// view now holds report runs as well as the export queue, and the reader
-    /// is a verb on a Library row rather than a place of its own.
+    /// is a verb on an Analysis row rather than a place of its own.
     pub fn label(self) -> &'static str {
         match self {
             View::Chats => "Chats",
             View::Settings => "Settings",
             View::Queue => "Activity",
             View::Viewer => "Read",
-            View::Library => "Library",
+            View::Analysis => "Analysis",
             View::Summaries => "Summaries",
         }
     }
@@ -310,9 +311,9 @@ pub struct Shell {
     /// The Viewer's state: which database is open, its rows, the selection,
     /// the search. See [`viewer::ViewerState`].
     viewer: viewer::ViewerState,
-    /// The Library's state: its folder, its rows, and the analyser run. See
-    /// [`library::Library`].
-    library: library::Library,
+    /// The Analysis view's state: its folder, its rows, and the analyser run.
+    /// See [`analysis::Analysis`].
+    analysis: analysis::Analysis,
     /// The Summaries view's state, and the model server it started, if it
     /// did. See [`summaries`].
     summaries: summaries::SummariesState,
@@ -379,6 +380,8 @@ impl Shell {
         summaries.length =
             tga_run::tga_sum::Length::parse(&settings.summary_length).unwrap_or_default();
         summaries.lang = tga_run::tga_sum::Lang::parse(&settings.summary_lang).unwrap_or_default();
+        summaries.catchup.days = tga_run::catchup::Days::parse(&settings.catchup_days);
+        summaries.from_last = settings.summary_from_last;
         Self {
             summaries,
             next_sync,
@@ -423,7 +426,7 @@ impl Shell {
             frame_no: 0,
             shot_busy_until: 0,
             viewer: Default::default(),
-            library: Default::default(),
+            analysis: Default::default(),
             account: None,
             sign_out_armed: false,
             signing_out: false,
@@ -590,7 +593,7 @@ impl Shell {
         self.reset_armed = false;
         // **The Viewer's way back lasts as long as the visit.** Left set, a
         // citation's `Summaries` outlived it: the next way into the Viewer —
-        // the Library's search — offered a way back to a view it did not come
+        // Analysis's search — offered a way back to a view it did not come
         // from, and `summaries_idle` counted the reading as time in Summaries,
         // so the model server it started was never let go.
         if body != View::Viewer {
@@ -600,11 +603,11 @@ impl Shell {
         self.body_pinned = true;
     }
 
-    /// A Library row's Read: open that chat in the Viewer and go there.
+    /// An Analysis row's Read: open that chat in the Viewer and go there.
     ///
     /// Pinned like a rail click, because it is one — the user asked to be in
     /// the Viewer, and a run starting must not take them out of it.
-    pub(super) fn read(&mut self, read: library::Read) {
+    pub(super) fn read(&mut self, read: analysis::Read) {
         let db = tgx_tg::viewer::Database::from(read);
         if !self.viewer.is_open(&db.path, db.chat_id) {
             self.viewer_open(db, None);
@@ -720,9 +723,9 @@ fn schedule_from(settings: &Settings, now: std::time::Instant) -> Option<std::ti
 /// `u32`s. Raw because a PNG encoder is a dependency this app has no other use
 /// for; `tools/shot.ps1` turns it into an image.
 ///
-/// `TGX_SHOT_VIEW=chats|settings|queue|viewer|library|summaries` picks which view to draw
+/// `TGX_SHOT_VIEW=chats|settings|queue|viewer|analysis|summaries` picks which view to draw
 /// first, `TGX_SHOT_DB=<part of a title>` which database the viewer opens, and
-/// `TGX_SHOT_LIBRARY=<folder>` which folder the Library lists — never the
+/// `TGX_SHOT_ANALYSIS=<folder>` which folder Analysis lists — never the
 /// real destination, which is other people's chat titles.
 ///
 /// Nothing here runs unless the variable is set, and it is read once.
@@ -744,8 +747,8 @@ mod shot {
             .map(|s| s.to_lowercase())
     }
 
-    pub(super) fn library() -> Option<String> {
-        std::env::var("TGX_SHOT_LIBRARY")
+    pub(super) fn analysis() -> Option<String> {
+        std::env::var("TGX_SHOT_ANALYSIS")
             .ok()
             .filter(|s| !s.is_empty() && path().is_some())
     }
@@ -804,10 +807,15 @@ mod shot {
             "settings" => Some(View::Settings),
             "queue" | "activity" => Some(View::Queue),
             "viewer" => Some(View::Viewer),
-            "library" => Some(View::Library),
-            "summaries" => Some(View::Summaries),
+            "analysis" => Some(View::Analysis),
+            "summaries" | "onechat" => Some(View::Summaries),
             _ => None,
         }
+    }
+
+    /// Summaries on its One chat page rather than Catch up.
+    pub(super) fn one_chat() -> bool {
+        std::env::var("TGX_SHOT_VIEW").is_ok_and(|v| v == "onechat")
     }
 
     /// Ask on the settling frame, write on the frame the answer arrives.
@@ -848,11 +856,17 @@ impl eframe::App for Shell {
         // **Before anything is drained.** Senders handed out before this cannot
         // repaint, and the startup jobs below are handed one immediately.
         self.bridge.wake_with(ctx);
+        if ctx.input(|i| i.viewport().close_requested()) {
+            log::info!("close asked for");
+        }
         if !self.started {
             self.started = true;
             self.start_up();
             if let Some(view) = shot::view() {
                 self.show(view);
+            }
+            if shot::one_chat() {
+                self.summaries.mode = summaries::Mode::OneChat;
             }
             // A photograph is always at 100%, so two of them compare.
             if shot::path().is_none() {
@@ -877,25 +891,25 @@ impl eframe::App for Shell {
         }
         self.rebuild_rows_if_stale();
         // The analyser's workers report on their own channels, not the
-        // bridge's; they wake the window the same way. See `library`.
-        self.library.drain(ctx);
+        // bridge's; they wake the window the same way. See `analysis`.
+        self.analysis.drain(ctx);
         // What a report contains is a setting; the run reads it off the
-        // Library's state when it starts, so it is handed over before any
-        // start this frame can happen.
-        self.library.options(
+        // Analysis view's state when it starts, so it is handed over before
+        // any start this frame can happen.
+        self.analysis.options(
             self.settings.report_digest,
             self.settings.report_fonts,
             self.settings.report_handles,
         );
-        self.library.report_waiting(ctx);
-        if self.body == View::Library {
-            self.library.follow(&self.settings.output_dir, ctx);
-            self.library.dropped(ctx);
+        self.analysis.report_waiting(ctx);
+        if self.body == View::Analysis {
+            self.analysis.follow(&self.settings.output_dir, ctx);
+            self.analysis.dropped(ctx);
         }
-        // The Summaries view lists the Library's chats, so it opens the same
-        // folder the first time it is shown.
+        // The Summaries view lists the Analysis view's chats, so it opens the
+        // same folder the first time it is shown.
         if self.body == View::Summaries {
-            self.library.follow(&self.settings.output_dir, ctx);
+            self.analysis.follow(&self.settings.output_dir, ctx);
         }
         self.summaries.drain();
         self.summaries_idle(ctx);
@@ -974,18 +988,18 @@ impl eframe::App for Shell {
                 View::Settings => self.settings_panel(ui),
                 View::Queue => self.queue_view(ui),
                 View::Viewer => self.viewer_panel(ui),
-                View::Library => self.library.panel(ui, &p),
+                View::Analysis => self.analysis.panel(ui, &p),
                 View::Summaries => self.summaries_panel(ui, ctx),
             });
         // A row's Read, pressed in the frame just drawn.
-        if let Some(read) = self.library.read.take() {
+        if let Some(read) = self.analysis.read.take() {
             self.read(read);
         }
         // A summary's citation, clicked.
         if let Some((read, id)) = self.summaries.cite.take() {
             self.summaries_cite(read, id);
         }
-        if let Some((needle, dir)) = self.library.search_all.take() {
+        if let Some((needle, dir)) = self.analysis.search_all.take() {
             self.search_everywhere(needle, dir);
         }
 
@@ -1006,7 +1020,7 @@ impl eframe::App for Shell {
             if self.viewer.listing
                 || self.viewer.loading
                 || pictures_pending
-                || self.library.busy()
+                || self.analysis.busy()
                 || self.summaries.busy()
             {
                 self.shot_busy_until = self.frame_no;
@@ -1020,6 +1034,14 @@ impl eframe::App for Shell {
     /// the same moment, and it runs before the window is torn down rather than
     /// after.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let t = std::time::Instant::now();
+        let mut steps = Vec::new();
+        let mut lap = |name: &str, since: &mut std::time::Instant| {
+            steps.push(format!("{name} {:.2}s", since.elapsed().as_secs_f64()));
+            *since = std::time::Instant::now();
+        };
+        let mut since = t;
+        log::info!("closing: {} job(s) in flight", self.bridge.in_flight());
         // The window's place and zoom, kept for the next launch. Saved here
         // and not as they change: a drag is a hundred frames of positions,
         // and only the last one is wanted. A photograph keeps nothing.
@@ -1028,23 +1050,32 @@ impl eframe::App for Shell {
                 log::warn!("could not save the window's place: {e}");
             }
         }
+        lap("settings", &mut since);
         self.cancel.cancel();
         // The analyser stops between reports, never inside one. Its worker is
         // not the bridge's and nothing here waits for it — as in the analyser's
         // own window. A report being written at the moment of quitting is
         // lost rather than cut short: `refresh::one` renames it into place.
-        self.library.stop();
+        self.analysis.stop();
         // A summary being written is abandoned; the notes of every part it
         // finished are already kept. A model server this window started goes
         // with it — 15 GB of video memory is not something to leave behind.
         self.summaries.stop();
         self.summaries.keeper.stop();
+        lap("model server", &mut since);
         self.bridge.shutdown(std::time::Duration::from_secs(10));
+        lap("workers", &mut since);
         // After the drain, so an Open media still writing is not raced. See
         // `tgx_tg::viewer::temp_dir` for why the copies do not outlive the
         // window; `main` clears it on the way in as well, for the run that
         // ended without reaching here.
         tgx_tg::viewer::clear_temp();
+        lap("temp", &mut since);
+        log::info!(
+            "closed in {:.2}s: {}",
+            t.elapsed().as_secs_f64(),
+            steps.join(", ")
+        );
     }
 }
 

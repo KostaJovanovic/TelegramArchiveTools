@@ -5,6 +5,12 @@ use tga_stats::Stats;
 use super::*;
 use crate::charts::{self, esc, thousands};
 
+/// The width the heat grid's labels are a reading size at. Narrower than that
+/// it pans inside its frame rather than shrinking.
+const GRID_MIN: f64 = 900.0;
+/// One calendar square, in pixels, at every screen width.
+const CAL_CELL: f64 = 11.0;
+
 pub fn rhythm(stats: &Stats) -> String {
     let act = &stats.activity;
     if is_empty_activity(act) {
@@ -21,24 +27,27 @@ pub fn rhythm(stats: &Stats) -> String {
     let hour_weekday: Vec<Vec<i64>> = act.hour_weekday.iter().map(|row| row.to_vec()).collect();
     let series = &act.per_day;
 
-    let hour_chart = charts::columns(
-        &hours,
-        &per_hour,
-        WIDTH / 2.0 - 28.0,
-        190.0,
-        3,
-        " messages",
-        None,
-    );
-    let day_chart = charts::columns(
-        &weekdays,
-        &per_weekday,
-        WIDTH / 2.0 - 28.0,
-        190.0,
-        1,
-        " messages",
-        None,
-    );
+    let messages = |n: i64| format!("{} messages", thousands(n));
+    let hour_chart = match duo(stats) {
+        Some((a, b)) => {
+            duo_key(&a.name, &b.name)
+                + &charts::vcols2(&hours, &a.hours, &b.hours, (&a.name, &b.name), 3)
+        }
+        None => charts::vcols(&charts::Cols {
+            labels: &hours,
+            values: &per_hour,
+            shown: &messages,
+            every: 3,
+            id: "hours-chart",
+        }),
+    };
+    let day_chart = charts::vcols(&charts::Cols {
+        labels: &weekdays,
+        values: &per_weekday,
+        shown: &messages,
+        every: 1,
+        id: "",
+    });
     let grid_scale = Quantiles::new(hour_weekday.iter().flatten().copied());
     let heat = charts::heatgrid(
         &weekdays,
@@ -50,7 +59,7 @@ pub fn rhythm(stats: &Stats) -> String {
         Some(&grid_scale),
     );
     let cal_scale = Quantiles::new(series.iter().map(|day| day.n));
-    let cal = charts::calendar(series, WIDTH, None, Some(&cal_scale));
+    let (cal, cal_width) = charts::calendar(series, CAL_CELL, Some(&cal_scale));
 
     let full = [
         "Mondays",
@@ -63,6 +72,43 @@ pub fn rhythm(stats: &Stats) -> String {
     ];
     let peak_hour = argmax(&per_hour);
     let peak_day = full[argmax(&per_weekday).min(6)];
+    let quiet_day = {
+        let low = per_weekday.iter().min().copied().unwrap_or(0);
+        full[per_weekday
+            .iter()
+            .position(|n| *n == low)
+            .unwrap_or(0)
+            .min(6)]
+    };
+
+    // The share of the day's messages that fall in office hours is the one
+    // number that says whether this is a work chat or an evening one.
+    let total: i64 = per_hour.iter().sum();
+    let office: i64 = per_hour[9..18].iter().sum();
+    let hour_take = format!(
+        "Busiest at <b>{peak_hour:02}:00</b>; {} of messages arrive between 09:00 and 18:00.",
+        share(office, total)
+    );
+    let day_take = format!("<b>{peak_day}</b> are busiest, {quiet_day} quietest.");
+
+    let (cell_day, cell_hour, cell_n) = act
+        .hour_weekday
+        .iter()
+        .enumerate()
+        .flat_map(|(d, row)| row.iter().enumerate().map(move |(h, n)| (d, h, *n)))
+        .max_by_key(|(d, h, n)| (*n, std::cmp::Reverse((*d, *h))))
+        .unwrap_or((0, 0, 0));
+    let grid_take = format!(
+        "The single busiest hour of the week is <b>{} {cell_hour:02}:00</b>, {}.",
+        WEEKDAYS[cell_day.min(6)],
+        messages(cell_n)
+    );
+    let active = act.active_days;
+    let cal_take = format!(
+        "Messages on {} of {} days.",
+        thousands(active as i64),
+        thousands(act.span_days as i64)
+    );
 
     let hour_rows: Vec<Vec<String>> = per_hour
         .iter()
@@ -70,26 +116,46 @@ pub fn rhythm(stats: &Stats) -> String {
         .map(|(h, n)| vec![format!("{h:02}:00"), thousands(*n)])
         .collect();
 
+    let hour_method = if is_duo(stats) {
+        "Local time, as the export recorded it. Each person's own messages per \
+         hour, side by side on one scale."
+    } else {
+        "Local time, as the export recorded it. Every message, across the whole archive."
+    };
+
     format!(
-        "{}<div class=\"cols2\"><div><h3>Hour of day</h3>{hour_chart}\
-         <p class=\"caption\">Local time, as the export recorded it.</p></div>\
-         <div><h3>Day of week</h3>{day_chart}\
-         <p class=\"caption\">Every message, across the whole archive.</p></div></div>\
-         <h3>Both at once</h3><div class=\"split\"><div>{heat}</div><aside>{}\
-         <p class=\"caption\">Each cell is one hour of one weekday, summed over \
-         the whole archive. An empty cell is an hour in which nothing was ever \
-         said. {}</p></aside></div>\
-         <h3>Every day</h3><div class=\"split\"><div>{cal}</div><aside>{}\
-         <p class=\"caption\">One square per day. {}</p></aside></div>{}</section>",
+        "{}<div class=\"cols2\">{}{}</div>{}{}{}</section>",
         head(
             "Rhythm",
             &format!("busiest at {peak_hour:02}:00, on {peak_day}"),
             "rhythm"
         ),
-        charts::legend(5, "quiet", "busy"),
-        esc(&grid_scale.caption("messages")),
-        charts::legend(5, "silent", "busiest"),
-        esc(&cal_scale.caption("messages")),
+        panel("Hour of day", &hour_take, hour_method, &hour_chart),
+        panel(
+            "Day of week",
+            &day_take,
+            "Every message, across the whole archive, by the weekday it was sent on.",
+            &day_chart
+        ),
+        panel(
+            "Hour and weekday",
+            &grid_take,
+            &format!(
+                "Each cell is one hour of one weekday, summed over the whole \
+                 archive. An empty cell is an hour in which nothing was ever said. {}",
+                esc(&grid_scale.caption("messages"))
+            ),
+            &(charts::scroll(&heat, GRID_MIN) + &charts::legend(5, "quiet", "busy")),
+        ),
+        panel(
+            "Every day",
+            &cal_take,
+            &format!(
+                "One square per day, a column per week, newest on the right. {}",
+                esc(&cal_scale.caption("messages"))
+            ),
+            &(charts::scroll_fixed(&cal, cal_width) + &charts::legend(5, "silent", "busiest")),
+        ),
         data_view(
             "Hour of day, as numbers",
             &table(&[("Hour", false), ("Messages", true)], &hour_rows)

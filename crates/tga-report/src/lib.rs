@@ -10,9 +10,13 @@
 //! `include_str!`. They are copied into the report verbatim, so `.gitattributes`
 //! pins their line endings for the same reason it pins the golden's.
 //!
-//! The visual language is Swiss/International: hairlines do the dividing,
-//! corners are square, numbers are set in Geist Mono, and section headings are
-//! letterspaced uppercase micro-type. There are no cards.
+//! The visual language is quiet: each chart sits in a low panel with one
+//! plain sentence above it saying what it shows, and the method behind a (?)
+//! that opens on a tap. Bars are a muted grey and only the mark a chart points
+//! at is red. Numbers are set in Geist Mono, and section headings are
+//! letterspaced uppercase micro-type. The page is read on a phone as often as
+//! on a desk, so every mark whose label is the point is laid out by the
+//! browser rather than scaled inside an SVG; see `charts::html`.
 //!
 //! **This crate depends on neither `tga-read` nor `tga-metrics.`** It renders
 //! from a [`tga_stats::Stats`], which is exactly what `--stats` dumps, and that
@@ -135,27 +139,51 @@ pub fn names_from_stats(stats: &Stats) -> Names {
 pub fn render(stats: &Stats, names: &Names, notes: &Notes, options: &Options) -> String {
     let title = format!("{} — archive report", stats.export.name);
 
-    let body = format!(
-        "{}{}{}{}{}{}{}{}{}{}</section>{}{}{}",
-        sections::masthead(stats),
-        sections::timeline(stats, notes, names),
-        sections::rhythm(stats),
-        sections::people(stats),
-        // Straight after the people table, because it answers the question that
-        // table provokes: these are the ones who talked, so who else is here?
-        sections::members(stats),
-        sections::conversation(stats, names),
-        sections::between(stats),
-        sections::said(stats),
-        // The churn section's heading is written here rather than inside
-        // `churn`, because that function returns nothing at all for an export
-        // with no dated months and the `<section>` still has to close.
-        section_head("Coming and going", "churn"),
-        sections::churn(stats),
-        sections::topics(stats),
-        sections::records(stats),
-        sections::notes(stats, &notes.source, &options.source, &options.stamp),
-    );
+    // The churn section's heading is written here rather than inside `churn`,
+    // because that function returns nothing at all for an export with no
+    // dated months and the `<section>` still has to close. A private chat has
+    // no comings and goings to speak of, and gets no section.
+    let churn = if sections::is_duo(stats) {
+        String::new()
+    } else {
+        format!(
+            "{}{}</section>",
+            sections::head("Coming and going", "", "churn"),
+            sections::churn(stats)
+        )
+    };
+    let people_title = if sections::is_duo(stats) {
+        "The two of you"
+    } else {
+        "People"
+    };
+    let parts: [(&str, &str, String); 10] = [
+        ("whole", "Timeline", sections::timeline(stats, notes, names)),
+        ("rhythm", "Rhythm", sections::rhythm(stats)),
+        ("people", people_title, sections::people(stats)),
+        ("talk", "Conversation", sections::conversation(stats, names)),
+        ("between", "Between people", sections::between(stats)),
+        ("said", "What was said", sections::said(stats)),
+        ("churn", "Coming and going", churn),
+        ("topics", "Topics", sections::topics(stats)),
+        ("records", "Records", sections::records(stats)),
+        (
+            "notes",
+            "Notes",
+            sections::notes(stats, &notes.source, &options.source, &options.stamp),
+        ),
+    ];
+    // The nav is built from what was written, so no link scrolls nowhere.
+    let nav: Vec<(&str, &str)> = parts
+        .iter()
+        .filter(|(_, _, html)| !html.is_empty())
+        .map(|(anchor, title, _)| (*anchor, *title))
+        .collect();
+    let mut body = sections::masthead(stats, &nav);
+    for (_, _, html) in &parts {
+        body.push_str(html);
+    }
+    body.push_str(&sections::focus_data(stats));
 
     // The compact presence rows leave their bucket labels out of every cell —
     // that omission is most of the size budget — so the labels are written into
@@ -206,14 +234,6 @@ fn kind_css(notes: &Notes) -> String {
     (0..kinds.len())
         .map(|k| format!("html.hide-k{k} .ev.k{k},html.hide-k{k} .events li.k{k}{{display:none}}"))
         .collect()
-}
-
-fn section_head(title: &str, anchor: &str) -> String {
-    format!(
-        "<section id=\"{}\"><div class=\"sechead\"><h2>{}</h2><span class=\"count\"></span></div>",
-        esc(anchor),
-        esc(title)
-    )
 }
 
 #[cfg(test)]
@@ -411,7 +431,9 @@ mod tests {
             }];
         }
         let html = render(&stats, &Names::new(), &Notes::default(), &options());
-        assert!(html.contains("<th class=\"n\">\u{2192}</th><th class=\"n\">\u{2190}</th>"));
+        assert!(html.contains(
+            "<th class=\"n\" data-sort=\"n\">\u{2192}</th><th class=\"n\" data-sort=\"n\">\u{2190}</th>"
+        ));
         assert!(!html.contains("&amp;rarr;") && !html.contains("&amp;larr;"));
     }
 
@@ -432,7 +454,9 @@ mod tests {
             };
         }
         let old = render(&stats, &Names::new(), &Notes::default(), &options());
-        assert!(old.contains("<th class=\"n\">Stayed</th><th class=\"n\">Came back</th>"));
+        assert!(old.contains(
+            "<th class=\"n\" data-sort=\"n\">Stayed</th><th class=\"n\" data-sort=\"n\">Came back</th>"
+        ));
         assert!(old.contains(
             "<td>2025-03</td><td class=\"n\">3</td><td class=\"n\">0</td>\
              <td class=\"n\">2</td><td class=\"n\">1</td>"
@@ -445,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reactor_off_the_member_list_is_not_sent_to_the_members_table() {
+    fn everybody_quiet_has_a_row_and_the_right_population() {
         let person = |key: &str, messages: i64, listed: bool| tga_stats::Person {
             key: key.into(),
             name: key.into(),
@@ -466,15 +490,72 @@ mod tests {
         stats.people.silent_members = 1;
         stats.people.quiet_unlisted = 1;
         let html = render(&stats, &Names::new(), &Notes::default(), &options());
-        assert!(html.contains("1 more person appears in this archive without ever posting"));
+        // One table: the speaker, the silent member and the reactor each have
+        // a row, and the quiet two are filed under Never posted.
+        assert!(html.contains("<tr class=\"posted\" data-who=\"user1\">"));
+        assert!(html.contains("<tr class=\"silent\" data-who=\"user2\">"));
+        assert!(html.contains("<tr class=\"silent\" data-who=\"user9\">"));
+        assert!(
+            html.contains("data-f=\"silent\" aria-pressed=\"false\">Never posted <span>2</span>")
+        );
+        assert!(
+            !html.contains("id=\"members\""),
+            "Members is part of People now"
+        );
 
-        // With no member list, everybody quiet is in the Members section.
+        // With no member list the method says where the quiet rows came from.
         stats.people.known_members = 0;
         stats.people.silent_members = 0;
         stats.people.quiet_unlisted = 2;
         let html = render(&stats, &Names::new(), &Notes::default(), &options());
-        assert!(html.contains("2 more people appear in this archive without ever posting"));
-        assert!(html.contains("<section id=\"members\">"));
+        assert!(html.contains("This export carries no member list."));
+        assert!(html.contains("<tr class=\"silent\" data-who=\"user9\">"));
+    }
+
+    #[test]
+    fn a_private_chat_gets_the_side_by_side_layout() {
+        let person = |key: &str, messages: i64| tga_stats::Person {
+            key: key.into(),
+            name: key.into(),
+            messages,
+            listed: true,
+            ..Default::default()
+        };
+        let mut stats = bare();
+        stats.activity = dated();
+        stats.people.rows = vec![person("ana", 40), person("bob", 10)];
+        stats.people.speakers = 2;
+        let html = render(&stats, &Names::new(), &Notes::default(), &options());
+        assert!(html.contains("A private chat between ana and bob"));
+        assert!(html.contains("class=\"chart ribbon mirror\""));
+        assert!(html.contains("<table class=\"vs\">"));
+        assert!(
+            !html.contains("class=\"rows people-table\""),
+            "no ranked table of two"
+        );
+        assert!(!html.contains("id=\"churn\""), "no comings and goings");
+        assert!(
+            !html.contains("id=\"focus-data\""),
+            "nothing to focus between two"
+        );
+    }
+
+    #[test]
+    fn a_name_cannot_close_the_focus_script() {
+        let mut stats = bare();
+        stats.activity = dated();
+        stats.people.rows = ["a", "b", "c"]
+            .iter()
+            .map(|k| tga_stats::Person {
+                key: (*k).into(),
+                name: "</script><img src=x>".into(),
+                messages: 3,
+                ..Default::default()
+            })
+            .collect();
+        let html = render(&stats, &Names::new(), &Notes::default(), &options());
+        assert!(html.contains("id=\"focus-data\""));
+        assert!(!html.contains("</script><img"));
     }
 
     #[test]
@@ -593,7 +674,7 @@ mod tests {
         stats.activity = dated();
         let html = render(&stats, &Names::new(), &Notes::default(), &options());
         assert!(html.contains("class=\"chart ribbon hero\""));
-        assert!(html.contains("class=\"chart axis-strip\""));
+        assert!(html.contains("class=\"taxis\""));
         assert!(html.contains("class=\"chart calendar\""));
         // The caption states the grain, which is the whole point of bucketing.
         assert!(html.contains("One bar per day; the tallest is 3 messages."));

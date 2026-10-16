@@ -1,4 +1,4 @@
-//! The Library: every export under a folder, and a report for each.
+//! Analysis: every export under a folder, and a report for each.
 //!
 //! **This was the analyser's whole window**, `TelegramAnalyser.exe`. It is a
 //! view of TelegramTools now, and the folder it opens on is the one the
@@ -47,22 +47,22 @@ const COUNT_W: f32 = 80.0;
 const MARK_W: f32 = 96.0;
 
 #[derive(Default)]
-pub struct Library {
+pub struct Analysis {
     pub(super) state: State,
     /// The run in progress. `None` between runs.
     run: Option<job::Run>,
     /// Titles and counts arriving for the rows. `None` once the counter has
     /// finished and hung up.
     counts: Option<Receiver<Counted>>,
-    /// The destination the Library last opened on, by itself. `None` until the
-    /// view is first shown, so a launch that never opens the Library never
+    /// The destination this view last opened on, by itself. `None` until the
+    /// view is first shown, so a launch that never opens Analysis never
     /// scans a drive for it.
     followed: Option<String>,
     /// A row's Read, pressed this frame: the database and the chat in it. The
     /// shell takes it and opens the Viewer — this view has no Viewer to open.
     pub(super) read: Option<Read>,
     /// Exports the exporter has finished, waiting for the analyser: the
-    /// database file or the export folder of each. See [`Library::report_later`].
+    /// database file or the export folder of each. See [`Analysis::report_later`].
     waiting: Vec<PathBuf>,
     /// The search box's buffer: text to find in every database's messages.
     /// Not the filter beside it, which matches export titles.
@@ -107,7 +107,7 @@ fn wake(ctx: &egui::Context) -> Wake {
     Arc::new(move || ctx.request_repaint())
 }
 
-impl Library {
+impl Analysis {
     /// Point the view at the destination: the first time it is shown, and
     /// again whenever the destination changes in Settings — **unless the
     /// folder was pointed somewhere else by hand**, which is a choice the next
@@ -115,7 +115,7 @@ impl Library {
     ///
     /// A photograph never opens the real destination, because the rows are
     /// chat titles and a shot is something that gets pasted into an issue; it
-    /// lists `TGX_SHOT_LIBRARY` or nothing.
+    /// lists `TGX_SHOT_ANALYSIS` or nothing.
     pub(super) fn follow(&mut self, output_dir: &str, ctx: &egui::Context) {
         // Not mid-run: the rows are the run's. The change is picked up on the
         // first frame after it finishes.
@@ -135,7 +135,7 @@ impl Library {
             if !first {
                 return;
             }
-            super::shot::library()
+            super::shot::analysis()
         } else {
             Some(output_dir.to_string()).filter(|d| !d.trim().is_empty())
         };
@@ -188,7 +188,7 @@ impl Library {
         self.spawn(targets, ctx);
     }
 
-    /// What every report contains — Settings › Reports. Held on the state
+    /// What every report contains — Settings › Analysis. Held on the state
     /// because that is what `spawn` builds the request from, and what the
     /// analyser's own tests drive.
     pub(super) fn options(&mut self, digest: bool, fonts: bool, handles: bool) {
@@ -199,7 +199,7 @@ impl Library {
 
     /// "Report after export": a chat the exporter has just finished, to be
     /// reported on as soon as the analyser is free. See
-    /// [`Library::report_waiting`].
+    /// [`Analysis::report_waiting`].
     pub(super) fn report_later(&mut self, export: PathBuf) {
         if !self.waiting.contains(&export) {
             self.waiting.push(export);
@@ -419,7 +419,7 @@ impl Library {
         }
         // Head and foot as panels, the list in what is left: a panel
         // measures itself, so nothing here is a height measured by hand.
-        egui::TopBottomPanel::top("library-head")
+        egui::TopBottomPanel::top("analysis-head")
             .frame(bare)
             .show_separator_line(false)
             .show_inside(ui, |ui| {
@@ -428,7 +428,7 @@ impl Library {
                 ui.add_space(space::STEP);
                 rule(ui, p);
             });
-        egui::TopBottomPanel::bottom("library-foot")
+        egui::TopBottomPanel::bottom("analysis-foot")
             .frame(bare)
             .show_separator_line(false)
             .show_inside(ui, |ui| {
@@ -455,7 +455,7 @@ impl Library {
                 filter.request_focus();
             }
             ui.label(meta("Show", p));
-            egui::ComboBox::from_id_salt("library-show")
+            egui::ComboBox::from_id_salt("analysis-show")
                 .selected_text(text(self.state.show.label(), p))
                 .width(170.0)
                 .show_ui(ui, |ui| {
@@ -464,7 +464,7 @@ impl Library {
                     }
                 });
             ui.label(meta("Sort", p));
-            egui::ComboBox::from_id_salt("library-sort")
+            egui::ComboBox::from_id_salt("analysis-sort")
                 .selected_text(text(self.state.sort.label(), p))
                 .width(190.0)
                 .show_ui(ui, |ui| {
@@ -513,7 +513,7 @@ impl Library {
         // row for an answer that cannot change between two of them.
         let now = SystemTime::now();
         egui::ScrollArea::vertical()
-            .id_salt("library-list")
+            .id_salt("analysis-list")
             .auto_shrink([false, false])
             .show_rows(ui, ROW_HEIGHT, visible.len(), |ui, range| {
                 for i in range {
@@ -541,6 +541,9 @@ impl Library {
         let mut act = None;
         inside(ui, rect, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
+            // A label is selectable text by default, and selectable text takes
+            // the click: the title and the count were where a tick missed.
+            ui.style_mut().interaction.selectable_labels = false;
             // Painted, not clickable: the row is the control.
             tick_mark(ui, ticked, p);
             ui.add_space(12.0);
@@ -683,7 +686,7 @@ impl Library {
     /// Embed fonts, Write the digest and Handles only sat here too, held for
     /// the session, so the foot mixed "which exports" with "what a report
     /// contains" and the second was forgotten at every launch. They are
-    /// Settings › Reports now.
+    /// Settings › Analysis now.
     fn foot(&mut self, ui: &mut Ui, p: &Palette) {
         row(ui, |ui| {
             ui.spacing_mut().item_spacing.x = space::STEP;
@@ -704,7 +707,7 @@ impl Library {
         });
     }
 
-    /// The analyser's line for the window's status bar, while the Library
+    /// The analyser's line for the window's status bar, while Analysis
     /// shows: what it is doing, and how far through the run.
     ///
     /// It had a status line of its own, above the window's — two status
@@ -725,7 +728,7 @@ impl Library {
     }
 }
 
-/// What the Library's primary says.
+/// What the Analysis view's primary says.
 pub(super) fn report_label(ticked: usize, running: bool) -> String {
     match (running, ticked) {
         (true, _) => "Making reports".into(),
@@ -791,10 +794,10 @@ mod tests {
     }
 
     #[test]
-    fn a_launch_that_never_opens_the_library_scans_nothing() {
-        let library = super::Library::default();
-        assert!(library.followed.is_none());
-        assert!(library.state.root.is_none());
-        assert!(!library.busy());
+    fn a_launch_that_never_opens_analysis_scans_nothing() {
+        let analysis = super::Analysis::default();
+        assert!(analysis.followed.is_none());
+        assert!(analysis.state.root.is_none());
+        assert!(!analysis.busy());
     }
 }

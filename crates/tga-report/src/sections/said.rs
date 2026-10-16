@@ -10,36 +10,100 @@ use crate::charts::{self, esc, thousands};
 pub fn said(stats: &Stats) -> String {
     let content = &stats.content;
     let kinds = &content.media_kinds;
-    let media_chart = if kinds.is_empty() {
+    let saved = content.media_saved;
+    let total = content.media_messages;
+    let skipped = total - saved;
+    let messages = content.messages as i64;
+
+    let attachments = if kinds.is_empty() {
         String::new()
     } else {
-        let rows: Vec<charts::BarRow> = kinds
+        let rows: Vec<charts::HBar> = kinds
             .iter()
             .map(|k| {
-                (
+                charts::HBar::new(
                     k.label.clone(),
                     k.sent as f64,
-                    // A middle dot, not two spaces: SVG collapses the spaces,
-                    // and "7 510 5.6 GB" reads as one number.
                     format!("{} \u{b7} {}", thousands(k.sent), human_bytes(k.bytes)),
                 )
             })
             .collect();
-        charts::bars_h(&rows, WIDTH, 22.0, 140.0, 64.0)
+        let top = &kinds[0];
+        let skip_note = if skipped > 0 {
+            format!(
+                " {} of those attachments were over the export&#8217;s size limit, \
+                 so they are described in the archive but their bytes are not on \
+                 disk. The totals are what was shared, which includes them.",
+                thousands(skipped)
+            )
+        } else {
+            String::new()
+        };
+        let kind_rows: Vec<Vec<String>> = kinds
+            .iter()
+            .map(|k| {
+                vec![
+                    esc(&k.label),
+                    thousands(k.sent),
+                    thousands(k.saved),
+                    esc(&human_bytes(k.bytes)),
+                ]
+            })
+            .collect();
+        panel(
+            "Attachments",
+            &format!(
+                "Mostly <b>{}</b>: {} of {} attachments.",
+                esc(&top.label.to_lowercase()),
+                thousands(top.sent),
+                thousands(total)
+            ),
+            &format!(
+                "Messages carrying each kind of attachment, and the bytes they \
+                 came to.{skip_note}"
+            ),
+            &(charts::hbars(&rows, Some(0))
+                + &data_view(
+                    "Attachments, as numbers",
+                    &table(
+                        &[
+                            ("Kind", false),
+                            ("Sent", true),
+                            ("Saved", true),
+                            ("Bytes", true),
+                        ],
+                        &kind_rows,
+                    ),
+                )),
+        )
     };
 
     let lengths = &content.lengths;
-    // Narrower than the measure on purpose. Nine buckets across the full page
-    // gives 124px bands, and a column capped at 24px inside one of those reads
-    // as nine unrelated marks rather than as a distribution.
-    let length_chart = charts::columns(
-        &lengths.iter().map(|b| b.label.clone()).collect::<Vec<_>>(),
-        &lengths.iter().map(|b| b.n).collect::<Vec<_>>(),
-        WIDTH * 0.56,
-        210.0,
-        1,
-        " messages",
-        None,
+    let length_labels: Vec<String> = lengths.iter().map(|b| b.label.clone()).collect();
+    let length_values: Vec<i64> = lengths.iter().map(|b| b.n).collect();
+    let shown = |n: i64| format!("{} messages", thousands(n));
+    let length_chart = charts::vcols(&charts::Cols {
+        labels: &length_labels,
+        values: &length_values,
+        shown: &shown,
+        every: 1,
+        id: "",
+    });
+    let no_text = lengths
+        .iter()
+        .find(|bucket| bucket.label == "no text")
+        .map(|bucket| bucket.n)
+        .unwrap_or(0);
+    let length = panel(
+        "Message length",
+        &format!(
+            "A typical message is <b>{} words</b>; {} carry no text at all.",
+            number(content.mean_words),
+            share(no_text, messages)
+        ),
+        "In words. The first bucket is messages with no text at all &#8212; a \
+         photo, a sticker, a voice note.",
+        &length_chart,
     );
 
     let symbol_rows = |items: &[tga_stats::Count], title: &str| -> String {
@@ -57,23 +121,40 @@ pub fn said(stats: &Stats) -> String {
                 )
             })
             .collect();
-        format!("<h3>{title}</h3><ul class=\"figures\">{cells}</ul>")
+        panel(
+            title,
+            "",
+            "",
+            &format!("<ul class=\"figures symbols\">{cells}</ul>"),
+        )
     };
     let emoji_rows = symbol_rows(&content.emoji, "Most-used emoji");
     let sticker_rows = symbol_rows(&content.stickers, "Favourite stickers");
+    let symbols = if emoji_rows.is_empty() && sticker_rows.is_empty() {
+        String::new()
+    } else {
+        format!("<div class=\"cols2\">{emoji_rows}{sticker_rows}</div>")
+    };
 
     let domains = &content.domains;
     let links = if domains.is_empty() {
         String::new()
     } else {
-        let rows: Vec<charts::BarRow> = domains
+        let rows: Vec<charts::HBar> = domains
             .iter()
             .take(14)
-            .map(|host| (host.label.clone(), host.n as f64, thousands(host.n)))
+            .map(|host| charts::HBar::new(host.label.clone(), host.n as f64, thousands(host.n)))
             .collect();
-        format!(
-            "<h3>Where the links went</h3>{}",
-            charts::bars_h(&rows, WIDTH, 22.0, 210.0, 64.0)
+        panel(
+            "Where the links went",
+            &format!(
+                "<b>{}</b> leads, {} of {} links.",
+                esc(&domains[0].label),
+                thousands(domains[0].n),
+                thousands(content.links_total)
+            ),
+            "Links by the site they point at, with the leading www. removed.",
+            &charts::hbars(&rows, Some(0)),
         )
     };
 
@@ -87,8 +168,13 @@ pub fn said(stats: &Stats) -> String {
             .collect();
         let _ = write!(
             tag_cols,
-            "<div><h3>Hashtags</h3>{}</div>",
-            table(&[("Tag", false), ("Uses", true)], &rows)
+            "{}",
+            panel(
+                "Hashtags",
+                "",
+                "",
+                &table(&[("Tag", false), ("Uses", true)], &rows)
+            )
         );
     }
     let mentions = &content.mentions;
@@ -100,8 +186,13 @@ pub fn said(stats: &Stats) -> String {
             .collect();
         let _ = write!(
             tag_cols,
-            "<div><h3>Most mentioned</h3>{}</div>",
-            table(&[("Handle", false), ("Mentions", true)], &rows)
+            "{}",
+            panel(
+                "Most mentioned",
+                "",
+                "",
+                &table(&[("Handle", false), ("Mentions", true)], &rows)
+            )
         );
     }
     let tags = if tag_cols.is_empty() {
@@ -119,16 +210,18 @@ pub fn said(stats: &Stats) -> String {
             .take(12)
             .map(|src| vec![esc(&src.label), thousands(src.n)])
             .collect();
-        format!(
-            "<h3>Forwarded from</h3>{}",
-            table(&[("Source", false), ("Forwards", true)], &rows)
+        panel(
+            "Forwarded from",
+            &format!(
+                "{} messages were forwarded in; <b>{}</b> is the commonest source.",
+                thousands(content.forwards),
+                esc(&sources[0].label)
+            ),
+            "",
+            &table(&[("Source", false), ("Forwards", true)], &rows),
         )
     };
 
-    let saved = content.media_saved;
-    let total = content.media_messages;
-    let skipped = total - saved;
-    let messages = content.messages as i64;
     let stat_line = figures(&[
         (thousands(content.total_words), "words"),
         (number(content.mean_words), "words in a typical message"),
@@ -138,65 +231,13 @@ pub fn said(stats: &Stats) -> String {
         (thousands(content.edited), "edited afterwards"),
     ]);
 
-    let skip_note = if skipped > 0 {
-        format!(
-            "<p class=\"note\">{} of those attachments were over the \
-             export&#8217;s size limit, so they are described in the archive but their \
-             bytes are not on disk. The totals above are what was shared, which \
-             includes them.</p>",
-            thousands(skipped)
-        )
-    } else {
-        String::new()
-    };
-
-    let no_text = lengths
-        .iter()
-        .find(|bucket| bucket.label == "no text")
-        .map(|bucket| bucket.n)
-        .unwrap_or(0);
-
-    let attachments = if media_chart.is_empty() {
-        String::new()
-    } else {
-        format!("<h3>Attachments</h3>{media_chart}{skip_note}")
-    };
-
-    let kind_rows: Vec<Vec<String>> = kinds
-        .iter()
-        .map(|k| {
-            vec![
-                esc(&k.label),
-                thousands(k.sent),
-                thousands(k.saved),
-                esc(&human_bytes(k.bytes)),
-            ]
-        })
-        .collect();
-
     format!(
-        "{}{stat_line}<h3>Message length</h3><div class=\"split\"><div>{length_chart}</div>\
-         <aside><p class=\"caption\">In words. The first bucket is messages with no \
-         text at all &#8212; a photo, a sticker, a voice note, which is {} of \
-         everything sent.</p></aside></div>{attachments}{emoji_rows}{sticker_rows}\
-         {links}{tags}{forwards}{}</section>",
+        "{}{stat_line}<div class=\"cols2\">{length}{attachments}</div>{symbols}\
+         {links}{tags}{forwards}</section>",
         head(
             "What was said",
             &format!("{} messages", thousands(messages)),
             "said"
         ),
-        pct(no_text as f64 / messages.max(1) as f64),
-        data_view(
-            "Attachments, as numbers",
-            &table(
-                &[
-                    ("Kind", false),
-                    ("Sent", true),
-                    ("Saved", true),
-                    ("Bytes", true)
-                ],
-                &kind_rows
-            )
-        )
     )
 }

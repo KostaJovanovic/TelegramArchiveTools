@@ -626,7 +626,23 @@ fn bubble(
     for (py, part) in parts {
         let at = pos2(inner_x, rect.top() + py);
         match part {
-            Part::Text(g, dx) => painter.galley_e(at + vec2(dx, 0.0), g, ink.text),
+            // **The words are selectable text**, registered after the bubble
+            // so they win under the pointer: drag, double-click a word,
+            // Ctrl+C, as in any label. A plain click on them still picks the
+            // message, as the bubble round them does.
+            Part::Text(g, dx) => {
+                let pos = at + vec2(dx, 0.0);
+                let area = Rect::from_min_size(pos, g.size());
+                let words = ui.interact(
+                    area,
+                    ui.id().with(("text", r.id, py.to_bits())),
+                    Sense::click_and_drag(),
+                );
+                if words.clicked() && click.is_none() {
+                    click = Some(Click::Select(r.id));
+                }
+                tgx_ui::emoji::selectable_galley(ui, &words, pos, g, ink.text);
+            }
             Part::Reply {
                 to,
                 who,

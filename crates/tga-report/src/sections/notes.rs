@@ -22,7 +22,7 @@ pub fn notes(stats: &Stats, events_note: &str, source: &str, stamp: &str) -> Str
             "One person is one Telegram account id, not one display name. \
                       Somebody who renamed themselves is a single row, shown under \
                       the newest name they used; <span class=\"num\">Former \
-                      names</span> at the top of the page reveals the rest."
+                      names</span> in the People panel reveals the rest."
                 .to_string(),
         ),
         (
@@ -68,10 +68,13 @@ pub fn notes(stats: &Stats, events_note: &str, source: &str, stamp: &str) -> Str
         ),
         (
             "Colour",
-            "One hue, five steps, generated in OKLab and checked for \
-                    even lightness steps and contrast against both backgrounds. \
-                    Nothing on this page encodes a category by colour, so none \
-                    of it depends on telling two hues apart."
+            "Bars are a quiet grey, and the one mark each chart points at \
+                    is red. Shaded grids use one blue hue in five steps, generated \
+                    in OKLab and checked for even lightness steps. In a private \
+                    chat the two people are coral and teal, and every chart that \
+                    uses them also places them apart &#8212; above and below a \
+                    line, or side by side under a named key &#8212; so nothing \
+                    rests on telling the two hues apart."
                 .to_string(),
         ),
     ];

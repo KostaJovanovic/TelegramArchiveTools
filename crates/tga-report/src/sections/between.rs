@@ -14,6 +14,10 @@ use crate::charts::{self, esc, thousands};
 ///
 /// It renders nothing at all when the branch is absent, which is the ordinary
 /// case for a `--from-stats` dump recorded before the branch existed.
+///
+/// A private chat keeps only the answer times and the thread depth: a pair
+/// ranking of one pair, and "came back" and "gone quiet" of two people, are
+/// the group template talking to nobody.
 pub fn between(stats: &Stats) -> String {
     let dynamics = match &stats.dynamics {
         Some(branch) if !branch.empty => branch,
@@ -26,13 +30,14 @@ pub fn between(stats: &Stats) -> String {
         &dynamics.retention,
         &dynamics.depth,
     );
+    let pair_chat = is_duo(stats);
 
     // -- who talks with whom ------------------------------------------------
     let rows = &pairs_b.rows;
-    let bars: Vec<charts::BarRow> = rows
+    let bars: Vec<charts::HBar> = rows
         .iter()
         .map(|row| {
-            (
+            charts::HBar::new(
                 format!("{} & {}", row.a_name, row.b_name),
                 row.both as f64,
                 format!(
@@ -41,13 +46,9 @@ pub fn between(stats: &Stats) -> String {
                     thousands(row.b_to_a)
                 ),
             )
+            .who(format!("{} {}", row.a, row.b))
         })
         .collect();
-    let pair_chart = if bars.is_empty() {
-        String::new()
-    } else {
-        charts::bars_h(&bars, WIDTH, 22.0, 260.0, 96.0)
-    };
     let pair_rows: Vec<Vec<String>> = rows
         .iter()
         .map(|row| {
@@ -74,30 +75,33 @@ pub fn between(stats: &Stats) -> String {
         .zip(counts.iter())
         .map(|(m, n)| if *n >= floor { *m } else { 0 })
         .collect();
-    let answer_chart = if shown.iter().all(|v| *v == 0) {
-        String::new()
-    } else {
-        charts::columns(
-            &hours,
-            &shown,
-            WIDTH / 2.0 - 28.0,
-            190.0,
-            3,
-            " s median wait",
-            None,
-        )
+    let wait = |v: i64| {
+        if v > 0 {
+            duration(v as f64)
+        } else {
+            "too few replies".to_string()
+        }
     };
-    // The bars carry seconds and the one direct label is a bare number, so the
-    // caption names the unit and the longest wait in words.
-    let slowest = shown
+    let answer_chart = if shown.iter().all(|v| *v == 0) {
+        "<p class=\"caption\">No hour has enough replies to quote a median for.</p>".to_string()
+    } else {
+        charts::vcols(&charts::Cols {
+            labels: &hours,
+            values: &shown,
+            shown: &wait,
+            every: 3,
+            id: "",
+        })
+    };
+    let answer_take = shown
         .iter()
         .enumerate()
         .max_by_key(|(hour, v)| (**v, std::cmp::Reverse(*hour)))
         .filter(|(_, v)| **v > 0)
         .map(|(hour, v)| {
             format!(
-                " The longest median wait is {}, for messages posted at {hour:02}:00.",
-                duration(*v as f64)
+                "The longest wait is for messages posted at <b>{hour:02}:00</b>: {}.",
+                esc(&duration(*v as f64))
             )
         })
         .unwrap_or_default();
@@ -120,18 +124,27 @@ pub fn between(stats: &Stats) -> String {
 
     // -- how far a thread runs ----------------------------------------------
     let buckets = &depth.buckets;
+    let chains = |n: i64| format!("{} chains", thousands(n));
+    let depth_labels: Vec<String> = buckets.iter().map(|b| b.label.clone()).collect();
+    let depth_values: Vec<i64> = buckets.iter().map(|b| b.n).collect();
     let depth_chart = if buckets.is_empty() {
-        String::new()
+        "<p class=\"caption\">Nothing in this archive was replied to.</p>".to_string()
     } else {
-        charts::columns(
-            &buckets.iter().map(|b| b.label.clone()).collect::<Vec<_>>(),
-            &buckets.iter().map(|b| b.n).collect::<Vec<_>>(),
-            WIDTH / 2.0 - 28.0,
-            190.0,
-            1,
-            " chains",
-            None,
+        charts::vcols(&charts::Cols {
+            labels: &depth_labels,
+            values: &depth_values,
+            shown: &chains,
+            every: 1,
+            id: "",
+        })
+    };
+    let depth_take = if depth.max > 1 {
+        format!(
+            "The longest chain of replies runs <b>{}</b> deep.",
+            thousands(depth.max)
         )
+    } else {
+        String::new()
     };
 
     // -- month over month ---------------------------------------------------
@@ -158,22 +171,35 @@ pub fn between(stats: &Stats) -> String {
             .collect()
     };
     let label_every = (months.len() / 12).max(1);
+    let month_labels: Vec<String> = months
+        .iter()
+        .map(|m| m.get(2..).unwrap_or(m).to_string())
+        .collect();
+    let people = |n: i64| format!("{} came back", thousands(n));
     let ret_chart = if months.is_empty() {
         String::new()
     } else {
-        charts::columns(
-            &months
-                .iter()
-                .map(|m| m[2..].to_string())
-                .collect::<Vec<_>>(),
-            &back,
-            WIDTH,
-            170.0,
-            label_every,
-            " came back",
-            None,
-        )
+        charts::vcols(&charts::Cols {
+            labels: &month_labels,
+            values: &back,
+            shown: &people,
+            every: label_every,
+            id: "",
+        })
     };
+    let ret_take = back
+        .iter()
+        .enumerate()
+        .max_by_key(|(at, n)| (**n, std::cmp::Reverse(*at)))
+        .filter(|(_, n)| **n > 0)
+        .map(|(at, n)| {
+            format!(
+                "Most returns in <b>{}</b>: {} people.",
+                esc(&months[at]),
+                thousands(*n)
+            )
+        })
+        .unwrap_or_default();
     let ret_rows: Vec<Vec<String>> = months
         .iter()
         .enumerate()
@@ -237,122 +263,158 @@ pub fn between(stats: &Stats) -> String {
     );
 
     let mut out = head("Between people", &stat_line, "between");
-    let _ = write!(
-        out,
-        "{}",
-        figures(&[
-            (thousands(pairs_b.mutual), "pairs answering each other"),
-            (thousands(tenure.active), "still posting"),
-            (thousands(tenure.fading), "gone quiet"),
-            (thousands(tenure.gone), "long gone"),
-            (pct(retention.kept_mean), "kept month to month"),
-            (thousands(depth.max), "deepest chain"),
-        ])
-    );
-
-    if !pair_chart.is_empty() {
+    if !pair_chat {
         let _ = write!(
             out,
-            "<h3>Who talks with whom</h3>{pair_chart}\
-             <p class=\"caption\">Ranked on the <em>smaller</em> of the two \
-             directions, so a pair is only as strong as the quieter half of it. \
-             The two numbers are replies each way. A pair that only ever runs \
-             one way is somebody being answered, not a correspondence &#8212; \
-             {} of the {} pairs here are that.</p>{}",
-            thousands(pairs_b.one_way),
-            thousands(pairs_b.mutual + pairs_b.one_way),
-            data_view(
-                "Correspondents, as numbers",
-                &table(
-                    // The arrows as characters: `table` escapes every
-                    // header, so an entity here reached the page as the
-                    // literal text `&rarr;`.
-                    &[
-                        ("Person", false),
-                        ("Person", false),
-                        ("\u{2192}", true),
-                        ("\u{2190}", true),
-                        ("Balance", true),
-                    ],
-                    &pair_rows,
-                )
+            "{}",
+            figures(&[
+                (thousands(pairs_b.mutual), "pairs answering each other"),
+                (thousands(tenure.active), "still posting"),
+                (thousands(tenure.fading), "gone quiet"),
+                (thousands(tenure.gone), "long gone"),
+                (pct(retention.kept_mean), "kept month to month"),
+                (thousands(depth.max), "deepest chain"),
+            ])
+        );
+    }
+
+    if !pair_chat && !bars.is_empty() {
+        let first = &rows[0];
+        let _ = write!(
+            out,
+            "{}",
+            panel(
+                "Who talks with whom",
+                &format!(
+                    "<b>{}</b> and <b>{}</b> answer each other most.",
+                    esc(&first.a_name),
+                    esc(&first.b_name)
+                ),
+                &format!(
+                    "Ranked on the <em>smaller</em> of the two directions, so a \
+                     pair is only as strong as the quieter half of it. The two \
+                     numbers are replies each way. A pair that only ever runs one \
+                     way is somebody being answered, not a correspondence &#8212; \
+                     {} of the {} pairs here are that.",
+                    thousands(pairs_b.one_way),
+                    thousands(pairs_b.mutual + pairs_b.one_way)
+                ),
+                &(charts::hbars(&bars, Some(0))
+                    + &data_view(
+                        "Correspondents, as numbers",
+                        &table(
+                            // The arrows as characters: `table` escapes every
+                            // header, so an entity here reached the page as the
+                            // literal text `&rarr;`.
+                            &[
+                                ("Person", false),
+                                ("Person", false),
+                                ("\u{2192}", true),
+                                ("\u{2190}", true),
+                                ("Balance", true),
+                            ],
+                            &pair_rows,
+                        )
+                    )),
             )
         );
     }
 
     let _ = write!(
         out,
-        "<div class=\"cols2\"><div><h3>How long until an answer</h3>{}\
-         <p class=\"caption\">Median wait for an answer, in seconds, by the hour \
-         the message being answered was posted, not the hour the answer arrived.{} \
-         An hour with fewer than {} replies is \
-         left blank rather than drawn from too little. {} replies counted, none \
-         further apart than {}.</p></div>\
-         <div><h3>How far a thread runs</h3>{}\
-         <p class=\"caption\">Messages by the length of the reply chain they sit \
-         at the end of. A chain of two is one answer; most of the archive is a \
-         chain of one and is not drawn.</p></div></div>{}",
-        if answer_chart.is_empty() {
-            "<p class=\"caption\">No hour has enough replies to quote a median \
-             for.</p>"
-                .to_string()
-        } else {
-            answer_chart
-        },
-        slowest,
-        thousands(floor),
-        thousands(counted),
-        duration(answer.cap as f64),
-        if depth_chart.is_empty() {
-            "<p class=\"caption\">Nothing in this archive was replied to.</p>".to_string()
-        } else {
-            depth_chart
-        },
-        data_view(
-            "Answer times, as numbers",
-            &table(
-                &[("Hour", false), ("Replies", true), ("Median", false)],
-                &answer_rows,
-            )
+        "<div class=\"cols2\">{}{}</div>",
+        panel(
+            "How long until an answer",
+            &answer_take,
+            &format!(
+                "The median wait for an answer, by the hour the message being \
+                 answered was posted, not the hour the answer arrived. An hour \
+                 with fewer than {} replies is left blank rather than drawn from \
+                 too little. {} replies counted, none further apart than {}.",
+                thousands(floor),
+                thousands(counted),
+                esc(&duration(answer.cap as f64))
+            ),
+            &(answer_chart
+                + &data_view(
+                    "Answer times, as numbers",
+                    &table(
+                        &[("Hour", false), ("Replies", true), ("Median", false)],
+                        &answer_rows,
+                    )
+                )),
+        ),
+        panel(
+            "How far a thread runs",
+            &depth_take,
+            "Messages by the length of the reply chain they sit at the end of. A \
+             chain of two is one answer; most of the archive is a chain of one and \
+             is not drawn.",
+            &depth_chart,
         )
     );
+
+    if pair_chat {
+        out.push_str("</section>");
+        return out;
+    }
 
     if !ret_chart.is_empty() {
         let _ = write!(
             out,
-            "<h3>Who came back</h3>{ret_chart}\
-             <p class=\"caption\">People who spoke in a month after a silence of \
-             their own: they had spoken before, but not in the month before it. \
-             Silent months stay on the axis, so a gap in the group is a gap here \
-             too. Everybody who spoke in a month is new, stayed from the month \
-             before, or came back. Nobody is announced for going quiet, which is \
-             why this is not in Coming and going.</p>{}",
-            data_view(
-                "Month by month, as numbers",
-                &table(
-                    &[
-                        ("Month", false),
-                        ("Spoke", true),
-                        ("New", true),
-                        ("Stayed", true),
-                        ("Came back", true),
-                        ("Lost", true),
-                    ],
-                    &ret_rows,
-                )
+            "{}",
+            panel(
+                "Who came back",
+                &ret_take,
+                "People who spoke in a month after a silence of their own: they \
+                 had spoken before, but not in the month before it. Silent months \
+                 stay on the axis, so a gap in the group is a gap here too. \
+                 Everybody who spoke in a month is new, stayed from the month \
+                 before, or came back. Nobody is announced for going quiet, which \
+                 is why this is not in Coming and going.",
+                &(ret_chart
+                    + &data_view(
+                        "Month by month, as numbers",
+                        &table(
+                            &[
+                                ("Month", false),
+                                ("Spoke", true),
+                                ("New", true),
+                                ("Stayed", true),
+                                ("Came back", true),
+                                ("Lost", true),
+                            ],
+                            &ret_rows,
+                        )
+                    )),
             )
         );
     }
 
+    let quiet_take = if quiet.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "{} people have gone quiet or are gone.",
+            thousands(quiet.len() as i64)
+        )
+    };
     let _ = write!(
         out,
-        "<h3>Gone quiet</h3>{quiet_table}\
-         <p class=\"caption\">Measured against {}, the last day in this archive, \
-         not against today &#8212; the same file read a year from now says the \
-         same thing. Quiet past {} days, gone past {}.</p></section>",
-        esc(&pretty_date(&tenure.as_of)),
-        thousands(tenure.active_within),
-        thousands(tenure.fading_within),
+        "{}</section>",
+        panel(
+            "Gone quiet",
+            &quiet_take,
+            &format!(
+                "Measured against {}, the last day in this archive, not against \
+                 today &#8212; the same file read a year from now says the same \
+                 thing. Quiet past {} days, gone past {}.",
+                esc(&pretty_date(&tenure.as_of)),
+                thousands(tenure.active_within),
+                thousands(tenure.fading_within),
+            ),
+            &quiet_table,
+        )
     );
     out
 }

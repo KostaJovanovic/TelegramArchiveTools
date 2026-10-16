@@ -26,7 +26,7 @@ fn job_tone(state: &JobState) -> Tone {
     }
 }
 
-/// The same for a Library row: shared with the Library, which paints the
+/// The same for an Analysis row: shared with that view, which paints the
 /// same marks.
 pub(super) fn mark_tone(mark: Mark) -> Tone {
     match mark {
@@ -299,14 +299,14 @@ impl Shell {
 
     /// **The report runs, above the exports.** Activity is everything this
     /// window is doing, and a report run used to be visible only from the
-    /// Library — so "Report after export" made reports nobody could watch
-    /// being made without leaving the export they were watching.
+    /// Analysis view — so "Report after export" made reports nobody could
+    /// watch being made without leaving the export they were watching.
     ///
-    /// Only what this session touched: a row the Library has never been
-    /// asked to report on is not activity. Absent entirely when there is none.
+    /// Only what this session touched: a row Analysis has never been asked
+    /// to report on is not activity. Absent entirely when there is none.
     fn report_runs(&mut self, ui: &mut Ui) {
         let p = self.palette;
-        let state = &self.library.state;
+        let state = &self.analysis.state;
         let rows: Vec<(String, Mark, String)> = state
             .entries
             .iter()
@@ -550,7 +550,10 @@ impl Shell {
                 // `add_space` per line: the lines wrap, and a space allocated
                 // inside a wrapping row is a space the second line does not get,
                 // so long lines used to start flush against the panel edge.
+                // The log is content: a line selects and copies, so an error
+                // can be pasted somewhere.
                 block(ui, |ui| {
+                    ui.style_mut().interaction.selectable_labels = true;
                     for line in self.journal.lines() {
                         // **A warning is ink, not the accent.** In a transcript
                         // set entirely in `muted`, the text colour already *is*

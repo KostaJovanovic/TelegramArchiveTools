@@ -12,6 +12,7 @@
 
 use std::path::Path;
 
+pub mod catchup;
 pub mod cli;
 pub mod job;
 pub mod open;

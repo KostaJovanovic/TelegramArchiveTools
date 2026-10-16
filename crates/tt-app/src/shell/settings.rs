@@ -1,33 +1,28 @@
-//! The settings panel — the site's readout tables, made editable.
+//! The settings panel: one column down the middle, every setting one box,
+//! every explanation behind its own `?`.
 //!
-//! Six sections, grouped by the question each answers (TELEGRAMTOOLS.md
-//! §4.2): **Where exports go** and **What an export contains** down the left;
-//! **Media**, **Reports**, **Appearance** and **Advanced** down the right. No
-//! group boxes: a section is a letterspaced heading with space above it, and a
-//! setting is one [`setting_row`] — its name, one muted line saying what it
-//! does, and its control on the right.
+//! **Laid out like a game's options screen, on purpose** (2026-10-16, the
+//! account holder's ask, after calling the two-column panel bad). A setting is
+//! one wide box reading `Name: Value`; a click moves it to the next value and a
+//! right-click to the one before. A number, a date or a path is the same box
+//! with a field in it. Beside each box is a square `?` holding what the line
+//! under every setting used to say, and the longer explanation where there was
+//! one. The column scrolls; nothing else does.
 //!
-//! # What the last two passes got wrong
+//! # What the earlier passes got wrong
 //!
-//! **The explanations were on the page, then behind a `[?]`.** First eight
-//! paragraphs of small print interleaved with twenty-five switches, which made
-//! the panel unscannable; then every sentence moved behind a mark of its own,
-//! which made it quiet and made every switch a question. A setting now carries
-//! one line, always visible — what it does, and what it costs when it costs
-//! something — and a `[?]` is left only where a choice has consequences one
-//! line cannot hold: the export's format, checking the whole history, and
-//! profile pictures.
+//! **Two columns of rows, each with a sentence under it.** Every setting was a
+//! name, a sentence and a control at three different x positions, in two
+//! columns, so there was no one line for the eye to run down. One column, one
+//! box per setting with its state written inside it, is that line.
 //!
-//! **Classic and Database were dimmed, not switched.** The mode was a pair of
-//! tick boxes that unticked each other, and the losing mode's controls stayed on
-//! screen greyed out. It is a [`segmented`] control, now named **Folder** and
-//! **Database** after what each leaves on disk, and the rows below it are
-//! *replaced*: the panel shows the format you are in and nothing about the one
-//! you are not.
+//! **A `[?]` beside a bare switch made every switch a question.** That was
+//! tried and taken back once. The difference now is that the box already says
+//! what the setting is set to in words — `Download media: On` — so the `?` is
+//! only ever for *why*, never for *what is this*.
 //!
-//! **The rhythm did the opposite of grouping.** Rows sit on `item_spacing`
-//! plus `space::TIGHT` and sections on `space::BREAK`, which is the
-//! four-to-one this file always claimed.
+//! **Folder and Database replace each other**, they are not dimmed: the boxes
+//! under Format are the chosen format's alone.
 //!
 //! **There is no "Chats at once".** This engine exports one chat at a time, and
 //! a control that is enabled and does nothing teaches that the interface is
@@ -35,12 +30,9 @@
 //! keys are dropped per field.
 
 use super::{list, Shell, THEMES};
-use eframe::egui::{self, Ui};
-use tgx_ui::components::{
-    action, block, button, eyebrow, field, figure, help, meta, row, segmented, setting_row, text,
-    tick_box,
-};
-use tgx_ui::tokens::{space, Palette};
+use eframe::egui::{self, Align, Layout, Margin, Response, Sense, Stroke, Ui};
+use tgx_ui::components::{action, button, eyebrow, field, meta, text, GUTTER};
+use tgx_ui::tokens::{space, window, Palette};
 
 /// The seven media categories Desktop offers, with the labels shown for each.
 /// Keyed on `tgx_tg::config::MEDIA_KINDS`, which is what `plan.rs`
@@ -56,7 +48,7 @@ const MEDIA_LABELS: [(&str, &str); 7] = [
     ("files", "Files"),
 ];
 
-/// The extra requests, each with the line under it.
+/// The extra requests, each with what its `?` says.
 ///
 /// Each costs traffic, each is separately switchable, and each degrades to
 /// nothing on failure.
@@ -89,7 +81,7 @@ const EXTRAS: [(&str, &str, &str); 6] = [
     (
         "member_roster",
         "Member list",
-        "Who is in the chat, as participants.json. Capped below.",
+        "Who is in the chat, as participants.json. Capped by Member list cap.",
     ),
 ];
 
@@ -97,26 +89,21 @@ impl Shell {
     pub(super) fn settings_panel(&mut self, ui: &mut Ui) {
         // No `SETTINGS` heading: the view bar above already says so, and a view
         // does not need to introduce itself.
-        //
-        // **Two columns, because there is a window's width to use.** Left is
-        // the export — where it goes and what is in it. Right is everything
-        // around it. Balanced by height rather than by section count.
         egui::ScrollArea::vertical()
             .id_salt("settings-body")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                self.unreadable_settings(ui);
-                ui.columns(2, |cols| {
-                    self.destination_section(&mut cols[0]);
-                    self.contents_section(&mut cols[0]);
-
-                    self.media_section(&mut cols[1]);
-                    self.reports_section(&mut cols[1]);
-                    self.summaries_section(&mut cols[1]);
-                    self.appearance_section(&mut cols[1]);
-                    self.advanced_section(&mut cols[1]);
+                column(ui, |ui| {
+                    self.unreadable_settings(ui);
+                    self.destination_section(ui);
+                    self.contents_section(ui);
+                    self.media_section(ui);
+                    self.reports_section(ui);
+                    self.summaries_section(ui);
+                    self.appearance_section(ui);
+                    self.advanced_section(ui);
+                    ui.add_space(space::BREAK);
                 });
-                ui.add_space(space::BREAK);
             });
     }
 
@@ -128,111 +115,81 @@ impl Shell {
             return;
         };
         let p = self.palette;
-        block(ui, |ui| {
-            ui.label(text(
+        ui.add_space(space::STEP);
+        ui.add(
+            egui::Label::new(text(
                 format!(
                     "Your settings file was not used: {why}. Changes here are not saved until \
                      you choose to replace it."
                 ),
                 &p,
             ))
-        });
-        let replace = row(ui, |ui| {
-            button(ui, "Replace it with these settings", true, false, &p).clicked()
-        });
-        if replace {
+            .wrap(),
+        );
+        let width = ui.available_width();
+        if option_box(ui, width, "Replace it with these settings", true, &p).clicked() {
             tgx_tg::config::allow_settings_overwrite();
             self.commit_settings();
             self.status = "Settings saved over the unreadable file".into();
         }
-        ui.add_space(space::STEP);
     }
 
-    /// **The path shows its start, not its end, and the whole of it is the
-    /// tooltip.** A field scrolled to its caret renders the default path as a
-    /// drive letter sliced in half, which reads as a typo rather than as a
-    /// path. Both are redone on every change — not once at construction —
-    /// because Browse writes back afterwards.
+    /// **The path's whole is the tooltip.** A field scrolled to its caret
+    /// renders a long path as a drive letter sliced in half; hovering says the
+    /// rest.
     fn destination_section(&mut self, ui: &mut Ui) {
         let p = self.palette;
         section(ui, "Where exports go", &p);
-        let mut browse = false;
-        let mut commit = false;
-        let full = self.settings.output_dir.clone();
-        // A button: the one way to get a path that certainly exists should
-        // not be small print. The field gets a line of its own under the
-        // name: beside it, at the window's floor, a path field left the
-        // name one letter wide.
-        setting_row(
+        let (commit, pressed) = path_option(
             ui,
-            "Folder",
-            "Each chat gets a folder here, or a database in a folder of its own.",
+            "output_dir",
+            "Export folder",
+            "Each chat gets a folder here, or a database in a folder of its own. \
+             Analysis lists what is in it.",
+            &mut self.form.output_dir,
+            "Where exports go",
+            &["Browse"],
             &p,
-            |ui| browse = button(ui, "Browse", true, false, &p).clicked(),
         );
-        row(ui, |ui| {
-            let entry = ui.add(
-                field(&mut self.form.output_dir, &p)
-                    .hint_text("Where exports go")
-                    .desired_width(ui.available_width()),
-            );
-            // Committing on losing focus rather than on every keystroke: a
-            // half-typed path is not a decision.
-            commit = entry.lost_focus();
-            entry.on_hover_text(&full);
-        });
+        // Committing on losing focus rather than on every keystroke: a
+        // half-typed path is not a decision.
         if commit {
             self.commit_settings();
         }
-        if browse {
+        if pressed.is_some() {
             self.browse_for_output_dir();
         }
-        row(ui, |ui| {
-            ui.label(meta(
-                format!(
-                    "Writing to {}",
-                    crate::settings_form::elided_start(&full, 56)
-                ),
-                &p,
-            ))
-            .on_hover_text(full.clone());
-        });
     }
 
-    /// **Folder or Database — an exclusive choice, drawn as one, and it
-    /// changes what is on the page.** The rows under the strip are the chosen
-    /// format's alone; then what both formats ask Telegram for.
+    /// **Folder or Database — an exclusive choice, and it changes what is on
+    /// the page.** The boxes under it are the chosen format's alone; then what
+    /// both formats ask Telegram for.
     ///
-    /// Split forum topics stays below the switch because it is the one setting
-    /// both formats read — a folder per topic, or the topic recorded per
-    /// message.
+    /// Split forum topics stays below the format's own boxes because it is the
+    /// one setting both formats read — a folder per topic, or the topic
+    /// recorded per message.
     fn contents_section(&mut self, ui: &mut Ui) {
         let p = self.palette;
         let db = self.settings.export_db;
         section(ui, "What an export contains", &p);
 
-        let mut chosen = None;
-        setting_row(
+        if let Some(i) = cycle(
             ui,
+            "export_db",
             "Format",
-            if db {
-                "One file per chat that each run adds to. Keeps deleted and edited messages."
-            } else {
-                "Telegram Desktop's own layout: HTML and result.json, re-read in full each run."
-            },
+            &["Folder", "Database"],
+            usize::from(db),
+            true,
+            MODE_HELP,
             &p,
-            |ui| {
-                help(ui, "export_db", MODE_HELP, &p);
-                chosen = pair(ui, ["Folder", "Database"], usize::from(db), &p);
-            },
-        );
-        if let Some(i) = chosen {
+        ) {
             self.toggle_setting(move |s| s.export_db = i == 1);
         }
 
         if db {
-            if self.number_row(
+            if self.number(
                 ui,
+                "reread_window",
                 "Messages to re-read",
                 "How far back each sync looks again. 0 is new messages only.",
                 true,
@@ -240,24 +197,23 @@ impl Shell {
             ) {
                 self.commit_settings();
             }
-            let mut flip = false;
-            setting_row(
+            if switch(
                 ui,
+                "reread_all",
                 "Check the whole history",
-                "Finds deletions and edits further back. Slow on a large chat.",
+                self.settings.reread_all,
+                true,
+                REREAD_ALL_HELP,
                 &p,
-                |ui| {
-                    help(ui, "reread_all", REREAD_ALL_HELP, &p);
-                    flip = tick_box(ui, self.settings.reread_all, true, &p).clicked();
-                },
-            );
-            if flip {
+            ) {
                 self.toggle_setting(|s| s.reread_all = !s.reread_all);
             }
-            if self.number_row(
+            if self.number(
                 ui,
+                "sync_every",
                 "Sync every (hours)",
-                "Updates every database here on a timer while the window is open. 0 is off.",
+                "Updates every database in the export folder on a timer while the window is \
+                 open. 0 is off.",
                 true,
                 |f| &mut f.sync_every,
             ) {
@@ -270,47 +226,43 @@ impl Shell {
                 .iter()
                 .position(|k| *k == self.settings.profile_photos)
                 .unwrap_or(1);
-            let mut picked = None;
-            setting_row(
+            if let Some(i) = cycle(
                 ui,
+                "profile_photos",
                 "Profile pictures",
-                "Kept in the database and shown when reading. Desktop has none.",
+                &["Off", "Current", "History"],
+                at,
+                true,
+                PHOTOS_HELP,
                 &p,
-                |ui| {
-                    help(ui, "profile_photos", PHOTOS_HELP, &p);
-                    // Drawn right to left, so the strip is given in reverse
-                    // and the answer turned back round.
-                    let cells = ["History", "Current", "Off"];
-                    picked = segmented(ui, &cells, 2 - at, &p).map(|i| 2 - i);
-                },
-            );
-            if let Some(i) = picked {
+            ) {
                 self.toggle_setting(move |s| s.profile_photos = USERPICS[i].into());
             }
         } else {
-            for (key, label, why, on) in [
+            let rows: [(&str, &str, &str, bool, Flip); 2] = [
                 (
                     "export_html",
                     "HTML pages",
                     "Desktop's browsable pages, line for line.",
                     self.settings.export_html,
+                    |s| s.export_html = !s.export_html,
                 ),
                 (
                     "export_json",
                     "result.json",
                     "Every message as data, byte for byte as Desktop writes it.",
                     self.settings.export_json,
+                    |s| s.export_json = !s.export_json,
                 ),
-            ] {
-                if switch_row(ui, label, why, on, true, &p) {
-                    self.toggle_setting(move |s| match key {
-                        "export_html" => s.export_html = !s.export_html,
-                        _ => s.export_json = !s.export_json,
-                    });
+            ];
+            for (key, label, why, on, flip) in rows {
+                if switch(ui, key, label, on, true, why, &p) {
+                    self.toggle_setting(flip);
                 }
             }
-            if self.number_row(
+            if self.number(
                 ui,
+                "page_size",
                 "Messages per page",
                 "Desktop's default is 1,000. Held between 50 and 20,000.",
                 true,
@@ -321,24 +273,26 @@ impl Shell {
             self.date_rows(ui);
         }
 
-        if switch_row(
+        if switch(
             ui,
+            "split_topics",
             "Split forum topics",
-            "A folder per topic — what Telegram Desktop cannot do.",
             self.settings.split_topics,
             true,
+            "A folder per topic in a forum group — what Telegram Desktop cannot do.",
             &p,
         ) {
             self.toggle_setting(|s| s.split_topics = !s.split_topics);
         }
         for (key, label, why) in EXTRAS {
             let on = extra(&self.settings, key);
-            if switch_row(ui, label, why, on, true, &p) {
+            if switch(ui, key, label, on, true, why, &p) {
                 self.toggle_setting(move |s| set_extra(s, key, !extra(s, key)));
             }
         }
-        if self.number_row(
+        if self.number(
             ui,
+            "member_limit",
             "Member list cap",
             "Stop the member list after this many. 0 is no cap.",
             self.settings.member_roster,
@@ -348,12 +302,14 @@ impl Shell {
         }
         // Not among the extras: they are requests, and this costs none — it
         // changes which of two names already in hand gets written.
-        if switch_row(
+        if switch(
             ui,
+            "own_names",
             "Contacts by @username",
-            "Not by the name you saved them under, which only you see.",
             self.settings.own_names,
             true,
+            "Writes a contact's @username, not the name you saved them under, which only \
+             you see.",
             &p,
         ) {
             self.toggle_setting(|s| s.own_names = !s.own_names);
@@ -364,49 +320,39 @@ impl Shell {
         let p = self.palette;
         let media_on = self.settings.download_media;
         section(ui, "Media", &p);
-        if switch_row(
+        if switch(
             ui,
+            "download_media",
             "Download media",
-            "Off, the export still records every file's name, size and type.",
             media_on,
             true,
+            "Off, the export still records every file's name, size and type, and is far \
+             faster.",
             &p,
         ) {
             self.toggle_setting(|s| s.download_media = !s.download_media);
         }
 
-        // **Seven switches across, not seven rows down.** They are one
-        // question — which categories — and as a column they took as much of
-        // the panel as everything else in this section put together. Wrapped,
-        // so a narrow window turns them into three rows rather than clipping
-        // the last two.
+        // **Two to a line.** Seven categories are one question — which kinds —
+        // so they share one `?`, on the first line.
         let mut toggled: Option<&'static str> = None;
-        // A block, not a row: `horizontal_wrapped` needs a vertical context to
-        // wrap *into*.
-        block(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(space::STEP, 6.0);
-                for (key, label) in MEDIA_LABELS {
-                    let on = self.settings.media_kinds.iter().any(|k| k == key);
-                    // **The wrap is asked for by hand.** A wrapping layout
-                    // wraps *widgets*; the nested `horizontal` below is a
-                    // child `Ui`, which is placed at the cursor whether it fits
-                    // or not, so without this the strip ran off the right edge
-                    // and widened the whole column with it.
-                    if ui.available_size_before_wrap().x < tick_width(ui, label, &p) {
-                        ui.end_row();
+        for (n, pair) in MEDIA_LABELS.chunks(2).enumerate() {
+            let why = (n == 0).then_some(
+                "Which kinds of file to download. A kind left off is recorded as Desktop \
+                 records one it skipped.",
+            );
+            let kinds = &self.settings.media_kinds;
+            option(ui, "media_kinds", why, &p, |ui, width| {
+                let half = (width - ui.spacing().item_spacing.x) / 2.0;
+                for (key, label) in pair {
+                    let on = kinds.iter().any(|k| k == key);
+                    let caption = format!("{label}: {}", on_off(on));
+                    if option_box(ui, half, &caption, media_on, &p).clicked() {
+                        toggled = Some(*key);
                     }
-                    // Nested, so the gap between a box and its own label is
-                    // `TIGHT` while the gap between two categories is `STEP`.
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = space::TIGHT;
-                        if tick(ui, label, on, media_on, &p) {
-                            toggled = Some(key);
-                        }
-                    });
                 }
             });
-        });
+        }
         if let Some(key) = toggled {
             self.toggle_setting(move |s| {
                 if let Some(at) = s.media_kinds.iter().position(|k| k == key) {
@@ -416,16 +362,10 @@ impl Shell {
                 }
             });
         }
-        row(ui, |ui| {
-            ui.label(meta(
-                "A category left off is recorded as Desktop records one it skipped.",
-                &p,
-            ));
-        });
-        ui.add_space(space::TIGHT);
 
-        if self.number_row(
+        if self.number(
             ui,
+            "size_limit",
             "Size limit, MB",
             "Larger files are recorded, not downloaded. 0 is no limit.",
             media_on,
@@ -433,12 +373,13 @@ impl Shell {
         ) {
             self.commit_settings();
         }
-        if switch_row(
+        if switch(
             ui,
+            "link_previews",
             "Link-preview images",
-            "Desktop does not save these; on, later photo numbers shift.",
             self.settings.link_previews,
             media_on,
+            "Desktop does not save these. On, every later photo's number shifts by one.",
             &p,
         ) {
             self.toggle_setting(|s| s.link_previews = !s.link_previews);
@@ -446,38 +387,42 @@ impl Shell {
     }
 
     /// What the analyser writes, and when. The three run options were the
-    /// Library's, for the session only; they are kept with the rest now.
+    /// Analysis view's, for the session only; they are kept with the rest now.
     fn reports_section(&mut self, ui: &mut Ui) {
         let p = self.palette;
-        section(ui, "Reports", &p);
-        let rows: [(&str, &str, bool, Flip); 4] = [
+        section(ui, "Analysis", &p);
+        let rows: [(&str, &str, &str, bool, Flip); 4] = [
             (
+                "report_after_export",
                 "Report after each export",
-                "Written beside each chat while the next one downloads.",
+                "Writes each chat's report beside it while the next chat downloads.",
                 self.settings.report_after_export,
                 |s| s.report_after_export = !s.report_after_export,
             ),
             (
+                "report_digest",
                 "Write the digest",
                 "digest.jsonl and EVENTS.md beside the report, for a model to read.",
                 self.settings.report_digest,
                 |s| s.report_digest = !s.report_digest,
             ),
             (
+                "report_fonts",
                 "Embed fonts",
                 "Looks right on any machine. Off, each report is about 300 KB smaller.",
                 self.settings.report_fonts,
                 |s| s.report_fonts = !s.report_fonts,
             ),
             (
+                "report_handles",
                 "People by @handle",
                 "Never by the name this account saved them under.",
                 self.settings.report_handles,
                 |s| s.report_handles = !s.report_handles,
             ),
         ];
-        for (label, why, on, flip) in rows {
-            if switch_row(ui, label, why, on, true, &p) {
+        for (key, label, why, on, flip) in rows {
+            if switch(ui, key, label, on, true, why, &p) {
                 self.toggle_setting(flip);
             }
         }
@@ -489,11 +434,11 @@ impl Shell {
     fn summaries_section(&mut self, ui: &mut Ui) {
         let p = self.palette;
         section(ui, "Summaries", &p);
-        let (mut open, mut pick_folder, mut server, mut commit) = (false, false, false, false);
+        let mut commit = false;
         let folder = self.settings.summary_models_dir();
         self.summaries.look_for_models(&folder, ui.ctx());
         // Only a look at *this* folder answers for it; until one arrives the
-        // rows say so rather than "none in the folder".
+        // boxes say so rather than "none in the folder".
         let found = self.summaries.found.as_ref().filter(|f| f.folder == folder);
         let looking = found.is_none();
         let (models, found_server) = found
@@ -506,34 +451,26 @@ impl Shell {
                 .to_string()
         };
 
-        setting_row(
+        let (typed, models_button) = path_option(
             ui,
+            "summary_models",
             "Models folder",
             "The models and llama-server.exe, each in it or in a folder of its own inside it.",
+            &mut self.form.summary_models,
+            "Where the models are",
+            &["Browse", "Open"],
             &p,
-            |ui| {
-                pick_folder = button(ui, "Browse", true, false, &p).clicked();
-                open = button(ui, "Open", true, false, &p).clicked();
-            },
         );
-        row(ui, |ui| {
-            commit |= ui
-                .add(
-                    field(&mut self.form.summary_models, &p)
-                        .hint_text("Where the models are")
-                        .desired_width(ui.available_width()),
-                )
-                .lost_focus();
-        });
+        commit |= typed;
 
         let chosen = super::summaries::chosen_model(&self.settings, &models);
         let about_model = if looking {
-            "Looking in the folder…".to_string()
+            "Looking in the models folder…".to_string()
         } else if models.is_empty() {
-            "None in the folder yet: see How to add a model, below.".to_string()
+            "None in the models folder yet: see How to add a model, below.".to_string()
         } else {
             format!(
-                "{} in the folder. The prompts are written for Gemma.",
+                "{} in the models folder. The prompts are written for Gemma.",
                 match models.len() {
                     1 => "One model".to_string(),
                     n => format!("{n} models"),
@@ -541,85 +478,117 @@ impl Shell {
             )
         };
         let mut picked: Option<String> = None;
-        setting_row(ui, "Model", &about_model, &p, |ui| {
-            let shown = chosen
-                .as_deref()
-                .map(&in_folder)
-                .unwrap_or_else(|| "None".into());
-            egui::ComboBox::from_id_salt("summary-model")
-                .selected_text(shown)
-                .width(MODEL_W)
-                .show_ui(ui, |ui| {
-                    for m in &models {
-                        let name = in_folder(m);
-                        if ui
-                            .selectable_label(chosen.as_ref() == Some(m), &name)
-                            .clicked()
-                        {
-                            picked = Some(name);
+        option(
+            ui,
+            "summary_model",
+            Some(about_model.as_str()),
+            &p,
+            |ui, width| {
+                let shown = chosen
+                    .as_deref()
+                    .map(&in_folder)
+                    .unwrap_or_else(|| "None".into());
+                let hit = option_box(ui, width, &format!("Model: {shown}"), true, &p);
+                egui::Popup::menu(&hit)
+                    .id(egui::Id::new("summary-model"))
+                    .width(width)
+                    .show(|ui| {
+                        if models.is_empty() {
+                            ui.label(meta("None in the folder", &p));
                         }
-                    }
-                });
-        });
+                        for m in &models {
+                            let name = in_folder(m);
+                            if ui
+                                .selectable_label(chosen.as_ref() == Some(m), &name)
+                                .clicked()
+                            {
+                                picked = Some(name);
+                            }
+                        }
+                    });
+            },
+        );
 
         let about_server = if !self.settings.summary_server.is_empty() {
-            "Chosen below; the models folder's is not used.".to_string()
+            "The program that runs the model. Chosen here, so the models folder's is not used."
+                .to_string()
         } else if let Some(exe) = &found_server {
-            format!("{}, in the models folder.", in_folder(exe))
+            format!(
+                "The program that runs the model. Blank uses {}, in the models folder.",
+                in_folder(exe)
+            )
         } else if looking {
-            "Looking in the folder…".to_string()
+            "The program that runs the model. Looking in the models folder…".to_string()
         } else {
-            "Not in the models folder: see How to add a model, below, or choose one.".to_string()
+            "The program that runs the model. None in the models folder: see How to add a \
+             model, below, or choose one."
+                .to_string()
         };
-        setting_row(ui, "Model server", &about_server, &p, |ui| {
-            server = button(ui, "Browse", true, false, &p).clicked();
-        });
-        row(ui, |ui| {
-            commit |= ui
-                .add(
-                    field(&mut self.form.summary_server, &p)
-                        .hint_text("Blank: llama-server.exe in the models folder")
-                        .desired_width(ui.available_width()),
-                )
-                .lost_focus();
-        });
-        commit |= self.number_row(
+        let (typed, server_button) = path_option(
             ui,
+            "summary_server",
+            "Model server",
+            &about_server,
+            &mut self.form.summary_server,
+            "Blank: llama-server.exe in the models folder",
+            &["Browse"],
+            &p,
+        );
+        commit |= typed;
+        commit |= self.number(
+            ui,
+            "summary_port",
             "Port",
-            "On 127.0.0.1; a Gemma already serving there is used as it is.",
+            "On 127.0.0.1, this machine only. A Gemma already serving there is used as it is.",
             true,
             |f| &mut f.summary_port,
         );
-        setting_row(
+        let (typed, _) = path_option(
             ui,
+            "summary_options",
             "Server options",
             "For a server started from here. Blank suits Gemma 4 26B on a 16 GB card.",
+            &mut self.form.summary_options,
+            tga_run::tga_sum::server::DEFAULT_OPTIONS,
+            &[],
             &p,
-            |_| {},
         );
-        row(ui, |ui| {
-            commit |= ui
-                .add(
-                    field(&mut self.form.summary_options, &p)
-                        .hint_text(tga_run::tga_sum::server::DEFAULT_OPTIONS)
-                        .desired_width(ui.available_width()),
-                )
-                .lost_focus();
-        });
-        commit |= self.number_row(
+        commit |= typed;
+        commit |= self.number(
             ui,
-            "Unload after",
-            "Minutes after you leave Summaries before a server started here is stopped.",
+            "summary_idle",
+            "Unload after (minutes)",
+            "How long after you leave Summaries a server started here is stopped, to free \
+             the graphics card.",
             true,
             |f| &mut f.summary_idle,
         );
-        let photos = switch_row(
+        let lang = {
+            use tga_run::tga_sum::Lang;
+            let at = Lang::ALL
+                .iter()
+                .position(|l| *l == self.summaries.lang)
+                .unwrap_or(0);
+            cycle(
+                ui,
+                "summary_lang",
+                "Language",
+                &["Serbian", "English", "As the chat"],
+                at,
+                true,
+                "What summaries and catch-ups are written in. Serbian is Latin, ekavian.",
+                &p,
+            )
+            .map(|i| Lang::ALL[i])
+        };
+        let photos = switch(
             ui,
+            "summary_photos",
             "Read text in photos",
-            "PaddleOCR-VL, if it is in the models folder, reads the days' photos first, \
-             then makes way for the model.",
             self.settings.summary_photos,
             true,
+            "PaddleOCR-VL, if it is in the models folder, reads the days' photos first, \
+             then makes way for the model.",
             &p,
         );
         self.how_to_add_a_model(ui, &folder);
@@ -629,18 +598,23 @@ impl Shell {
         if photos {
             self.toggle_setting(|s| s.summary_photos = !s.summary_photos);
         }
+        if let Some(l) = lang {
+            self.summaries.lang = l;
+            self.toggle_setting(|s| s.summary_lang = l.code().into());
+        }
         if let Some(name) = picked {
             self.toggle_setting(|s| s.summary_model = name);
         }
-        if open {
-            // Made on first open, so there is somewhere to put the files.
-            let _ = std::fs::create_dir_all(&folder);
-            self.open_or_warn(&folder);
+        match models_button {
+            Some(0) => self.browse_for_models_folder(),
+            Some(_) => {
+                // Made on first open, so there is somewhere to put the files.
+                let _ = std::fs::create_dir_all(&folder);
+                self.open_or_warn(&folder);
+            }
+            None => {}
         }
-        if pick_folder {
-            self.browse_for_models_folder();
-        }
-        if server {
+        if server_button.is_some() {
             self.browse_for_server();
         }
     }
@@ -649,32 +623,30 @@ impl Shell {
     fn how_to_add_a_model(&mut self, ui: &mut Ui, folder: &std::path::Path) {
         let p = self.palette;
         let mut open = false;
-        block(ui, |ui| {
-            egui::CollapsingHeader::new(text("How to add a model", &p))
-                .id_salt("summary-how-to")
-                .show(ui, |ui| {
-                    for (i, step) in ADD_A_MODEL.iter().enumerate() {
-                        ui.label(meta(format!("{}. {step}", i + 1), &p));
-                        ui.add_space(space::TIGHT);
-                    }
-                    ui.horizontal(|ui| {
-                        for (label, url) in [
-                            ("llama.cpp releases", LLAMA_RELEASES),
-                            ("Hugging Face", HUGGING_FACE),
-                        ] {
-                            // A link is the accent's one exception, as on the
-                            // sign-in dialog.
-                            let label = egui::RichText::new(label)
-                                .font(tgx_ui::fonts::sans(tgx_ui::tokens::window::READING))
-                                .color(p.accent);
-                            if action(ui, label, true).clicked() {
-                                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
-                            }
+        egui::CollapsingHeader::new(text("How to add a model", &p))
+            .id_salt("summary-how-to")
+            .show(ui, |ui| {
+                for (i, step) in ADD_A_MODEL.iter().enumerate() {
+                    ui.add(egui::Label::new(meta(format!("{}. {step}", i + 1), &p)).wrap());
+                    ui.add_space(space::TIGHT);
+                }
+                ui.horizontal(|ui| {
+                    for (label, url) in [
+                        ("llama.cpp releases", LLAMA_RELEASES),
+                        ("Hugging Face", HUGGING_FACE),
+                    ] {
+                        // A link is the accent's one exception, as on the
+                        // sign-in dialog.
+                        let label = egui::RichText::new(label)
+                            .font(tgx_ui::fonts::sans(window::READING))
+                            .color(p.accent);
+                        if action(ui, label, true).clicked() {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
                         }
-                        open = button(ui, "Open the models folder", true, false, &p).clicked();
-                    });
+                    }
+                    open = button(ui, "Open the models folder", true, false, &p).clicked();
                 });
-        });
+            });
         if open {
             let _ = std::fs::create_dir_all(folder);
             self.open_or_warn(folder);
@@ -716,45 +688,56 @@ impl Shell {
     fn appearance_section(&mut self, ui: &mut Ui) {
         let p = self.palette;
         section(ui, "Appearance", &p);
-        // The stored name decides which cell is filled, so an edited settings
+        // The stored name decides which value is shown, so an edited settings
         // file naming neither shows Dark — which is what `Palette::named` will
         // actually have produced.
-        let at = theme_index(&self.settings.theme);
-        let mut chosen = None;
-        setting_row(
+        if let Some(i) = cycle(
             ui,
+            "theme",
             "Theme",
+            &["Light", "Dark", "System"],
+            theme_index(&self.settings.theme),
+            true,
             "System follows Windows' own light or dark mode.",
             &p,
-            |ui| {
-                // Drawn right to left, so given in reverse and turned back.
-                chosen = segmented(ui, &["System", "Dark", "Light"], 2 - at, &p).map(|i| 2 - i);
-            },
-        );
-        if let Some(i) = chosen {
+        ) {
             self.set_theme(THEMES[i]);
         }
-        setting_row(
+        // Egui's own zoom, which `track_window` copies into the settings each
+        // frame — so setting it here is all a change takes.
+        let zoom = ui.ctx().zoom_factor();
+        let step = option(
             ui,
-            "Zoom",
-            "Ctrl+plus and Ctrl+minus; Ctrl+0 is 100%. Kept between launches.",
+            "zoom",
+            Some(
+                "Click to zoom in, right-click to zoom out. Ctrl+plus, Ctrl+minus and Ctrl+0 \
+                 do the same from anywhere. Kept between launches.",
+            ),
             &p,
-            |ui| {
-                ui.label(figure(
-                    format!("{:.0}%", ui.ctx().zoom_factor() * 100.0),
-                    &p,
-                ));
+            |ui, width| {
+                let hit = option_box(ui, width, &format!("Zoom: {:.0}%", zoom * 100.0), true, &p);
+                if hit.clicked() {
+                    Some(ZOOM_STEP)
+                } else if hit.secondary_clicked() {
+                    Some(-ZOOM_STEP)
+                } else {
+                    None
+                }
             },
         );
+        if let Some(step) = step {
+            ui.ctx().set_zoom_factor(next_zoom(zoom, step));
+        }
     }
 
-    /// The dial and the two folder checks: rarely touched, and each one a
-    /// reason to read its line first.
+    /// The dial and the folder checks: rarely touched, and each one a reason
+    /// to read its `?` first.
     fn advanced_section(&mut self, ui: &mut Ui) {
         let p = self.palette;
         section(ui, "Advanced", &p);
-        if self.number_row(
+        if self.number(
             ui,
+            "downloads",
             "Parallel downloads",
             "4 to 6 is the balance. Higher, Telegram rate-limits instead.",
             true,
@@ -767,24 +750,24 @@ impl Shell {
         // that does that one click after reporting is a button pressed twice
         // by accident.
         let (checking, deduping) = (self.checking, self.deduping);
-        let mut check = false;
-        setting_row(
+        let check = action_option(
             ui,
-            "Check the folder",
+            "check_folder",
+            "Check the export folder",
+            !checking,
             "Lists leftovers and duplicate databases in the log. Changes nothing.",
             &p,
-            |ui| check = button(ui, "Check", !checking, false, &p).clicked(),
         );
         if check {
             self.check_folder();
         }
-        let mut dupes = false;
-        setting_row(
+        let dupes = action_option(
             ui,
-            "Duplicate media",
-            "Lists files stored more than once, largest first. Deletes nothing.",
+            "find_dupes",
+            "Find duplicate media",
+            !deduping,
+            "Lists files stored more than once, largest first, in the log. Deletes nothing.",
             &p,
-            |ui| dupes = button(ui, "Find", !deduping, false, &p).clicked(),
         );
         if dupes {
             self.find_dupes();
@@ -792,30 +775,29 @@ impl Shell {
 
         // **Where to look when something goes wrong**, and the way to hand it
         // to someone else without handing them the account.
-        let (mut log, mut data, mut copy) = (false, false, false);
-        setting_row(
+        let (data, log) = option(
             ui,
-            "Log and data folder",
-            "tgx.log holds every run's account of itself; never message text.",
+            "log_and_data",
+            Some(
+                "The data folder holds the sign-in, the settings and tgx.log. The log is \
+                 every run's account of itself, and never holds message text.",
+            ),
             &p,
-            |ui| {
-                data = button(ui, "Data folder", true, false, &p).clicked();
-                log = button(ui, "Log", true, false, &p).clicked();
+            |ui, width| {
+                let half = (width - ui.spacing().item_spacing.x) / 2.0;
+                let data = option_box(ui, half, "Open data folder", true, &p).clicked();
+                let log = option_box(ui, half, "Open log", true, &p).clicked();
+                (data, log)
             },
         );
-        setting_row(
+        let copy = action_option(
             ui,
+            "copy_diagnostics",
             "Copy diagnostics",
-            "For a bug report: version, Windows, and settings without credentials.",
+            true,
+            "For a bug report: version, Windows, and settings without credentials. Paths \
+             can include your Windows user name — look it over before posting it.",
             &p,
-            |ui| {
-                copy = button(ui, "Copy", true, false, &p)
-                    .on_hover_text(
-                        "Paths can include your Windows user name — look it over before \
-                         posting it.",
-                    )
-                    .clicked();
-            },
         );
         if log {
             self.open_or_warn(&tgx_tg::logging::log_file());
@@ -829,30 +811,34 @@ impl Shell {
             self.status = "Diagnostics copied — no credentials in them".into();
         }
 
-        let mut reset = false;
         let label = if self.reset_armed {
-            "Press again"
+            "Press again to reset"
         } else {
-            "Reset"
+            "Reset settings"
         };
-        setting_row(
+        let reset = action_option(
             ui,
-            "Reset settings",
-            "Everything here back to its default. Keeps the sign-in and the folder.",
+            "reset",
+            label,
+            !self.exporting,
+            "Everything here back to its default, on a second press. Keeps the sign-in, \
+             the export folder and the models folder.",
             &p,
-            |ui| reset = button(ui, label, !self.exporting, false, &p).clicked(),
         );
         if reset {
             self.reset_settings();
         }
-        row(ui, |ui| {
-            ui.label(meta(
-                "Keys: Ctrl+1–5 views · Ctrl+F filter · Ctrl+A tick all shown · \
-                 Ctrl+E export · F5 reload · Esc clear filter",
-                &p,
-            ));
-        });
-        row(ui, |ui| {
+
+        ui.add_space(space::STEP);
+        ui.vertical_centered(|ui| {
+            ui.add(
+                egui::Label::new(meta(
+                    "Ctrl+1–5 views · Ctrl+F filter · Ctrl+A tick all shown · Ctrl+E export · \
+                     F5 reload · Esc clear filter",
+                    &p,
+                ))
+                .wrap(),
+            );
             ui.label(meta(
                 format!("TelegramTools {}", env!("CARGO_PKG_VERSION")),
                 &p,
@@ -869,7 +855,7 @@ impl Shell {
 
     /// Reset settings, on the second press: every setting to its default
     /// **except** what is not a preference — the api_id, api_hash and phone
-    /// the sign-in needs, the destination (the Library and every database
+    /// the sign-in needs, the destination (Analysis and every database
     /// path hang off it), the models folder (gigabytes the account holder put
     /// somewhere on purpose), and the saved selections, which are work.
     pub(super) fn reset_settings(&mut self) {
@@ -916,56 +902,72 @@ impl Shell {
     fn date_rows(&mut self, ui: &mut Ui) {
         let p = self.palette;
         let mut commit = false;
-        for (label, why, which) in [
-            (
-                "From",
-                "Only messages from this day on, as 2026-01-31. Blank is the start.",
-                0,
-            ),
-            (
-                "Until",
-                "Up to and including this day. Blank is up to now.",
-                1,
-            ),
-        ] {
-            let form = &mut self.form;
-            let buffer = if which == 0 {
-                &mut form.date_from
-            } else {
-                &mut form.date_until
-            };
-            commit |= setting_row(ui, label, why, &p, |ui| {
-                ui.add(
-                    field(buffer, &p)
-                        .hint_text("YYYY-MM-DD")
-                        .desired_width(DATE_W),
-                )
-                .lost_focus()
-            });
-        }
+        commit |= self.entry(
+            ui,
+            "date_from",
+            "From",
+            "Only messages from this day on, as 2026-01-31. Blank is the start of the chat.",
+            true,
+            DATE_W,
+            "YYYY-MM-DD",
+            |f| &mut f.date_from,
+        );
+        commit |= self.entry(
+            ui,
+            "date_until",
+            "Until",
+            "Up to and including this day, as 2026-01-31. Blank is up to now.",
+            true,
+            DATE_W,
+            "YYYY-MM-DD",
+            |f| &mut f.date_until,
+        );
         if commit {
             self.commit_settings();
         }
         if let Err(e) = self.settings.date_range() {
-            row(ui, |ui| ui.label(text(e, &p)));
+            ui.vertical_centered(|ui| ui.label(text(e, &p)));
         }
     }
 
-    /// A label with a narrow number field on the right. Returns whether the
-    /// field just lost focus, which is when the value is a decision.
-    fn number_row(
+    /// A number: its name in the box, a narrow field on the right. Returns
+    /// whether the field just lost focus, which is when the value is a
+    /// decision.
+    fn number(
         &mut self,
         ui: &mut Ui,
+        key: &str,
         label: &str,
         why: &str,
         enabled: bool,
         which: impl Fn(&mut crate::settings_form::SettingsForm) -> &mut String,
     ) -> bool {
+        self.entry(ui, key, label, why, enabled, NUMBER_W, "", which)
+    }
+
+    /// A short value typed into the box: [`Shell::number`], and the dates.
+    #[allow(clippy::too_many_arguments)]
+    fn entry(
+        &mut self,
+        ui: &mut Ui,
+        key: &str,
+        label: &str,
+        why: &str,
+        enabled: bool,
+        width: f32,
+        hint: &str,
+        which: impl Fn(&mut crate::settings_form::SettingsForm) -> &mut String,
+    ) -> bool {
         let p = self.palette;
         let form = &mut self.form;
-        setting_row(ui, label, why, &p, |ui| {
-            ui.add_enabled(enabled, field(which(form), &p).desired_width(NUMBER_W))
+        option(ui, key, Some(why), &p, |ui, room| {
+            field_box(ui, room, label, enabled, &p, |ui| {
+                ui.add_enabled(
+                    enabled,
+                    field(which(form), &p).hint_text(hint).desired_width(width),
+                )
                 .lost_focus()
+            })
         })
     }
 
@@ -998,11 +1000,25 @@ impl Shell {
 /// What a switch does to the settings when pressed.
 type Flip = fn(&mut tgx_tg::config::Settings);
 
+/// How wide the column is at most. Wide enough for the longest `Name: Value`
+/// and a path, narrow enough that the eye runs straight down it.
+const COLUMN_W: f32 = 560.0;
+/// How tall every box is, the `?` included — it is square.
+const OPTION_H: f32 = 34.0;
+/// The gap between two boxes, across and down.
+const OPTION_GAP: f32 = 6.0;
+/// How wide a button beside a path field is.
+const BUTTON_W: f32 = 86.0;
+/// How wide a `?`'s explanation is.
+const HELP_W: f32 = 340.0;
 /// How wide a number field is. Every value in this panel is at most five
 /// digits, and a field sized for a sentence invites one.
-const NUMBER_W: f32 = 80.0;
-/// How wide the model dropdown is: a quantised model's long file name.
-const MODEL_W: f32 = 320.0;
+const NUMBER_W: f32 = 72.0;
+/// How wide a date field is: `2026-01-31` and a little air.
+const DATE_W: f32 = 96.0;
+/// One click on Zoom, and how far it may go either way.
+const ZOOM_STEP: f32 = 0.1;
+const ZOOM_RANGE: std::ops::RangeInclusive<f32> = 0.5..=3.0;
 
 /// Settings › Summaries › How to add a model. `docs/MODELS.md` is the long
 /// version; keep the two saying the same.
@@ -1025,56 +1041,296 @@ const ADD_A_MODEL: [&str; 5] = [
 ];
 const LLAMA_RELEASES: &str = "https://github.com/ggml-org/llama.cpp/releases";
 const HUGGING_FACE: &str = "https://huggingface.co/models?library=gguf";
-/// How wide a date field is: `2026-01-31` and a little air.
-const DATE_W: f32 = 104.0;
 
-/// A two-cell [`segmented`] strip inside a [`setting_row`]'s control, which
-/// is laid out right to left: the cells are given reversed and the answer
-/// turned back round, so they still read left to right.
-fn pair(ui: &mut Ui, cells: [&str; 2], at: usize, p: &Palette) -> Option<usize> {
-    segmented(ui, &[cells[1], cells[0]], 1 - at, p).map(|i| 1 - i)
+/// How far a `?` hangs past the column's right edge: its gap and its square.
+const HANG: f32 = OPTION_GAP + OPTION_H;
+
+/// The column, centred in the panel, at most [`COLUMN_W`] wide.
+///
+/// **The boxes are what is centred; the `?`s hang outside.** The column was
+/// the boxes and the `?`s together, so the boxes sat half a square left of
+/// the middle and the page never looked centred. Now the column is the boxes
+/// alone, and the room either side keeps space for the `?`s, so the
+/// headings and the centred lines are centred on the boxes too.
+fn column(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    let room = ui.available_width();
+    let width = COLUMN_W
+        .min(room - 2.0 * (GUTTER + HANG))
+        .max(OPTION_H * 6.0);
+    let left = ((room - width) / 2.0).max(0.0);
+    ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+        ui.add_space(left);
+        ui.vertical(|ui| {
+            ui.set_width(width);
+            ui.spacing_mut().item_spacing = egui::vec2(OPTION_GAP, OPTION_GAP);
+            add(ui);
+        });
+    });
 }
 
-/// One switch: [`setting_row`] with a tick box for its control.
-fn switch_row(ui: &mut Ui, label: &str, why: &str, on: bool, enabled: bool, p: &Palette) -> bool {
-    setting_row(ui, label, why, p, |ui| {
-        tick_box(ui, on, enabled, p).clicked()
+/// A section heading, centred over its boxes. **Space above it, and no line
+/// under it**: a gap four times the one between two boxes is not ambiguous
+/// about where a group starts.
+fn section(ui: &mut Ui, heading: &str, p: &Palette) {
+    ui.add_space(space::BREAK);
+    ui.vertical_centered(|ui| ui.label(eyebrow(heading, p)));
+    ui.add_space(space::TIGHT);
+}
+
+/// One line of the column: `control` gets the column's whole width and
+/// returns what was pressed; the `?` goes just past the column's right edge,
+/// outside it (see [`column`]). `why: None` has no `?`.
+fn option<R>(
+    ui: &mut Ui,
+    key: &str,
+    why: Option<&str>,
+    p: &Palette,
+    control: impl FnOnce(&mut Ui, f32) -> R,
+) -> R {
+    ui.horizontal(|ui| {
+        let width = ui.available_width();
+        let origin = ui.cursor().min;
+        let out = control(ui, width);
+        if let Some(why) = why {
+            // A child placed by hand, not a widget in the line: the line is
+            // the column's width, and the `?` is not in it.
+            let square = egui::Rect::from_min_size(
+                egui::pos2(origin.x + width + OPTION_GAP, origin.y),
+                egui::Vec2::splat(OPTION_H),
+            );
+            let mut beside = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(square)
+                    .layout(Layout::left_to_right(Align::Min)),
+            );
+            help_button(&mut beside, key, why, p);
+        }
+        out
+    })
+    .inner
+}
+
+/// A setting with a fixed set of values, as `Name: Value`. A click moves to
+/// the next value and a right-click to the one before; returns the new index
+/// only when it changed, so a stray click writes no `settings.json`.
+#[allow(clippy::too_many_arguments)]
+fn cycle(
+    ui: &mut Ui,
+    key: &str,
+    label: &str,
+    values: &[&str],
+    at: usize,
+    enabled: bool,
+    why: &str,
+    p: &Palette,
+) -> Option<usize> {
+    let n = values.len();
+    let at = at.min(n - 1);
+    option(ui, key, Some(why), p, |ui, width| {
+        let hit = option_box(ui, width, &format!("{label}: {}", values[at]), enabled, p);
+        if hit.clicked() {
+            Some((at + 1) % n)
+        } else if hit.secondary_clicked() {
+            Some((at + n - 1) % n)
+        } else {
+            None
+        }
+    })
+    .filter(|i| *i != at)
+}
+
+/// An on/off setting: [`cycle`] over Off and On. Returns whether it was
+/// pressed.
+fn switch(
+    ui: &mut Ui,
+    key: &str,
+    label: &str,
+    on: bool,
+    enabled: bool,
+    why: &str,
+    p: &Palette,
+) -> bool {
+    cycle(
+        ui,
+        key,
+        label,
+        &["Off", "On"],
+        usize::from(on),
+        enabled,
+        why,
+        p,
+    )
+    .is_some()
+}
+
+/// A box that does something rather than holding a value.
+fn action_option(
+    ui: &mut Ui,
+    key: &str,
+    label: &str,
+    enabled: bool,
+    why: &str,
+    p: &Palette,
+) -> bool {
+    option(ui, key, Some(why), p, |ui, width| {
+        option_box(ui, width, label, enabled, p).clicked()
     })
 }
 
-/// A tick box and its label, as one control — for the media categories,
-/// which sit seven to a wrapped strip with no room for a row each.
-fn tick(ui: &mut Ui, label: &str, on: bool, enabled: bool, p: &Palette) -> bool {
-    tick_box(ui, on, enabled, p)
-        .union(action(ui, text(label, p), enabled))
-        .clicked()
+/// A path: its name over the line, then the field, its buttons and the `?`.
+/// Returns whether the field just lost focus, and which button was pressed.
+#[allow(clippy::too_many_arguments)]
+fn path_option(
+    ui: &mut Ui,
+    key: &str,
+    label: &str,
+    why: &str,
+    buffer: &mut String,
+    hint: &str,
+    buttons: &[&str],
+    p: &Palette,
+) -> (bool, Option<usize>) {
+    ui.label(meta(label, p));
+    option(ui, key, Some(why), p, |ui, width| {
+        let gap = ui.spacing().item_spacing.x;
+        let room = (width - buttons.len() as f32 * (BUTTON_W + gap)).max(NUMBER_W);
+        let entry = ui.add_sized(egui::vec2(room, OPTION_H), field(buffer, p).hint_text(hint));
+        let commit = entry.lost_focus();
+        if !buffer.is_empty() {
+            entry.on_hover_text(buffer.as_str());
+        }
+        let mut pressed = None;
+        for (i, b) in buttons.iter().enumerate() {
+            if option_box(ui, BUTTON_W, b, true, p).clicked() {
+                pressed = Some(i);
+            }
+        }
+        (commit, pressed)
+    })
 }
 
-/// How wide [`tick`] will draw: the box (`tick_box` is one reading size
-/// square), the gap, and the label as a frameless button, padding included.
-fn tick_width(ui: &Ui, label: &str, p: &Palette) -> f32 {
-    let galley = egui::WidgetText::from(text(label, p)).into_galley(
-        ui,
-        Some(egui::TextWrapMode::Extend),
-        f32::INFINITY,
-        egui::TextStyle::Body,
-    );
-    tgx_ui::tokens::window::READING
-        + space::TIGHT
-        + galley.size().x
-        + 2.0 * ui.spacing().button_padding.x
-}
-
-/// A section heading. **Space above it, and no line under it.**
+/// The box every setting is: `width` wide, [`OPTION_H`] tall, its words in
+/// the middle. **Painted, not an `egui::Button`**, because a button places
+/// its text by the enclosing layout's alignment, and a box whose words sit
+/// at its left edge in one place and its middle in another is two designs.
 ///
-/// `BREAK` above the heading does the work a rule used to: a gap four times
-/// the size of the one between two rows is not ambiguous about where a group
-/// starts. Capitals, because this is the one thing capitals are for — a
-/// section label of three words or fewer.
-fn section(ui: &mut Ui, heading: &str, p: &Palette) {
-    ui.add_space(space::BREAK);
-    row(ui, |ui| ui.label(eyebrow(heading, p)));
-    ui.add_space(space::TIGHT);
+/// Hover brings the border up to the ink colour — the box is the control, so
+/// it says so under the pointer. Disabled keeps the fill, loses the border's
+/// brightness and greys the words: still plainly a setting, plainly not
+/// available.
+fn option_box(ui: &mut Ui, width: f32, label: &str, enabled: bool, p: &Palette) -> Response {
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, OPTION_H), sense);
+    paint_box(ui, rect, enabled && response.hovered(), enabled, p);
+    ui.painter_at(rect.shrink(1.0)).text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        tgx_ui::fonts::sans(window::READING),
+        if enabled { p.fg } else { p.muted },
+    );
+    if enabled {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    }
+}
+
+/// The same box with its name on the left and a field on the right, for a
+/// value that is typed rather than chosen.
+fn field_box<R>(
+    ui: &mut Ui,
+    width: f32,
+    label: &str,
+    enabled: bool,
+    p: &Palette,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, OPTION_H), Sense::hover());
+    paint_box(ui, rect, false, enabled, p);
+    let mut inner = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink2(egui::vec2(space::TIGHT, 0.0)))
+            .layout(Layout::right_to_left(Align::Center)),
+    );
+    let out = add(&mut inner);
+    inner.with_layout(Layout::left_to_right(Align::Center), |ui| {
+        ui.label(if enabled {
+            text(label, p)
+        } else {
+            meta(label, p)
+        })
+    });
+    out
+}
+
+fn paint_box(ui: &Ui, rect: egui::Rect, hovered: bool, enabled: bool, p: &Palette) {
+    let edge = match (enabled, hovered) {
+        (true, true) => p.fg,
+        (true, false) => p.hairline,
+        (false, _) => p.rule,
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, egui::CornerRadius::ZERO, p.surface);
+    painter.rect_stroke(
+        rect,
+        egui::CornerRadius::ZERO,
+        Stroke::new(1.0_f32, edge),
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// The square `?` beside a box, and the explanation it opens.
+///
+/// **A click, not a hover**: a hover is not discoverable, and on a touchpad it
+/// means holding still. Opened below and to the left, since the `?` is at the
+/// column's right edge and the explanation is about the box beside it.
+///
+/// `key` is the setting's own name and **is** the popup's identity. It must
+/// not be left to the auto-id: the panel shows a different set of boxes in
+/// each format, so an id derived from position would hand an explanation to a
+/// different setting the moment the format changed.
+fn help_button(ui: &mut Ui, key: &str, why: &str, p: &Palette) {
+    let hit = option_box(ui, OPTION_H, "?", true, p);
+    let _ = egui::Popup::from_toggle_button_response(&hit)
+        .id(egui::Id::new(("settings-help", key)))
+        .align(egui::RectAlign::BOTTOM_END)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width(HELP_W)
+        .gap(4.0)
+        // The window's own frame, not egui's: `Frame::popup` is rounded and
+        // shadowed, which `theme::install` takes off everything else.
+        .frame(
+            egui::Frame::NONE
+                .fill(p.bg)
+                .stroke(Stroke::new(1.0_f32, p.hairline))
+                .inner_margin(Margin::same(12)),
+        )
+        .show(|ui| {
+            ui.set_max_width(HELP_W);
+            ui.add(egui::Label::new(text(why, p)).wrap());
+        });
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on {
+        "On"
+    } else {
+        "Off"
+    }
+}
+
+/// The zoom one step on, rounded to a whole percent so that ten clicks do
+/// not drift to 109.99999%, and held to [`ZOOM_RANGE`].
+fn next_zoom(zoom: f32, step: f32) -> f32 {
+    ((zoom + step) * 100.0)
+        .round()
+        .clamp(*ZOOM_RANGE.start() * 100.0, *ZOOM_RANGE.end() * 100.0)
+        / 100.0
 }
 
 /// Which of [`THEMES`] a stored name is. Anything unknown is Dark, which is
@@ -1107,9 +1363,9 @@ fn set_extra(s: &mut tgx_tg::config::Settings, key: &str, on: bool) {
     }
 }
 
-// -- the three `[?]` left --------------------------------------------------
+// -- the long explanations -------------------------------------------------
 //
-// Where a choice has consequences one line cannot hold.
+// Where a choice has consequences a sentence cannot hold.
 
 /// What the format really chooses, which is more than a file format.
 const MODE_HELP: &str = "Folder reproduces Telegram Desktop's own export: a folder per chat, \
@@ -1122,12 +1378,12 @@ const MODE_HELP: &str = "Folder reproduces Telegram Desktop's own export: a fold
      what Folder costs and be incremental in name only.";
 
 const REREAD_ALL_HELP: &str =
-    "Read the whole chat again instead of the newest few hundred. Slow, and \
-     the only way to catch an edit or a deletion older than the re-read window \
-     — or to pick up media after raising the size limit.";
+    "Read the whole chat again instead of the newest few hundred. Slow on a large \
+     chat, and the only way to catch an edit or a deletion older than Messages to \
+     re-read — or to pick up media after raising the size limit.";
 
 /// The [`tgx_tg::config::Settings::profile_photos`] values, in the order the
-/// strip shows them left to right.
+/// box steps through them.
 const USERPICS: [&str; 3] = [
     tgx_tg::config::USERPICS_OFF,
     tgx_tg::config::USERPICS_CURRENT,
@@ -1149,19 +1405,19 @@ mod tests {
 
     #[test]
     fn every_media_category_the_planner_knows_has_a_label() {
-        // A key here that `plan.rs` does not compare against is a tick box that
+        // A key here that `plan.rs` does not compare against is a box that
         // switches nothing off; a key there with no box is a category the user
         // cannot reach.
         let labelled: Vec<&str> = MEDIA_LABELS.iter().map(|(k, _)| *k).collect();
         for key in MEDIA_KINDS {
-            assert!(labelled.contains(&key), "{key} has no tick box");
+            assert!(labelled.contains(&key), "{key} has no box");
         }
         assert_eq!(labelled.len(), MEDIA_KINDS.len());
     }
 
     #[test]
     fn every_extra_reads_and_writes_its_own_field() {
-        // A copy-paste in `set_extra` would silently point two rows at one
+        // A copy-paste in `set_extra` would silently point two boxes at one
         // field, and the panel would look fine while switching the wrong thing.
         for (key, _, _) in EXTRAS {
             let mut s = Settings::default();
@@ -1186,31 +1442,31 @@ mod tests {
     }
 
     #[test]
-    fn every_line_under_a_setting_is_one_sentence_and_no_two_are_the_same() {
-        // The line under a setting is what replaced the `[?]`, so it has to
-        // be there, be short enough to stay one line in a column, and not be
-        // a copy of its neighbour — the shape a copy-paste takes here.
-        let lines: Vec<&str> = EXTRAS.iter().map(|(_, _, why)| *why).collect();
+    fn every_explanation_is_a_sentence_and_no_two_are_the_same() {
+        // What a `?` says is the only place the panel explains a setting, so
+        // it has to be there, say something, and not be a copy of its
+        // neighbour — the shape a copy-paste takes here.
+        let mut lines: Vec<&str> = EXTRAS.iter().map(|(_, _, why)| *why).collect();
+        lines.extend([MODE_HELP, REREAD_ALL_HELP, PHOTOS_HELP]);
         for why in &lines {
             assert!(why.len() > 20, "too short to say anything: {why}");
-            assert!(why.len() <= 80, "more than a line: {why}");
             assert!(why.trim_end().ends_with('.'), "not a sentence: {why}");
         }
         let mut unique = lines.clone();
         unique.sort_unstable();
         unique.dedup();
-        assert_eq!(unique.len(), lines.len(), "two settings share a line");
-        // And the three that kept a `[?]` say more than a line could.
-        for long in [MODE_HELP, REREAD_ALL_HELP, PHOTOS_HELP] {
-            assert!(long.len() > 120, "a [?] that fits on a line: {long}");
-        }
+        assert_eq!(
+            unique.len(),
+            lines.len(),
+            "two settings share an explanation"
+        );
     }
 
     #[test]
-    fn the_appearance_control_shows_the_palette_that_is_actually_on_screen() {
+    fn the_theme_box_shows_the_palette_that_is_actually_on_screen() {
         // `Palette::named` treats anything that is not `light` as dark, so a
-        // settings file naming something else must fill the Dark cell — a strip
-        // showing Light over a dark window is worse than no strip.
+        // settings file naming something else must read Dark — a box saying
+        // Light over a dark window is worse than no box.
         for (name, expect) in [("light", 0), ("dark", 1), ("chartreuse", 1)] {
             assert_eq!(theme_index(name), expect, "{name}");
             assert_eq!(
@@ -1219,5 +1475,16 @@ mod tests {
             );
         }
         assert_eq!(theme_index("system"), 2);
+    }
+
+    #[test]
+    fn zoom_steps_land_on_whole_percents_and_stop_at_the_ends() {
+        let mut z = 1.0;
+        for _ in 0..10 {
+            z = next_zoom(z, ZOOM_STEP);
+        }
+        assert_eq!(z, 2.0);
+        assert_eq!(next_zoom(3.0, ZOOM_STEP), 3.0);
+        assert_eq!(next_zoom(0.5, -ZOOM_STEP), 0.5);
     }
 }

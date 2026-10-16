@@ -110,6 +110,17 @@ pub fn block<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     gutter(ui, add)
 }
 
+/// Content the reader may select and copy: every label added inside is
+/// selectable text. The theme turns selection off for the window's chrome
+/// (`theme::install`); this is where it comes back on.
+pub fn selectable<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.scope(|ui| {
+        ui.style_mut().interaction.selectable_labels = true;
+        add(ui)
+    })
+    .inner
+}
+
 fn gutter<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     egui::Frame::NONE
         .inner_margin(Margin::symmetric(GUTTER as i8, 0))

@@ -2,7 +2,7 @@
 //! model's words.
 //!
 //! **Chats down the left, the summary on the right.** The chats are the
-//! Library's — the same folder, the same rows — and under them the summaries
+//! Analysis view's — the same folder, the same rows — and under them the summaries
 //! already saved for the one picked. On the right: the days, the length, the
 //! scope and the language, a line saying what that range will cost before
 //! anything is asked of the model, then the summary as it is written.
@@ -31,8 +31,8 @@ use tga_run::summary::{
 };
 use tga_run::tga_sum::{server, Event, Grounding, Keeper, Lang, Launch, Length, Timings, Turn};
 use tgx_ui::components::{
-    action, block, button, eyebrow, field, figure, meta, row, rule, segmented, text, EmptyState,
-    GUTTER,
+    action, block, button, eyebrow, field, figure, meta, row, rule, segmented, text, tick_box,
+    EmptyState, GUTTER,
 };
 use tgx_ui::tokens::space;
 
@@ -80,6 +80,164 @@ const ROW_HEIGHT: f32 = 30.0;
 /// A date field: `2026-01-31` and a little air.
 const DATE_W: f32 = 104.0;
 
+/// The form's label column, so the controls of both pages start on one line.
+const LABEL_W: f32 = 56.0;
+
+/// One line of either page's form: a label in its column, then the controls,
+/// wrapping when the page is narrow.
+pub(super) fn form_row<R>(
+    ui: &mut Ui,
+    label: &str,
+    p: &tgx_ui::tokens::Palette,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    block(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = space::STEP;
+            let h = ui.spacing().interact_size.y;
+            ui.allocate_ui_with_layout(
+                egui::vec2(LABEL_W, h),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.set_min_size(egui::vec2(LABEL_W, h));
+                    ui.label(meta(label, p));
+                },
+            );
+            add(ui)
+        })
+        .inner
+    })
+}
+
+/// From and To, under a Days row set to Dates.
+pub(super) fn dates_row(
+    ui: &mut Ui,
+    from: &mut String,
+    to: &mut String,
+    enabled: bool,
+    p: &tgx_ui::tokens::Palette,
+) {
+    form_row(ui, "From", p, |ui| {
+        ui.add_enabled(
+            enabled,
+            field(from, p).hint_text("YYYY-MM-DD").desired_width(DATE_W),
+        );
+        ui.label(meta("To", p));
+        ui.add_enabled(
+            enabled,
+            field(to, p).hint_text("YYYY-MM-DD").desired_width(DATE_W),
+        );
+    });
+}
+
+/// Where "24 h" and "N days" count back from: each chat's last message, or
+/// now. One tick box under the Days row of both pages, sharing one setting
+/// (`summary_from_last`), so the two pages cannot disagree about it — which
+/// they did, silently, before it existed. Disabled, not hidden, for days it
+/// does not touch, so it is always where the eye looks for it. True when
+/// pressed.
+pub(super) fn from_last_row(
+    ui: &mut Ui,
+    on: bool,
+    enabled: bool,
+    p: &tgx_ui::tokens::Palette,
+) -> bool {
+    ui.add_space(space::TIGHT);
+    form_row(ui, "", p, |ui| {
+        tick_box(ui, on, enabled, p)
+            .union(action(
+                ui,
+                text("From each chat's last message, not from now", p),
+                enabled,
+            ))
+            .clicked()
+            && enabled
+    })
+}
+
+/// The first band of both columns: the page switch on the left, the page's
+/// heading on the right.
+pub(super) const HEAD_H: f32 = 56.0;
+/// The second band: the filter on the left, Catch up's strip of chats on the
+/// right.
+pub(super) const BAR_H: f32 = 52.0;
+
+/// A band of exactly `h`, its contents centred on one line, ruled underneath.
+///
+/// **Both columns are cut into the same bands.** Each laid its own lines out
+/// with its own spacing, so the list's heading, filter and rules sat at
+/// heights that matched nothing on the page beside them, and the view read as
+/// two unrelated panels. A band is a height, not a spacing: whatever is in it,
+/// the rule under it lands where the other column's does.
+pub(super) fn band<R>(
+    ui: &mut Ui,
+    h: f32,
+    p: &tgx_ui::tokens::Palette,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), Sense::hover());
+    // A child, not a scope: a scope moves the column's cursor to the bottom
+    // of what was drawn in it, so a band whose contents were shorter than it
+    // put its rule inside itself, ten points above the other column's.
+    let mut inside = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink2(egui::vec2(GUTTER, 0.0)))
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    let r = add(&mut inside);
+    rule(ui, p);
+    r
+}
+
+/// A summary's card: a filled panel inset from the page's edges, on either
+/// page.
+pub(super) fn card<R>(
+    ui: &mut Ui,
+    p: &tgx_ui::tokens::Palette,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    egui::Frame::NONE
+        .fill(p.surface)
+        .corner_radius(egui::CornerRadius::same(4))
+        .inner_margin(egui::Margin::symmetric(0, space::STEP as i8))
+        .outer_margin(egui::Margin::symmetric(GUTTER as i8, 0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
+/// The hint where a page's summaries will be, before there are any.
+pub(super) fn hint(ui: &mut Ui, says: &str, p: &tgx_ui::tokens::Palette) {
+    ui.add_space(space::BREAK);
+    block(ui, |ui| ui.add(egui::Label::new(meta(says, p)).wrap()));
+}
+
+/// A card's first line: the chat's name.
+pub(super) fn card_title(title: &str, p: &tgx_ui::tokens::Palette) -> egui::RichText {
+    text(title, p).font(tgx_ui::fonts::semibold(tgx_ui::tokens::window::READING))
+}
+
+/// The chat filter at the head of either page's list.
+pub(super) fn filter_row(
+    ui: &mut Ui,
+    filter: &mut String,
+    focus: &mut bool,
+    p: &tgx_ui::tokens::Palette,
+) {
+    band(ui, BAR_H, p, |ui| {
+        let f = ui.add(
+            field(filter, p)
+                .hint_text("Filter chats…  Ctrl+F")
+                .desired_width(ui.available_width()),
+        );
+        if std::mem::take(focus) {
+            f.request_focus();
+        }
+    });
+}
+
 /// What a summary covers: the whole group, each topic apart, or one topic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub(super) enum Scope {
@@ -102,22 +260,67 @@ pub(super) struct Picked {
     pub(super) home: PathBuf,
 }
 
+/// The days the One chat form reads, as its Days row offers them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Span {
+    /// The 24 hours before the chat's last message ([`Chat::last_hours`]),
+    /// or before now, by `from_last`.
+    Hours24,
+    /// The last N days, ending on the chat's last day or on today, by
+    /// `from_last`.
+    Last(i64),
+    /// The days in From and To.
+    Dates,
+}
+
+/// The Days row: label and choice.
+const SPANS: [(&str, Span); 5] = [
+    // "24 h", as on Catch up, where the row is one segment longer.
+    ("24 h", Span::Hours24),
+    // Short, so the row fits the window's floor without wrapping.
+    ("1 day", Span::Last(1)),
+    ("7 days", Span::Last(7)),
+    ("30 days", Span::Last(30)),
+    ("Dates", Span::Dates),
+];
+
+/// The view's two pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum Mode {
+    /// Every chat with something new, a short summary each. See
+    /// [`super::catchup`].
+    #[default]
+    CatchUp,
+    /// One chat, any days, any length, and questions about them.
+    OneChat,
+}
+
 /// Everything the Summaries view remembers between frames.
 pub(super) struct SummariesState {
+    pub(super) mode: Mode,
+    pub(super) catchup: super::catchup::CatchupState,
     /// The model server this window started, if it did. Shared with the
     /// worker that starts it.
     pub(super) keeper: Arc<Keeper>,
-    filter: String,
+    /// The chat filter, shared by both pages' lists.
+    pub(super) filter: String,
     pub(super) picked: Option<Picked>,
     chat: Option<Arc<Chat>>,
     reading: Option<Receiver<Result<Arc<Chat>, String>>>,
+    pub(super) span: Span,
+    /// Settings' `summary_from_last`: the spans count back from the chat's
+    /// last message rather than from now.
+    pub(super) from_last: bool,
+    /// For "24 h": only what was sent after this, unix seconds — fixed when
+    /// the span was set, so the hours do not creep with the clock.
+    after: Option<i64>,
     pub(super) from: String,
     pub(super) to: String,
     pub(super) length: Length,
     pub(super) lang: Lang,
     pub(super) scope: Scope,
     /// The estimate, and the inputs it is of — recounted when they change.
-    estimate: Option<((String, String, Scope), Estimate)>,
+    estimate: Option<(AskKey, Estimate)>,
     job: Option<Job>,
     pub(super) status: String,
     part: Option<(usize, usize)>,
@@ -130,7 +333,7 @@ pub(super) struct SummariesState {
     /// Ctrl+F: the chat filter takes the focus when next drawn.
     pub(super) focus_filter: bool,
     /// A citation clicked this frame. The shell takes it and opens the Viewer.
-    pub(super) cite: Option<(super::library::Read, i64)>,
+    pub(super) cite: Option<(super::analysis::Read, i64)>,
     /// Somebody else's process on the model server's port — another
     /// program's llama-server, usually — as last looked; `None` when the port is free
     /// or the server on it is this window's.
@@ -182,17 +385,23 @@ impl Found {
     }
 }
 
-/// The chat, the days and the scope a conversation is about.
-type AskKey = (PathBuf, String, String, Scope);
+/// The chat, the days, the start of the 24 hours when it is only those, and
+/// the scope a conversation is about.
+type AskKey = (PathBuf, String, String, Option<i64>, Scope);
 
 impl Default for SummariesState {
     fn default() -> Self {
         SummariesState {
+            mode: Mode::CatchUp,
+            catchup: Default::default(),
             keeper: Arc::new(Keeper::new()),
             filter: String::new(),
             picked: None,
             chat: None,
             reading: None,
+            span: Span::Last(7),
+            from_last: true,
+            after: None,
             from: String::new(),
             to: String::new(),
             length: Length::Short,
@@ -235,6 +444,7 @@ impl SummariesState {
             || self.reading.is_some()
             || self.asking.is_some()
             || self.looking_models.is_some()
+            || self.catchup.busy()
     }
 
     /// A question is being answered.
@@ -242,10 +452,10 @@ impl SummariesState {
         self.asking.is_some()
     }
 
-    /// The model is in use: a summary being written or a question answered.
-    /// One at a time — the server has one slot.
+    /// The model is in use: a summary being written, a question answered or
+    /// a catch-up running. One at a time — the server has one slot.
     pub(super) fn using_model(&self) -> bool {
-        self.job.is_some() || self.asking.is_some()
+        self.job.is_some() || self.asking.is_some() || self.catchup.running()
     }
 
     /// The days a question asked now would be about.
@@ -254,6 +464,11 @@ impl SummariesState {
             self.picked.as_ref()?.path.clone(),
             self.from.trim().to_string(),
             self.to.trim().to_string(),
+            if self.span == Span::Hours24 {
+                self.after
+            } else {
+                None
+            },
             self.scope,
         ))
     }
@@ -278,6 +493,11 @@ impl SummariesState {
 
     /// The options the form says, or why they cannot be.
     pub(super) fn options(&self) -> Result<Options, String> {
+        // A chat's own last 24 hours wait for it to be read.
+        let after = match self.span {
+            Span::Hours24 => Some(self.after.ok_or("The chat is still being read")?),
+            _ => None,
+        };
         let day = |s: &str, which: &str| {
             chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
                 .map_err(|_| format!("{which} is not a day like 2026-01-31"))
@@ -304,32 +524,72 @@ impl SummariesState {
             lang: self.lang,
             by_topic,
             topic,
+            after,
         })
     }
 
-    /// The range ending on the chat's last day, `days` long.
+    /// Set the Days row to `span`, and From and To to what it means for the
+    /// chat read. Dates keeps the days typed, or the last week when there are
+    /// none.
+    pub(super) fn set_span(&mut self, span: Span) {
+        self.span = span;
+        self.after = None;
+        match span {
+            Span::Hours24 => {
+                let hours = if self.from_last {
+                    self.chat.as_ref().and_then(|c| c.last_hours())
+                } else {
+                    // The clock's last 24 hours, whether or not the chat
+                    // said anything in them: then the line says it did not.
+                    Some(run::clock_hours(chrono::Local::now().timestamp()))
+                };
+                if let Some((after, from, to)) = hours {
+                    self.after = Some(after);
+                    self.from = from.to_string();
+                    self.to = to.to_string();
+                }
+            }
+            Span::Last(n) => self.last(n),
+            Span::Dates => {
+                if self.options().is_err() {
+                    self.last(7);
+                }
+            }
+        }
+    }
+
+    /// The range `days` long ending on the chat's last day, or on today.
     fn last(&mut self, days: i64) {
-        let Some((first, last)) = self.chat.as_ref().and_then(|c| c.span()) else {
-            return;
+        let span = self.chat.as_ref().and_then(|c| c.span());
+        let end = if self.from_last {
+            match span {
+                Some((_, last)) => last,
+                None => return,
+            }
+        } else {
+            chrono::Local::now().date_naive()
         };
-        let from = (last - chrono::Duration::days(days - 1)).max(first);
+        let mut from = end - chrono::Duration::days(days - 1);
+        if let Some((first, _)) = span {
+            from = from.max(first).min(end);
+        }
         self.from = from.to_string();
-        self.to = last.to_string();
+        self.to = end.to_string();
     }
 
     /// The estimate for the form as it stands, recounted only when it changed.
     fn estimate(&mut self) -> Option<Estimate> {
         let chat = self.chat.clone()?;
         let options = self.options().ok()?;
-        let key = (self.from.clone(), self.to.clone(), self.scope);
+        let key = self.ask_key()?;
         if self.estimate.as_ref().map(|(k, _)| k) != Some(&key) {
-            let e = chat.estimate(options.from, options.to, options.topic);
+            let e = chat.estimate(&options);
             self.estimate = Some((key, e));
             // A summary of exactly these options already on disk is shown at
             // once — unless one is being written, which is what is shown.
             if self.job.is_none() {
                 if let Some(home) = self.picked.as_ref().map(|p| p.home.clone()) {
-                    let path = options.path(&home, &chat);
+                    let path = options.path(&home, &chat.topics());
                     if path.is_file() && self.shown.as_ref() != Some(&path) {
                         self.show_file(&path);
                     }
@@ -422,6 +682,7 @@ impl SummariesState {
 
     /// Apply what the workers have said since the last frame.
     pub(super) fn drain(&mut self) {
+        self.catchup.drain();
         if let Some(rx) = &self.reading {
             match rx.try_recv() {
                 Ok(Ok(chat)) => {
@@ -429,9 +690,9 @@ impl SummariesState {
                     let n = chat.export.msgs.len();
                     self.chat = Some(chat);
                     self.estimate = None;
-                    if self.options().is_err() {
-                        self.last(7);
-                    }
+                    // The Days row is kept from chat to chat; what it
+                    // means is this chat's.
+                    self.set_span(self.span);
                     if let Scope::One(t) = self.scope {
                         if t >= self.chat.as_ref().map_or(0, |c| c.topics().len()) {
                             self.scope = Scope::Whole;
@@ -583,6 +844,7 @@ impl SummariesState {
     }
 
     pub(super) fn stop(&mut self) {
+        self.catchup.stop();
         if let Some(job) = &self.job {
             job.stop();
             self.status = "Stopping".into();
@@ -596,7 +858,7 @@ impl SummariesState {
 
 /// The model server as Settings › Summaries describes it: its port, how to
 /// start the model, and the OCR from the same models folder.
-fn summary_server(settings: &tgx_tg::config::Settings) -> Server {
+pub(super) fn summary_server(settings: &tgx_tg::config::Settings) -> Server {
     let (exe, model) = launch_files(settings);
     let launch = exe.zip(model).map(|(exe, model)| Launch {
         exe,
@@ -624,7 +886,7 @@ fn wake(ctx: &egui::Context) -> tga_run::job::Wake {
 
 impl Shell {
     /// Pick a chat: read it on a worker, and list its saved summaries.
-    fn summaries_pick(&mut self, entry: &Entry, ctx: &egui::Context) {
+    pub(super) fn summaries_pick(&mut self, entry: &Entry, ctx: &egui::Context) {
         let picked = Picked {
             path: entry.target.path().to_path_buf(),
             chat_id: entry.chat_id,
@@ -708,6 +970,10 @@ impl Shell {
 
     /// The view's half of the top bar: Stop, and the one red.
     pub(super) fn summaries_actions(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        if self.summaries.mode == Mode::CatchUp {
+            self.catchup_actions(ui, ctx);
+            return;
+        }
         let p = self.palette;
         let s = &self.summaries;
         let ready = !s.using_model()
@@ -735,6 +1001,14 @@ impl Shell {
     /// The status bar's line while this view shows.
     pub(super) fn summaries_status(&self) -> (String, String) {
         let s = &self.summaries;
+        if s.mode == Mode::CatchUp {
+            let c = &s.catchup;
+            let right = match c.progress() {
+                Some((done, of)) => format!("{done} of {of} chats"),
+                None => String::new(),
+            };
+            return (c.status.clone(), right);
+        }
         let right = match (s.part, s.speed) {
             (Some((done, of)), _) if s.running() => format!("{done} of {of}"),
             (_, Some(t)) if t.gen_tps > 0.0 => format!("{:.0} tok/s", t.gen_tps),
@@ -815,7 +1089,7 @@ impl Shell {
     /// Somebody else's server on the port: what it is, what that means for a
     /// summary, and Stop — pressed twice, because it ends another program's
     /// process.
-    fn summaries_holder(&mut self, ui: &mut Ui) {
+    pub(super) fn summaries_holder(&mut self, ui: &mut Ui) {
         let Some(h) = self.summaries.holder.clone() else {
             return;
         };
@@ -889,30 +1163,84 @@ impl Shell {
         self.summaries.stopping = Some((h, rx));
     }
 
+    /// The chat a database holds, as Analysis knows it now.
+    ///
+    /// **Asked when needed, never kept from the pick.** Analysis learns a
+    /// database's chat only once it has opened it to count it, so a chat
+    /// picked — or a catch-up started — in the first seconds, before the
+    /// count reached it, carried no chat for good, and its citations were
+    /// drawn as plain text: there was nothing for the Viewer to open.
+    pub(super) fn known_chat_id(&self, path: &std::path::Path) -> Option<i64> {
+        self.analysis
+            .state
+            .entries
+            .iter()
+            .find(|e| e.target.path() == path)
+            .and_then(|e| e.chat_id)
+    }
+
+    /// The picked chat's id, once Analysis has counted its database.
+    pub(super) fn summaries_learn_chat(&mut self) {
+        if let Some(path) = self
+            .summaries
+            .picked
+            .as_ref()
+            .filter(|p| p.chat_id.is_none())
+            .map(|p| p.path.clone())
+        {
+            let id = self.known_chat_id(&path);
+            if let Some(picked) = self.summaries.picked.as_mut() {
+                picked.chat_id = id;
+            }
+        }
+    }
+
     pub(super) fn summaries_panel(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         self.summaries_look(ctx);
+        self.summaries_learn_chat();
         let p = self.palette;
         // A photograph cannot click: it picks the first chat of the folder it
-        // was given (`TGX_SHOT_LIBRARY`), which names nobody.
+        // was given (`TGX_SHOT_ANALYSIS`), which names nobody.
         if super::shot::path().is_some() && self.summaries.picked.is_none() {
-            if let Some(e) = self.library.state.entries.first().cloned() {
+            if let Some(e) = self.analysis.state.entries.first().cloned() {
                 self.summaries_pick(&e, ctx);
             }
         }
         let bare = egui::Frame::NONE.fill(p.bg);
+        let mode = self.summaries.mode;
         egui::SidePanel::left("summaries-chats")
             .frame(bare)
             .resizable(false)
             .exact_width(LIST_W)
-            .show_inside(ui, |ui| self.summaries_list(ui, ctx));
+            .show_inside(ui, |ui| {
+                let at = usize::from(mode == Mode::OneChat);
+                let picked = band(ui, HEAD_H, &p, |ui| {
+                    segmented(ui, &["Catch up", "One chat"], at, &p)
+                });
+                if let Some(i) = picked {
+                    self.summaries.mode = if i == 0 { Mode::CatchUp } else { Mode::OneChat };
+                }
+                match mode {
+                    Mode::CatchUp => self.catchup_list(ui),
+                    Mode::OneChat => self.summaries_list(ui, ctx),
+                }
+            });
         egui::CentralPanel::default()
             .frame(bare)
             .show_inside(ui, |ui| {
+                if mode == Mode::CatchUp {
+                    if self.analysis.state.root.is_none() {
+                        super::catchup::no_folder(ui, &p);
+                    } else {
+                        self.catchup_page(ui, ctx);
+                    }
+                    return;
+                }
                 if self.summaries.picked.is_none() {
                     EmptyState::new(
                         "Pick a chat",
                         Some(
-                            "The chats are the Library's. Pick one, choose the days, and \
+                            "The chats are the ones in Analysis. Pick one, choose the days, and \
                              the local model writes what happened."
                                 .into(),
                         ),
@@ -930,27 +1258,19 @@ impl Shell {
     /// The chats, filtered, and the picked one's saved summaries.
     fn summaries_list(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         let p = self.palette;
-        ui.add_space(space::STEP);
-        row(ui, |ui| {
-            let f = ui.add(
-                field(&mut self.summaries.filter, &p)
-                    .hint_text("Filter chats…  Ctrl+F")
-                    .desired_width(ui.available_width()),
-            );
-            if std::mem::take(&mut self.summaries.focus_filter) {
-                f.request_focus();
-            }
-        });
-        ui.add_space(space::STEP);
-        let needle = self.summaries.filter.trim().to_lowercase();
-        let entries: Vec<Entry> = self
-            .library
+        let s = &mut self.summaries;
+        filter_row(ui, &mut s.filter, &mut s.focus_filter, &p);
+        // A to Z, and found in either alphabet: see `crate::fold`.
+        let needle = self.summaries.filter.clone();
+        let mut entries: Vec<Entry> = self
+            .analysis
             .state
             .entries
             .iter()
-            .filter(|e| needle.is_empty() || e.title.to_lowercase().contains(&needle))
+            .filter(|e| crate::fold::matches(&e.title, &needle))
             .cloned()
             .collect();
+        entries.sort_by_cached_key(|e| crate::fold::fold(&e.title));
         let saved = self.summaries.saved.clone();
         let picked = self.summaries.picked.as_ref().map(|p| p.path.clone());
         let mut pick = None;
@@ -984,7 +1304,17 @@ impl Shell {
                             } else {
                                 meta(&s.name, &p)
                             };
-                            if row(ui, |ui| action(ui, label, true)).clicked() {
+                            // **Cut to the column, the whole name on hover.**
+                            // A name is days, length and language run
+                            // together, and one wider than the column
+                            // widened the whole panel past its own rows,
+                            // leaving a strip of nothing beside them.
+                            let hit = row(ui, |ui| {
+                                ui.add(egui::Button::new(label).frame(false).truncate())
+                            })
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(&s.name);
+                            if hit.clicked() {
                                 open = Some(s.path.clone());
                             }
                         }
@@ -996,8 +1326,8 @@ impl Shell {
             .frame(egui::Frame::NONE.fill(p.bg))
             .show_inside(ui, |ui| {
                 if entries.is_empty() {
-                    let why = if self.library.state.entries.is_empty() {
-                        "No exports in the Library's folder. Choose one in the Library."
+                    let why = if self.analysis.state.entries.is_empty() {
+                        "No exports in the Analysis folder. Choose one in Analysis."
                     } else {
                         "No chat matches the filter."
                     };
@@ -1024,6 +1354,9 @@ impl Shell {
                                     .max_rect(inner)
                                     .layout(Layout::left_to_right(Align::Center)),
                                 |ui| {
+                                    // Selectable text would take the row's
+                                    // click; see `catchup_list`.
+                                    ui.style_mut().interaction.selectable_labels = false;
                                     // The count first, from the right; the
                                     // title forwards in what is left, or a
                                     // truncating label in a right-to-left
@@ -1062,6 +1395,17 @@ impl Shell {
         }
     }
 
+    /// Count "24 h" and "N days" back from the other end — the chat's last
+    /// message or now — on both pages, and remember it.
+    pub(super) fn flip_from_last(&mut self) {
+        self.toggle_setting(|s| s.summary_from_last = !s.summary_from_last);
+        let s = &mut self.summaries;
+        s.from_last = self.settings.summary_from_last;
+        // One chat's days move at once; Catch up counts again on its own,
+        // since where the days count from is part of what it counted.
+        s.set_span(s.span);
+    }
+
     /// Days, length, scope, language, and what that will cost.
     fn summaries_form(&mut self, ui: &mut Ui) {
         let p = self.palette;
@@ -1076,8 +1420,7 @@ impl Shell {
         let span = self.summaries.chat.as_ref().and_then(|c| c.span());
         let mut remember = false;
 
-        ui.add_space(space::STEP);
-        row(ui, |ui| {
+        band(ui, HEAD_H, &p, |ui| {
             let title = self
                 .summaries
                 .picked
@@ -1091,74 +1434,56 @@ impl Shell {
         });
         ui.add_space(space::STEP);
 
-        wrapped(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = space::STEP;
-            ui.label(meta("From", &p));
-            ui.add_enabled(
-                !running,
-                field(&mut self.summaries.from, &p)
-                    .hint_text("YYYY-MM-DD")
-                    .desired_width(DATE_W),
-            );
-            ui.label(meta("To", &p));
-            ui.add_enabled(
-                !running,
-                field(&mut self.summaries.to, &p)
-                    .hint_text("YYYY-MM-DD")
-                    .desired_width(DATE_W),
-            );
-            for (label, days) in [("Last day", 1), ("Last 7 days", 7), ("Last 30 days", 30)] {
-                if action(ui, text(label, &p), !running && span.is_some()).clicked() {
-                    self.summaries.last(days);
+        form_row(ui, "Days", &p, |ui| {
+            let at = SPANS
+                .iter()
+                .position(|(_, s)| *s == self.summaries.span)
+                .unwrap_or(SPANS.len() - 1);
+            let labels: Vec<&str> = SPANS.iter().map(|(l, _)| *l).collect();
+            if let Some(i) = segmented(ui, &labels, at, &p) {
+                if !running && span.is_some() {
+                    self.summaries.set_span(SPANS[i].1);
                 }
             }
         });
+        if self.summaries.span == Span::Dates {
+            ui.add_space(space::TIGHT);
+            let s = &mut self.summaries;
+            dates_row(ui, &mut s.from, &mut s.to, !running, &p);
+        }
+        let counts = self.summaries.span != Span::Dates;
+        if from_last_row(ui, self.summaries.from_last, counts && !running, &p) {
+            self.flip_from_last();
+        }
         ui.add_space(space::TIGHT);
 
-        wrapped(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = space::STEP;
-            ui.label(meta("Length", &p));
+        form_row(ui, "Length", &p, |ui| {
             let at = Length::ALL
                 .iter()
                 .position(|l| *l == self.summaries.length)
                 .unwrap_or(0);
-            if let Some(i) = segmented(ui, &["Short", "Detailed", "Sections"], at, &p) {
+            let labels: Vec<&str> = Length::ALL.iter().map(|l| l.label()).collect();
+            if let Some(i) = segmented(ui, &labels, at, &p) {
                 if !running {
                     self.summaries.length = Length::ALL[i];
                     remember = true;
                 }
             }
         });
-        ui.add_space(space::TIGHT);
-        // A line of its own: beside Length it was wider than the panel at
-        // the window's floor, and a strip of segments cannot wrap.
-        wrapped(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = space::STEP;
-            ui.label(meta("Language", &p));
-            let at = Lang::ALL
-                .iter()
-                .position(|l| *l == self.summaries.lang)
-                .unwrap_or(0);
-            if let Some(i) = segmented(ui, &["Serbian", "English", "As the chat"], at, &p) {
-                if !running {
-                    self.summaries.lang = Lang::ALL[i];
-                    remember = true;
-                }
-            }
-        });
+        // The language is a setting, shared with Catch up: Settings ›
+        // Summaries.
 
         // **Only a forum has topics**, so only a forum gets the choice.
         if forum {
             ui.add_space(space::TIGHT);
-            wrapped(ui, |ui| {
-                ui.spacing_mut().item_spacing.x = space::STEP;
-                ui.label(meta("Scope", &p));
+            form_row(ui, "Forums", &p, |ui| {
                 let at = match self.summaries.scope {
                     Scope::Whole => 0,
                     Scope::ByTopic => 1,
                     Scope::One(_) => 2,
                 };
-                if let Some(i) = segmented(ui, &["Whole group", "By topic", "One topic"], at, &p) {
+                let labels = ["Whole chat", "Topic by topic", "One topic"];
+                if let Some(i) = segmented(ui, &labels, at, &p) {
                     if !running {
                         self.summaries.scope = match i {
                             0 => Scope::Whole,
@@ -1189,9 +1514,9 @@ impl Shell {
         let line = match (self.summaries.reading.is_some(), self.summaries.options()) {
             (true, _) => "Reading the chat…".to_string(),
             (false, Err(e)) => e,
-            (false, Ok(_)) => match self.summaries.estimate() {
+            (false, Ok(o)) => match self.summaries.estimate() {
                 None => String::new(),
-                Some(e) if e.messages == 0 => "Nothing was said in these days.".into(),
+                Some(e) if e.messages == 0 => format!("Nothing was said in {}.", o.span()),
                 Some(e) => {
                     let how = match e.parts {
                         0 => "one call".to_string(),
@@ -1204,7 +1529,8 @@ impl Shell {
                         n => format!(" · {} photos to read first", tgx_ui::thousands(n as i64)),
                     };
                     format!(
-                        "{} messages · about {} tokens · {how}{photos}",
+                        "{} · {} messages · about {} tokens · {how}{photos}",
+                        o.span(),
                         tgx_ui::thousands(e.messages as i64),
                         tgx_ui::thousands(e.tokens as i64)
                     )
@@ -1216,7 +1542,6 @@ impl Shell {
 
         if remember {
             self.settings.summary_length = self.summaries.length.code().into();
-            self.settings.summary_lang = self.summaries.lang.code().into();
             self.commit_settings();
         }
     }
@@ -1234,14 +1559,13 @@ impl Shell {
         }
         let s = &self.summaries;
         if s.text.is_empty() && s.turns.is_empty() {
-            ui.add_space(space::BREAK);
-            let hint = if s.running() {
+            let says = if s.running() {
                 "The summary appears here as it is written."
             } else {
                 "Press Summarise, or ask about these days below. A Gemma already \
                  running is used; otherwise one is started from Settings › Summaries."
             };
-            row(ui, |ui| ui.label(meta(hint, &p)));
+            hint(ui, says, &p);
             return;
         }
         let shown = s.shown.clone();
@@ -1249,20 +1573,24 @@ impl Shell {
         let mut copy = false;
         let mut open = false;
         let mut reveal = false;
-        if has_summary {
-            ui.add_space(space::TIGHT);
-            row(ui, |ui| {
-                ui.spacing_mut().item_spacing.x = space::STEP;
-                copy = action(ui, text("Copy", &p), true).clicked();
-                if shown.is_some() {
-                    open = action(ui, text("Open file", &p), true).clicked();
-                    reveal = action(ui, text("Show in folder", &p), true).clicked();
-                }
-            });
-        }
         // Citations are links only into a database: the Viewer reads nothing
         // else.
         let linkable = s.picked.as_ref().and_then(|p| p.chat_id).is_some();
+        let title = s
+            .picked
+            .as_ref()
+            .map(|p| p.title.clone())
+            .unwrap_or_default();
+        // What the card is: the saved file's name says its days, scope,
+        // length and language.
+        let what = match &shown {
+            Some(path) => path
+                .file_stem()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            None if s.running() => "Being written".into(),
+            None => String::new(),
+        };
         let text_now = s.text.clone();
         let turns = s.turns.clone();
         let mut clicked = None;
@@ -1273,14 +1601,40 @@ impl Shell {
             .show(ui, |ui| {
                 ui.add_space(space::STEP);
                 if has_summary {
-                    clicked = markdown(ui, &text_now, linkable, &p);
+                    card(ui, &p, |ui| {
+                        row(ui, |ui| {
+                            ui.add(egui::Label::new(card_title(&title, &p)).truncate())
+                        });
+                        if !what.is_empty() {
+                            row(ui, |ui| ui.label(meta(&what, &p)));
+                        }
+                        ui.add_space(space::TIGHT);
+                        clicked = markdown(ui, &text_now, linkable, &p);
+                        // Buttons, as on a Catch up card: as words they read
+                        // as part of the summary and were not found.
+                        ui.add_space(space::STEP);
+                        row(ui, |ui| {
+                            copy = button(ui, "Copy", true, false, &p).clicked();
+                            if shown.is_some() {
+                                open = button(ui, "Open file", true, false, &p).clicked();
+                                reveal = button(ui, "Show in folder", true, false, &p).clicked();
+                            }
+                        });
+                    });
                 }
                 for turn in &turns {
                     ui.add_space(space::BREAK);
-                    ui.add(egui::Label::new(meta(format!("You: {}", turn.question), &p)).wrap());
+                    block(ui, |ui| {
+                        tgx_ui::components::selectable(ui, |ui| {
+                            ui.add(
+                                egui::Label::new(meta(format!("You: {}", turn.question), &p))
+                                    .wrap(),
+                            )
+                        })
+                    });
                     ui.add_space(space::TIGHT);
                     if turn.answer.is_empty() {
-                        ui.label(meta("…", &p));
+                        row(ui, |ui| ui.label(meta("…", &p)));
                     } else if let Some(id) = markdown(ui, &turn.answer, linkable, &p) {
                         clicked = Some(id);
                     }
@@ -1306,7 +1660,7 @@ impl Shell {
         if let (Some(id), Some(picked)) = (clicked, self.summaries.picked.clone()) {
             if let Some(chat_id) = picked.chat_id {
                 self.summaries.cite = Some((
-                    super::library::Read {
+                    super::analysis::Read {
                         path: picked.path,
                         chat_id,
                         title: picked.title,
@@ -1371,7 +1725,7 @@ impl Shell {
 
     /// A citation clicked: the Viewer, on that message, with its way back
     /// here.
-    pub(super) fn summaries_cite(&mut self, read: super::library::Read, id: i64) {
+    pub(super) fn summaries_cite(&mut self, read: super::analysis::Read, id: i64) {
         let db = tgx_tg::viewer::Database::from(read);
         if self.viewer.is_open(&db.path, db.chat_id) {
             self.viewer_select(id, true);
@@ -1489,16 +1843,26 @@ pub(super) fn pieces(line: &str) -> Vec<Piece> {
     out
 }
 
-/// A padded row that wraps onto the next line when the panel is too narrow
-/// for it — at the window's 900pt floor the form does not fit one line.
-fn wrapped<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
-    block(ui, |ui| ui.horizontal_wrapped(add).inner)
-}
-
 /// Draw the summary's Markdown — the little of it a summary uses: `#`
 /// headings, `- ` bullets, `> ` notes, `*emphasis*` markers dropped, and
 /// citations as links. Returns the message a citation click asked for.
-fn markdown(ui: &mut Ui, md: &str, linkable: bool, p: &tgx_ui::tokens::Palette) -> Option<i64> {
+pub(super) fn markdown(
+    ui: &mut Ui,
+    md: &str,
+    linkable: bool,
+    p: &tgx_ui::tokens::Palette,
+) -> Option<i64> {
+    // A summary is content: its words select and copy, a double-click takes
+    // a word.
+    tgx_ui::components::selectable(ui, |ui| markdown_lines(ui, md, linkable, p))
+}
+
+fn markdown_lines(
+    ui: &mut Ui,
+    md: &str,
+    linkable: bool,
+    p: &tgx_ui::tokens::Palette,
+) -> Option<i64> {
     let mut clicked = None;
     let mut after_title = false;
     for raw in md.lines() {
@@ -1525,6 +1889,25 @@ fn markdown(ui: &mut Ui, md: &str, linkable: bool, p: &tgx_ui::tokens::Palette) 
         {
             ui.add_space(space::STEP);
             block(ui, |ui| ui.label(eyebrow(h, p)));
+            continue;
+        }
+        // A brief's gist: one line wholly in bold, set apart by weight.
+        if let Some(gist) = line
+            .trim()
+            .strip_prefix("**")
+            .and_then(|l| l.strip_suffix("**"))
+            .filter(|l| !l.contains("**"))
+        {
+            block(ui, |ui| {
+                ui.add(
+                    egui::Label::new(
+                        text(gist, p)
+                            .font(tgx_ui::fonts::semibold(tgx_ui::tokens::window::READING)),
+                    )
+                    .wrap(),
+                )
+            });
+            ui.add_space(space::TIGHT);
             continue;
         }
         let (lead, body, quiet) = if let Some(b) = line.strip_prefix("- ") {
@@ -1605,6 +1988,60 @@ mod tests {
         assert_eq!(pieces("[#x] no"), vec![Piece::Text("[#x] no".into())]);
     }
 
+    /// **A click on a citation asks for its message**, though the summary
+    /// around it is selectable text and a press on selectable text can start
+    /// a selection instead. With the hand's slight movement between press
+    /// and release, as a real click has.
+    #[test]
+    fn a_click_on_a_citation_asks_for_its_message() {
+        let p = tgx_ui::tokens::Palette::dark();
+        let ctx = egui::Context::default();
+        tgx_ui::theme::install(&ctx, &p);
+        let at = std::cell::Cell::new(egui::Pos2::ZERO);
+        let mut got = None;
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at.get(),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        for step in 0..5 {
+            let events = match step {
+                1 => vec![egui::Event::PointerMoved(at.get())],
+                2 => vec![press(true)],
+                // A hand is never still: a point or two between press and
+                // release.
+                3 => vec![egui::Event::PointerMoved(at.get() + egui::vec2(2.0, 1.0))],
+                4 => vec![press(false)],
+                _ => vec![],
+            };
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 400.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    // As the page has it: in a scroll area, in a card.
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        card(ui, &p, |ui| {
+                            let start = ui.next_widget_position();
+                            at.set(start + egui::vec2(GUTTER + 8.0, 4.0));
+                            if let Some(id) = markdown(ui, "[#12] was where it was said.", true, &p)
+                            {
+                                got = Some(id);
+                            }
+                        });
+                    });
+                });
+            });
+        }
+        assert_eq!(got, Some(12));
+    }
+
     #[test]
     fn the_form_needs_a_from_day_and_to_defaults_to_it() {
         let mut s = SummariesState::default();
@@ -1678,6 +2115,7 @@ mod tests {
             PathBuf::from("chat"),
             from.into(),
             String::new(),
+            None,
             Scope::Whole,
         )
     }

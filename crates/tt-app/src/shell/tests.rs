@@ -214,7 +214,7 @@ fn a_finished_chat_waits_for_its_report_only_when_asked_to() {
     s.queue.start([(1, "a".to_string()), (2, "b".to_string())]);
     s.apply(done(1, Some("out/a"), None));
     assert!(
-        s.library.waiting().is_empty(),
+        s.analysis.waiting().is_empty(),
         "the setting is off by default"
     );
 
@@ -223,7 +223,7 @@ fn a_finished_chat_waits_for_its_report_only_when_asked_to() {
     s.apply(done(2, Some("out/b"), Some("out/b/b.sqlite")));
     s.apply(done(1, Some("out/a"), None));
     assert_eq!(
-        s.library.waiting(),
+        s.analysis.waiting(),
         [
             std::path::PathBuf::from("out/b/b.sqlite"),
             std::path::PathBuf::from("out/a")
@@ -231,7 +231,7 @@ fn a_finished_chat_waits_for_its_report_only_when_asked_to() {
     );
     // The same export twice in one run is reported once.
     s.apply(done(1, Some("out/a"), None));
-    assert_eq!(s.library.waiting().len(), 2);
+    assert_eq!(s.analysis.waiting().len(), 2);
 }
 
 #[test]
@@ -933,19 +933,19 @@ fn the_export_button_says_how_many_and_what_pressing_it_will_do() {
 }
 
 #[test]
-fn the_viewer_is_entered_from_the_library_and_lights_its_rail_entry() {
+fn the_viewer_is_entered_from_analysis_and_lights_its_rail_entry() {
     assert_eq!(View::ALL.len(), 5);
     assert!(!View::ALL.contains(&View::Viewer));
-    assert!(View::ALL.contains(&View::Library));
+    assert!(View::ALL.contains(&View::Analysis));
     // Settings last: it is consulted rarely, and the views above it are the
     // work, in the order it is done — a summary comes after the export.
     assert_eq!(View::ALL[3], View::Summaries);
     assert_eq!(View::ALL[4], View::Settings);
     assert_eq!(View::Summaries.label(), "Summaries");
-    assert_eq!(View::Viewer.on_rail(), View::Library);
+    assert_eq!(View::Viewer.on_rail(), View::Analysis);
     assert_eq!(View::Chats.on_rail(), View::Chats);
     assert_eq!(View::Viewer.label(), "Read");
-    assert_eq!(View::Library.label(), "Library");
+    assert_eq!(View::Analysis.label(), "Analysis");
     assert_eq!(View::Queue.label(), "Activity");
     let mut s = Shell::headless();
     s.show(View::Viewer);
@@ -956,10 +956,10 @@ fn the_viewer_is_entered_from_the_library_and_lights_its_rail_entry() {
 }
 
 #[test]
-fn a_library_rows_read_opens_that_chat_in_the_viewer_and_pins_it() {
+fn an_analysis_rows_read_opens_that_chat_in_the_viewer_and_pins_it() {
     let mut s = Shell::headless();
-    s.show(View::Library);
-    s.read(super::library::Read {
+    s.show(View::Analysis);
+    s.read(super::analysis::Read {
         path: std::path::PathBuf::from(r"C:\nowhere\Dev\Dev.sqlite"),
         chat_id: 7,
         title: "Dev".into(),
@@ -1264,9 +1264,9 @@ fn go_to_date_lands_on_the_first_message_of_that_day_or_after() {
 }
 
 #[test]
-fn the_librarys_search_shows_results_and_no_chat_is_opened_over_them() {
+fn the_analysis_search_shows_results_and_no_chat_is_opened_over_them() {
     let mut s = Shell::headless();
-    s.show(View::Library);
+    s.show(View::Analysis);
     s.search_everywhere("budget".into(), "X:\\exports".into());
     assert_eq!(s.body, View::Viewer);
     assert_eq!(s.viewer.asked, Some(("budget".into(), None)));
@@ -1293,12 +1293,12 @@ fn shortcuts_do_what_their_buttons_do_and_only_where_those_are() {
     s.shortcut(Shortcut::ClearFilter, &ctx);
     assert!(s.search.is_empty() && s.view.filter.is_empty());
 
-    s.shortcut(Shortcut::Go(View::Library), &ctx);
-    assert_eq!(s.body, View::Library);
+    s.shortcut(Shortcut::Go(View::Analysis), &ctx);
+    assert_eq!(s.body, View::Analysis);
     s.shortcut(Shortcut::TickAll, &ctx);
     assert_eq!(s.selected.len(), 1, "Ctrl+A ticks chats on Chats only");
     s.shortcut(Shortcut::Find, &ctx);
-    assert!(s.library.focus_filter && !s.focus_filter);
+    assert!(s.analysis.focus_filter && !s.focus_filter);
 }
 
 #[test]
@@ -1537,7 +1537,7 @@ fn the_viewers_way_back_to_summaries_lasts_only_as_long_as_the_visit() {
     let mut s = Shell::headless();
     s.show(View::Summaries);
     s.summaries_cite(
-        super::library::Read {
+        super::analysis::Read {
             path: std::env::temp_dir()
                 .join("tgx-viewer-shell-test-none")
                 .join("Dev.sqlite"),
@@ -1550,18 +1550,18 @@ fn the_viewers_way_back_to_summaries_lasts_only_as_long_as_the_visit() {
     assert_eq!(s.viewer.back, Some(View::Summaries));
     assert!(s.summaries_here(), "reading a citation is not leaving");
 
-    s.show(View::Library);
+    s.show(View::Analysis);
     assert_eq!(s.viewer.back, None);
     assert!(!s.summaries_here());
     s.search_everywhere("budget".into(), "X:\\exports".into());
     assert_eq!(s.body, View::Viewer);
-    assert_eq!(s.viewer.back, None, "the way back is the Library's");
+    assert_eq!(s.viewer.back, None, "the way back is Analysis's");
     assert!(!s.summaries_here(), "so the idle clock runs");
 }
 
 #[test]
 fn a_rows_read_and_a_citation_open_the_same_database() {
-    let read = super::library::Read {
+    let read = super::analysis::Read {
         path: std::path::PathBuf::from(r"C:\nowhere\Dev\Dev.sqlite"),
         chat_id: 7,
         title: "Dev".into(),
@@ -1571,4 +1571,44 @@ fn a_rows_read_and_a_citation_open_the_same_database() {
         (db.path, db.chat_id, db.title),
         (read.path, read.chat_id, read.title)
     );
+}
+
+/// **A chat picked before Analysis counted it still gets its links.** The
+/// pick copied Analysis's chat id, which is unknown until the database has
+/// been opened; picked in the first seconds, the chat kept none, and every
+/// citation in its summary was plain text.
+#[test]
+fn a_chat_picked_before_it_was_counted_learns_its_id() {
+    use tga_run::refresh::{Source, Target};
+    let path = std::path::PathBuf::from(r"C:\nowhere\Dev\Dev.sqlite");
+    let mut s = Shell::headless();
+    s.analysis.state.entries = vec![tga_run::state::Entry {
+        target: Target {
+            out: std::path::PathBuf::from(r"C:\nowhere\Dev\report.html"),
+            source: Source::Database(path.clone()),
+            stale: false,
+            changed: None,
+            reported: None,
+            bytes: 0,
+        },
+        title: "Dev".into(),
+        messages: None,
+        chats: 1,
+        chat_id: None,
+        outcome: tga_run::state::Outcome::Idle,
+    }];
+    s.summaries.picked = Some(super::summaries::Picked {
+        path: path.clone(),
+        chat_id: None,
+        title: "Dev".into(),
+        home: std::path::PathBuf::from(r"C:\nowhere\Dev"),
+    });
+    s.summaries_learn_chat();
+    assert_eq!(s.summaries.picked.as_ref().unwrap().chat_id, None);
+
+    // The count arrives.
+    s.analysis.state.entries[0].chat_id = Some(7);
+    s.summaries_learn_chat();
+    assert_eq!(s.summaries.picked.as_ref().unwrap().chat_id, Some(7));
+    assert_eq!(s.known_chat_id(&path), Some(7));
 }

@@ -224,7 +224,7 @@ impl Shell {
                 if self.settings.report_after_export {
                     let database = database.map(std::path::PathBuf::from);
                     if let Some(export) = database.or_else(|| root.clone()) {
-                        self.library.report_later(export);
+                        self.analysis.report_later(export);
                     }
                 }
                 self.queue.finished(

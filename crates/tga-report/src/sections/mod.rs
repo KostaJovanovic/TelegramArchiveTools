@@ -34,8 +34,8 @@ pub type Names = HashMap<String, String>;
 mod between;
 mod churn;
 mod conversation;
+mod glance;
 mod masthead;
-mod members;
 mod notes;
 mod people;
 mod records;
@@ -47,8 +47,8 @@ mod topics;
 pub use between::between;
 pub use churn::churn;
 pub use conversation::conversation;
+pub use glance::glance;
 pub use masthead::masthead;
-pub use members::members;
 pub use notes::notes;
 pub use people::people;
 pub use records::records;
@@ -107,19 +107,91 @@ fn pct(value: f64) -> String {
     format!("{:.1}%", value * 100.0)
 }
 
-/// A section rule: micro-heading left, a count right.
+/// A section rule: heading left, a count right, and the button that folds it.
 ///
 /// `count` is markup, not text — it carries entities like `&#183;` — so every
 /// caller escapes its own interpolations. `title` is escaped here.
-fn head(title: &str, count: &str, anchor: &str) -> String {
+///
+/// The fold button does nothing without the script, and the section is open
+/// without it: folding is a way to shorten a long page, never a way to hide
+/// something from a reader whose browser runs no scripts.
+pub(crate) fn head(title: &str, count: &str, anchor: &str) -> String {
     let tag = if anchor.is_empty() {
         String::new()
     } else {
         format!(" id=\"{}\"", esc(anchor))
     };
     format!(
-        "<section{tag}><div class=\"sechead\"><h2>{}</h2><span class=\"count\">{count}</span></div>",
+        "<section{tag}><div class=\"sechead\"><h2>{}</h2><span class=\"count\">{count}</span>\
+         <button class=\"fold\" type=\"button\" aria-expanded=\"true\" \
+         aria-label=\"Fold this section\"></button></div>",
         esc(title)
+    )
+}
+
+/// How something was measured, behind a (?) button.
+///
+/// **The method is one tap away, never in the way.** Every chart used to carry
+/// its method as a paragraph under it, and the paragraphs competed with the
+/// data for the reader's eye. A `<details>`, so it opens with no script; empty
+/// text renders nothing, so a chart with nothing to explain gets no button.
+pub(crate) fn how(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    format!(
+        "<details class=\"how\"><summary title=\"How this is measured\" \
+         aria-label=\"How this is measured\">?</summary><div class=\"howtext\">{text}</div></details>"
+    )
+}
+
+/// One chart in its panel: a title, one plain sentence saying what it shows,
+/// the method behind (?), and the chart.
+///
+/// `take` and `method` are markup; every caller escapes what it puts in them.
+pub(crate) fn panel(title: &str, take: &str, method: &str, body: &str) -> String {
+    let take = if take.is_empty() {
+        String::new()
+    } else {
+        format!("<p class=\"take\">{take}</p>")
+    };
+    format!(
+        "<div class=\"panel\"><h3>{}</h3>{take}{}{body}</div>",
+        esc(title),
+        how(method)
+    )
+}
+
+/// A private chat: exactly two people said anything.
+///
+/// Such a chat gets its own layout — the two side by side — because the group
+/// template's answers are meaningless for it: "the three loudest carry 100%",
+/// a two-by-two matrix, a network of two dots.
+pub fn is_duo(stats: &tga_stats::Stats) -> bool {
+    stats.people.rows.iter().filter(|r| r.messages > 0).count() == 2
+}
+
+/// The two people of a private chat, louder first.
+pub(crate) fn duo(stats: &tga_stats::Stats) -> Option<(&tga_stats::Person, &tga_stats::Person)> {
+    let mut two: Vec<&tga_stats::Person> = stats
+        .people
+        .rows
+        .iter()
+        .filter(|r| r.messages > 0)
+        .collect();
+    if two.len() != 2 {
+        return None;
+    }
+    two.sort_by_key(|p| std::cmp::Reverse(p.messages));
+    Some((two[0], two[1]))
+}
+
+/// The key to a private chat's two colours, names escaped here.
+pub(crate) fn duo_key(a: &str, b: &str) -> String {
+    format!(
+        "<p class=\"duokey\"><span class=\"one\">{}</span><span class=\"two\">{}</span></p>",
+        esc(a),
+        esc(b)
     )
 }
 
@@ -134,14 +206,17 @@ fn figures(items: &[(String, &str)]) -> String {
 }
 
 /// `(name, numeric)` per column; cells are markup and escape their own input.
+///
+/// Every column sorts on a tap of its header (`data-sort`), by the number in
+/// it when it is numeric.
 fn table(headers: &[(&str, bool)], rows: &[Vec<String>]) -> String {
     let head: String = headers
         .iter()
         .map(|(name, numeric)| {
             if *numeric {
-                format!("<th class=\"n\">{}</th>", esc(name))
+                format!("<th class=\"n\" data-sort=\"n\">{}</th>", esc(name))
             } else {
-                format!("<th>{}</th>", esc(name))
+                format!("<th data-sort=\"t\">{}</th>", esc(name))
             }
         })
         .collect();
@@ -163,10 +238,45 @@ fn table(headers: &[(&str, bool)], rows: &[Vec<String>]) -> String {
         })
         .collect();
     format!(
-        "<div class=\"tablewrap\"><table class=\"\"><thead><tr>{head}</tr></thead>\
+        "<div class=\"tablewrap\"><table><thead><tr>{head}</tr></thead>\
          <tbody>{body}</tbody></table></div>"
     )
 }
+
+/// `2025-03-18 20:15`, or a bare date, the way every other date on the page
+/// is written: `18 Mar 2025, 20:15`.
+pub fn pretty_when(text: &str) -> String {
+    let day = pretty_date(text);
+    let time: String = text.chars().skip(11).take(5).collect();
+    if day != text && time.len() == 5 && time.as_bytes()[2] == b':' {
+        format!("{day}, {time}")
+    } else {
+        day
+    }
+}
+
+/// The share of `part` in `whole`, as a percentage with no decimal past 10%.
+fn share(part: i64, whole: i64) -> String {
+    if whole <= 0 {
+        return "0%".to_string();
+    }
+    let p = part as f64 / whole as f64 * 100.0;
+    if p >= 10.0 {
+        format!("{p:.0}%")
+    } else {
+        format!("{p:.1}%")
+    }
+}
+
+const WEEKDAYS: [&str; 7] = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+];
 
 /// Every chart's honest twin: the numbers, as text, one click away.
 fn data_view(label: &str, table: &str) -> String {
@@ -194,6 +304,57 @@ fn plural(count: i64, singular: &str, plural: &str) -> &'static str {
 /// so, and the sections that cannot draw anything say so back.
 fn is_empty_activity(activity: &Activity) -> bool {
     activity.empty
+}
+
+/// How many people Focus can draw over the charts.
+const FOCUS_PEOPLE: usize = 30;
+
+/// What Focus draws: each of the loudest people's own bars on the hero's
+/// grid, and their own hours.
+///
+/// **Data, not markup, and only for the few people it is useful for.** A
+/// second ribbon per person drawn into the page would double the hero for
+/// every row of the people table; as JSON it is a few hundred bytes a person,
+/// and the script draws one at a time. Bucketed by [`charts::bucket_days`] on
+/// the hero's own width, so bar `i` here is bar `i` there.
+///
+/// Every `<` is written as `<`, so a name cannot close the script tag it
+/// sits in.
+pub fn focus_data(stats: &tga_stats::Stats) -> String {
+    let act = &stats.activity;
+    if is_empty_activity(act) || is_duo(stats) {
+        return String::new();
+    }
+    let mut speakers: Vec<&tga_stats::Person> = stats
+        .people
+        .rows
+        .iter()
+        .filter(|r| r.messages > 0)
+        .collect();
+    speakers.sort_by_key(|r| std::cmp::Reverse(r.messages));
+    let mut people = serde_json::Map::new();
+    for person in speakers.into_iter().take(FOCUS_PEOPLE) {
+        let dense = crate::stats::densify(act.per_day_by_person.get(&person.key), &act.per_day);
+        let (buckets, _) = charts::bucket_days(&dense, WIDTH);
+        let bars: Vec<String> = buckets
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, _, n))| *n > 0)
+            .map(|(i, (_, _, n))| format!("{i}:{n}"))
+            .collect();
+        people.insert(
+            person.key.clone(),
+            serde_json::json!({
+                "name": person.name,
+                "bars": bars.join(","),
+                "hours": person.hours.to_vec(),
+            }),
+        );
+    }
+    let text = serde_json::Value::Object(people)
+        .to_string()
+        .replace('<', "\\u003c");
+    format!("<script type=\"application/json\" id=\"focus-data\">{text}</script>")
 }
 
 // ---------------------------------------------------------------------------

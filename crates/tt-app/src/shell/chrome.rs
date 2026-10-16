@@ -1,7 +1,7 @@
 //! The frame around the panels: the rail, the top bar and the status bar.
 //!
 //! The panels themselves are the sibling modules -- chats, queue, settings,
-//! signin, viewer, library, summaries.
+//! signin, viewer, analysis, summaries.
 
 use super::*;
 use eframe::egui::{Layout, Ui};
@@ -39,7 +39,7 @@ pub(super) fn export_label(ticked: usize, exporting: bool, paused: bool) -> Stri
     }
 }
 
-/// How wide the rail is: room for `LIBRARY  12` in tracked capitals and the
+/// How wide the rail is: room for `ANALYSIS  12` in tracked capitals and the
 /// account's name under it, and not a point more — every point here comes out
 /// of the chat list's title column.
 pub(crate) const RAIL_WIDTH: f32 = 168.0;
@@ -81,8 +81,8 @@ impl Shell {
             let count = match view {
                 View::Chats if !self.chats.is_empty() => Some(self.chats.len()),
                 View::Queue if !self.queue.is_empty() => Some(self.queue.len()),
-                View::Library if !self.library.state.entries.is_empty() => {
-                    Some(self.library.state.entries.len())
+                View::Analysis if !self.analysis.state.entries.is_empty() => {
+                    Some(self.analysis.state.entries.len())
                 }
                 _ => None,
             };
@@ -153,7 +153,7 @@ impl Shell {
     /// actions, so the bar changes with the view.
     ///
     /// **One primary action per view, top right** (TELEGRAMTOOLS.md §4.2).
-    /// Chats has Export, Activity has Stop, the Library has Make report;
+    /// Chats has Export, Activity has Stop, Analysis has Make report;
     /// Settings and the reader have none.
     ///
     /// **The numbered steps are gone.** `01 Sign in / 02 Refresh / 03 Start
@@ -182,7 +182,7 @@ impl Shell {
                 ui.label(heading(self.body.label(), &p));
                 ui.add_space(space::BREAK);
                 match self.body {
-                    View::Library => self.library.bar(ui, ctx, &p),
+                    View::Analysis => self.analysis.bar(ui, ctx, &p),
                     View::Chats => self.chats_actions(ui),
                     View::Queue => self.activity_actions(ui),
                     View::Summaries => self.summaries_actions(ui, ctx),
@@ -240,18 +240,18 @@ impl Shell {
     ///
     /// **Stop stops everything this view shows** — the export and the report
     /// run both, since both are on it. The report run stops after the report
-    /// in hand, as the Library's own Stop does.
+    /// in hand, as Analysis's own Stop does.
     fn activity_actions(&mut self, ui: &mut Ui) {
         let p = self.palette;
         let exporting = self.exporting || self.counting;
-        let reporting = self.library.state.running && !self.library.state.stopping;
+        let reporting = self.analysis.state.running && !self.analysis.state.stopping;
         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
             if button(ui, "Stop", exporting || reporting, true, &p).clicked() {
                 if exporting {
                     self.stop();
                 }
                 if reporting {
-                    self.library.stop();
+                    self.analysis.stop();
                 }
             }
             // Reported, not discarded. A silent spawn failure is what let
@@ -292,19 +292,19 @@ impl Shell {
         let p = self.palette;
         // Counting reports in chats and an export in messages, and the export
         // owns the line whenever it is running. **The analyser speaks here
-        // too** — while the Library is on screen, or while a report run goes
+        // too** — while Analysis is on screen, or while a report run goes
         // and nothing of the exporter's does. It had a status line of its own
         // stacked above this one.
         let reporting = !self.exporting
             && self.count_progress.is_none()
-            && (self.body == View::Library || self.library.fill().is_some());
+            && (self.body == View::Analysis || self.analysis.fill().is_some());
         // The Summaries view speaks for itself while it is on screen and the
         // exporter is quiet.
         let summarising = self.body == View::Summaries && !self.exporting;
         let (status, right) = if summarising {
             self.summaries_status()
         } else if reporting {
-            self.library.status()
+            self.analysis.status()
         } else if self.exporting {
             let right = self
                 .queue
@@ -322,7 +322,7 @@ impl Shell {
 
         // A report run's bar takes the rule's place, at the same height
         // either way, so the line under it does not jump when one starts.
-        match self.library.fill().filter(|_| reporting && !summarising) {
+        match self.analysis.fill().filter(|_| reporting && !summarising) {
             Some(fraction) => tgx_ui::components::progress_bar(ui, Some(fraction), &p),
             None => edge_rule(ui, &p),
         }

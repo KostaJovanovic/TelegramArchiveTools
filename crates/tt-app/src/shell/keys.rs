@@ -2,11 +2,11 @@
 //!
 //! | keys            | does                                              |
 //! |-----------------|---------------------------------------------------|
-//! | Ctrl+1 … Ctrl+5 | Chats, Activity, Library, Summaries, Settings     |
+//! | Ctrl+1 … Ctrl+5 | Chats, Activity, Analysis, Summaries, Settings    |
 //! | Ctrl+F          | the view's filter or search box                   |
 //! | Ctrl+A          | tick every chat shown (Chats, outside a text box) |
 //! | Ctrl+E          | Export — the Chats view's primary                 |
-//! | F5              | reload the chat list, or re-read the Library      |
+//! | F5              | reload the chat list, or re-read Analysis         |
 //! | Esc             | clear the chat filter                             |
 //! | Ctrl +, −, 0    | zoom — egui's own, kept between launches          |
 //!
@@ -77,7 +77,7 @@ impl Shell {
             Shortcut::Go(view) => self.show(view),
             Shortcut::Find => match self.body {
                 View::Chats | View::Viewer => self.focus_filter = true,
-                View::Library => self.library.focus_filter = true,
+                View::Analysis => self.analysis.focus_filter = true,
                 View::Summaries => self.summaries.focus_filter = true,
                 View::Queue | View::Settings => {}
             },
@@ -98,7 +98,7 @@ impl Shell {
                 View::Chats if self.signed_in && !self.exporting && !self.counting => {
                     self.start_refresh()
                 }
-                View::Library | View::Summaries => self.library.reload(ctx),
+                View::Analysis | View::Summaries => self.analysis.reload(ctx),
                 _ => {}
             },
             Shortcut::ClearFilter => {

@@ -24,18 +24,56 @@ pub fn timeline(stats: &Stats, notes: &Notes, names: &Names) -> String {
 
     let kinds: Vec<String> = notes.kinds();
     let rail = charts::rail(events, series, WIDTH, 34.0, &kinds);
-    let ribbon = charts::ribbon(series, WIDTH, 132.0, Some(top), true, "hero");
-    let axis = charts::time_axis(series, WIDTH, 16.0);
+    // A private chat draws its two people either side of one line; anything
+    // larger draws the whole, and Focus draws one person over it.
+    let (ribbon, key) = match duo(stats) {
+        Some((a, b)) => {
+            let one = crate::stats::densify(act.per_day_by_person.get(&a.key), series);
+            let two = crate::stats::densify(act.per_day_by_person.get(&b.key), series);
+            (
+                charts::mirror(&one, &two, WIDTH, 168.0),
+                duo_key(&a.name, &b.name),
+            )
+        }
+        None => (
+            charts::ribbon(series, WIDTH, 132.0, Some(top), true, "hero"),
+            String::new(),
+        ),
+    };
+    // Stretched to the panel rather than scaled with it, so a phone draws the
+    // whole archive at a readable height; the bars are only rects, and
+    // nothing in them is text that a stretch would distort.
+    let ribbon = ribbon.replacen("xMinYMin meet", "none", 1);
+    let axis = charts::time_axis(series);
 
     let grain = if per == 1 {
         "day".to_string()
     } else {
         format!("{per}-day block")
     };
-    let caption = format!(
-        "<p class=\"caption\">One bar per {grain}; the tallest is {} messages. \
-         Every row further down this page runs left to right over this same span, \
-         so the same horizontal position is the same week wherever you find it.</p>",
+    let peak = buckets
+        .iter()
+        .enumerate()
+        .max_by_key(|(index, (_, _, count))| (*count, std::cmp::Reverse(*index)))
+        .map(|(_, bucket)| bucket);
+    let take = match peak {
+        Some((first, last, count)) if *count > 0 => {
+            let when = if first == last {
+                pretty_date(first)
+            } else {
+                format!("{} &ndash; {}", pretty_date(first), pretty_date(last))
+            };
+            format!(
+                "<p class=\"take\">Loudest {grain}: <b>{when}</b>, {} messages.</p>",
+                thousands(*count)
+            )
+        }
+        _ => String::new(),
+    };
+    let method = format!(
+        "One bar per {grain}; the tallest is {} messages. Every row further down \
+         this page runs left to right over this same span, so the same horizontal \
+         position is the same week wherever you find it.",
         thousands(top)
     );
 
@@ -54,13 +92,13 @@ pub fn timeline(stats: &Stats, notes: &Notes, names: &Names) -> String {
     let (listing, note) = if events.is_empty() {
         (
             String::new(),
-            "<p class=\"note\">No events file yet. The ribbon shows how much was \
-             said; it cannot show what any of it meant. Run the analyser with \
-             <span class=\"num\">Write the digest</span> switched on, hand the \
-             resulting <span class=\"num\">analysis/digest.jsonl</span> and \
+            " No events file yet. The bars show how much was said, not what any \
+             of it meant. Run the analyser with <span class=\"num\">Write the \
+             digest</span> switched on, hand the resulting \
+             <span class=\"num\">analysis/digest.jsonl</span> and \
              <span class=\"num\">analysis/EVENTS.md</span> to a model or a \
              person, and drop their <span class=\"num\">events.json</span> beside \
-             the export. It will be pinned to this axis on the next run.</p>"
+             the export. It will be pinned to this axis on the next run."
                 .to_string(),
         )
     } else {
@@ -150,10 +188,7 @@ pub fn timeline(stats: &Stats, notes: &Notes, names: &Names) -> String {
                 "{}<ul class=\"events\">{cards}</ul>",
                 kind_filters(&kinds, events)
             ),
-            format!(
-                "<p class=\"note\">Events read from {}.</p>",
-                esc(events_note)
-            ),
+            format!(" Events read from {}.", esc(events_note)),
         )
     };
 
@@ -166,12 +201,14 @@ pub fn timeline(stats: &Stats, notes: &Notes, names: &Names) -> String {
     let coverage = coverage_panel(notes.coverage.as_ref(), series);
 
     format!(
-        "{}{rail}{coverage}{ribbon}{axis}{caption}{stat_line}{note}{listing}{}</section>",
+        "{}<div class=\"panel hero\">{take}{}{key}{rail}{coverage}{ribbon}{axis}</div>\
+         {stat_line}{listing}{}</section>",
         head(
             "Timeline",
             &format!("{} days", thousands(act.span_days as i64)),
             "whole"
         ),
+        how(&(method + &note)),
         data_view(
             "Messages per month",
             &table(&[("Month", false), ("Messages", true)], &months)

@@ -186,23 +186,6 @@ fn set(field: &mut String, value: &str) {
     }
 }
 
-/// A path shown in a field that is too narrow for it.
-///
-/// **Shows the start, not the end.** A field scrolled to its caret renders
-/// `C:\Users\Kosta\Projekti\TelegramExporter\Exports` as `…\TelegramExporter\Exports`
-/// at best and as a drive letter sliced in half at worst, which reads as a
-/// typo. The whole path goes in the tooltip, and both have to be redone on
-/// every change — not once at construction — because Browse writes back
-/// afterwards.
-pub fn elided_start(path: &str, max_chars: usize) -> String {
-    let count = path.chars().count();
-    if count <= max_chars {
-        return path.to_string();
-    }
-    let kept: String = path.chars().take(max_chars.saturating_sub(1)).collect();
-    format!("{kept}…")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,18 +216,6 @@ mod tests {
         // one would quietly cap every download at a megabyte.
         assert_eq!(number("0", SIZE_RANGE, 20), 0);
         assert_eq!(number("0", MEMBER_RANGE, 10_000), 0);
-    }
-
-    #[test]
-    fn a_path_is_elided_at_its_end_so_its_start_stays_readable() {
-        // A drive letter sliced in half reads as a typo.
-        let path = r"C:\Users\Kosta\Projekti\TelegramExporter\Exports";
-        let short = elided_start(path, 20);
-        assert!(short.starts_with(r"C:\Users"), "got {short}");
-        assert!(short.ends_with('…'));
-        assert_eq!(short.chars().count(), 20);
-        // A path that fits is untouched, ellipsis included.
-        assert_eq!(elided_start(path, 200), path);
     }
 
     #[test]

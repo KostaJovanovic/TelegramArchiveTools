@@ -89,6 +89,13 @@ pub fn ribbon(
     };
     let bar = (slot - gap).clamp(1.0, MAX_BAR);
 
+    // The tallest bar is the one the chart points at, so it alone is red.
+    let peak = buckets
+        .iter()
+        .enumerate()
+        .max_by_key(|(index, (_, _, count))| (*count, std::cmp::Reverse(*index)))
+        .map(|(index, _)| index);
+
     let mut parts = format!(
         "<rect class=\"ribbon-bed\" x=\"0\" y=\"{}\" width=\"{}\" height=\"1\"/>",
         num(height - 1.0),
@@ -110,9 +117,10 @@ pub fn ribbon(
         } else {
             String::new()
         };
+        let hot = if Some(index) == peak { " hot" } else { "" };
         let _ = write!(
             parts,
-            "<rect class=\"ribbon-bar\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\"{tip}/>",
+            "<rect class=\"ribbon-bar{hot}\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\"{tip}/>",
             num(x),
             num(height - tall),
             num(bar),
@@ -126,7 +134,90 @@ pub fn ribbon(
     } else {
         format!("Messages per {per} days")
     };
-    frame(width, height, &parts, cls.trim(), &label)
+    // The bucket count and the ceiling ride along for the script, which draws
+    // a focused person's own bars over these on the same grid.
+    let svg = frame(width, height, &parts, cls.trim(), &label);
+    svg.replacen(
+        "<svg ",
+        &format!(
+            "<svg data-b=\"{}\" data-top=\"{}\" data-h=\"{}\" ",
+            buckets.len(),
+            num(ceiling),
+            num(height)
+        ),
+        1,
+    )
+}
+
+/// Two people's messages on the shared axis, one above the line and one below.
+///
+/// **Mirrored, not overlaid.** Two series drawn over each other in two
+/// colours hide whichever is behind, and a stacked pair makes the second one
+/// unreadable against a moving baseline. Above and below one line, both start
+/// from zero and read against each other bar for bar. One ceiling for both, or
+/// the quieter person would draw as loud as the other.
+pub fn mirror(a: &[Day], b: &[Day], width: f64, height: f64) -> String {
+    let (top, _) = bucket_days(a, width);
+    let (bottom, per) = bucket_days(b, width);
+    if top.is_empty() || top.len() != bottom.len() {
+        return String::new();
+    }
+    let ceiling = top
+        .iter()
+        .chain(bottom.iter())
+        .map(|(_, _, c)| *c)
+        .max()
+        .unwrap_or(1)
+        .max(1) as f64;
+    let half = height / 2.0;
+    let slot = width / top.len() as f64;
+    let gap = if slot > MIN_BAR + BAR_GAP {
+        BAR_GAP
+    } else {
+        0.0
+    };
+    let bar = (slot - gap).clamp(1.0, MAX_BAR);
+    let mut parts = format!(
+        "<rect class=\"ribbon-bed\" x=\"0\" y=\"{}\" width=\"{}\" height=\"1\"/>",
+        num(half - 0.5),
+        num(width)
+    );
+    for (index, ((first, last, up), (_, _, down))) in top.iter().zip(bottom.iter()).enumerate() {
+        let x = index as f64 * slot + (slot - bar) / 2.0;
+        let label = esc(&bucket_label(first, last));
+        if *up > 0 {
+            let tall = ((half - 2.0) * (*up as f64 / ceiling)).max(1.5);
+            let _ = write!(
+                parts,
+                "<rect class=\"one\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" \
+                 data-tip=\"{label} &#183; {}\"/>",
+                num(x),
+                num(half - 1.0 - tall),
+                num(bar),
+                num(tall),
+                thousands(*up)
+            );
+        }
+        if *down > 0 {
+            let tall = ((half - 2.0) * (*down as f64 / ceiling)).max(1.5);
+            let _ = write!(
+                parts,
+                "<rect class=\"two\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" \
+                 data-tip=\"{label} &#183; {}\"/>",
+                num(x),
+                num(half + 1.0),
+                num(bar),
+                num(tall),
+                thousands(*down)
+            );
+        }
+    }
+    let label = if per == 1 {
+        "Each person's messages per day".to_string()
+    } else {
+        format!("Each person's messages per {per} days")
+    };
+    frame(width, height, &parts, "ribbon mirror", &label)
 }
 
 /// One person's activity as a heat row on the shared time axis.
@@ -240,74 +331,6 @@ pub(super) fn month_abbrev(month: u32) -> &'static str {
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
     NAMES[(month as usize - 1).min(11)]
-}
-
-/// Month or year ticks under the spine, thinned to what fits.
-pub fn time_axis(series: &[Day], width: f64, height: f64) -> String {
-    if series.is_empty() {
-        return frame(width, height, "", "", "");
-    }
-    let first = iso(&series[0].label);
-    let last = iso(&series[series.len() - 1].label);
-    let span = ((last - first).num_days()).max(1);
-
-    let mut marks: Vec<(NaiveDate, String)> = Vec::new();
-    if span > 900 {
-        for year in first.year()..=last.year() {
-            if let Some(day) = NaiveDate::from_ymd_opt(year, 1, 1) {
-                marks.push((day, year.to_string()));
-            }
-        }
-    } else {
-        let every = if span <= 200 {
-            1
-        } else if span <= 500 {
-            2
-        } else {
-            3
-        };
-        let (mut year, mut month) = (first.year(), first.month());
-        let mut step = 0usize;
-        while let Some(mark) = NaiveDate::from_ymd_opt(year, month, 1) {
-            if mark > last {
-                break;
-            }
-            if step.is_multiple_of(every) {
-                let mut label = month_abbrev(mark.month()).to_string();
-                // The year is worth stating at January and at the very first
-                // mark, and nowhere else — repeating it on every tick is the
-                // repeated chrome the design exists to remove.
-                if mark.month() == 1 || marks.is_empty() {
-                    let _ = write!(label, " {:02}", mark.year().rem_euclid(100));
-                }
-                marks.push((mark, label));
-            }
-            step += 1;
-            month += 1;
-            if month > 12 {
-                year += 1;
-                month = 1;
-            }
-        }
-    }
-
-    let mut parts = String::new();
-    for (when, label) in marks {
-        if when < first {
-            continue;
-        }
-        let x = (when - first).num_days() as f64 / span as f64 * width;
-        let _ = write!(
-            parts,
-            "<line class=\"tick\" x1=\"{}\" y1=\"0\" x2=\"{}\" y2=\"4\"/>\
-             <text class=\"axis\" x=\"{}\" y=\"13\">{}</text>",
-            num(x),
-            num(x),
-            num((x + 4.0).min(width - 1.0)),
-            esc(&label)
-        );
-    }
-    frame(width, height, &parts, "axis-strip", "")
 }
 
 /// The four marker shapes, in the order kinds are first seen.

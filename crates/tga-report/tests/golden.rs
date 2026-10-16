@@ -243,12 +243,11 @@ fn the_golden_exercises_the_cases_it_was_built_for() {
         ("an escaped name", "Bob &amp; Co &lt;the second&gt;"),
         ("an alias list", "class=\"alias\">was Bobby, B."),
         ("a non-member role", "class=\"role\">creator"),
-        ("the overflow-free people table", "class=\"rank\">1<"),
+        ("the overflow-free people table", "class=\"rank k\">1<"),
         // -- the member list ------------------------------------------------
-        (
-            "a silent member",
-            "2 of the 43 people on the member list never posted",
-        ),
+        ("a silent member", "2 of 43 members never posted"),
+        ("the never-posted filter", "data-f=\"silent\""),
+        ("the not-listed filter", "data-f=\"unlisted\""),
         (
             "an incomplete roster",
             "export says this member list is incomplete",
@@ -259,7 +258,10 @@ fn the_golden_exercises_the_cases_it_was_built_for() {
             "are not on the member list at all",
         ),
         ("a handle", "class=\"handle\">@handle_1"),
-        ("a member with no handle", "class=\"muted\">no handle"),
+        (
+            "members with no handle",
+            "on the member list have no <span class=\"num\">@handle",
+        ),
         ("a member who never posted", "class=\"muted\">never posted"),
         ("a non-ASCII topic", "ćaskanje"),
         // -- per-topic figures ----------------------------------------------
@@ -306,7 +308,7 @@ fn the_golden_exercises_the_cases_it_was_built_for() {
         ("a quantile caption", "Five shades, one per fifth"),
         (
             "the streak",
-            "Longest unbroken run of days posted on: Bob &amp; Co &lt;the second&gt;, 9 days",
+            "Longest unbroken run of days posted on: <b>Bob &amp; Co &lt;the second&gt;</b>, 9 days",
         ),
         // -- the `dynamics` branch ------------------------------------------
         //

@@ -92,7 +92,7 @@ pub(super) struct ViewerState {
     pub(super) listed_for: Option<String>,
     pub(super) listing: bool,
 
-    /// Where the way back goes: the Library, unless the Viewer was opened
+    /// Where the way back goes: Analysis, unless the Viewer was opened
     /// from a summary's citation.
     pub(super) back: Option<View>,
 
@@ -339,7 +339,7 @@ impl Shell {
     /// The way back, the chat's name, the topic picker, Refresh and Export as
     /// Classic.
     ///
-    /// **There is no database picker.** The Library lists what is on disk and
+    /// **There is no database picker.** Analysis lists what is on disk and
     /// its Read opens one here; a second list of the same files on this screen
     /// was the duplication the merge set out to remove.
     fn viewer_picker_row(&mut self, ui: &mut Ui) {
@@ -350,7 +350,7 @@ impl Shell {
         let mut go_to = false;
         let mut refresh = false;
         let mut unpack = false;
-        let back_to = self.viewer.back.unwrap_or(View::Library);
+        let back_to = self.viewer.back.unwrap_or(View::Analysis);
         row(ui, |ui| {
             ui.spacing_mut().item_spacing.x = space::STEP;
             if action(ui, text(format!("\u{2190} {}", back_to.label()), &p), true).clicked() {
@@ -687,12 +687,12 @@ impl Shell {
     /// Why the list is empty, when it is.
     pub(super) fn viewer_empty(&self) -> Option<EmptyState> {
         let v = &self.viewer;
-        // Chats are opened from the Library now, so the way out of an empty
+        // Chats are opened from Analysis now, so the way out of an empty
         // Viewer is back there — not a picker this screen no longer has.
         if v.open.is_none() {
             return Some(EmptyState::new(
                 "No chat open",
-                Some("Open one with Read on its row in the Library.".into()),
+                Some("Open one with Read on its row in Analysis.".into()),
             ));
         }
         if v.loading {
@@ -1049,6 +1049,9 @@ impl Shell {
                 ui.add_space(space::STEP);
                 block(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = space::TIGHT;
+                    // The message and its history are content: they select
+                    // and copy, as the bubble's words do.
+                    ui.style_mut().interaction.selectable_labels = true;
                     ui.label(figure(format!("Message {}", d.id), &p));
                     ui.label(meta(format!("{}  ·  {}", d.date, d.from), &p));
                     if let Some(at) = &d.deleted {
@@ -1302,16 +1305,16 @@ impl Shell {
         }
     }
 
-    /// The Library's search box: search every database for `needle` and show
-    /// the results in the reader, with no chat needing to be open first.
+    /// The Analysis view's search box: search every database for `needle` and
+    /// show the results in the reader, with no chat needing to be open first.
     ///
-    /// `dir` is the Library's folder, which may not be the destination: the
+    /// `dir` is the Analysis folder, which may not be the destination: the
     /// results have to be of the exports the user was looking at.
     pub(super) fn search_everywhere(&mut self, needle: String, dir: String) {
         self.viewer.query = needle;
         self.viewer.everywhere = true;
         self.viewer_search_in(dir);
-        // Entered from the Library, so the way back goes there — as `read`.
+        // Entered from Analysis, so the way back goes there — as `read`.
         self.viewer.back = None;
         self.show(View::Viewer);
     }
@@ -1422,7 +1425,7 @@ impl Shell {
                 // **Open the first, when nothing is open yet.** A view whose
                 // first screen is an empty list under a picker is a question
                 // the user has to answer before they can see anything at all.
-                // **Not under a search of every database** — the Library's
+                // **Not under a search of every database** — Analysis's
                 // search box comes here with no chat open, and opening one
                 // would put a chat over the results that were asked for.
                 let searching_all =

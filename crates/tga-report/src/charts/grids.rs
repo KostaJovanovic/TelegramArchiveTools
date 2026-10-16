@@ -166,14 +166,14 @@ pub fn heatrows(
 ///
 /// The empty square is the track rather than the ramp's palest step, so a day
 /// nobody posted is visibly different from a day one person did.
-pub fn calendar(
-    series: &[Day],
-    width: f64,
-    cell: Option<f64>,
-    scale: Option<&Quantiles>,
-) -> String {
+///
+/// **The squares are a fixed size, and the chart is as wide as it needs to
+/// be.** Fitted to the page, four and a half years came out as 3 px squares in
+/// a strip 40 px tall, which is a texture rather than a calendar. Returned with
+/// its width, so the caller can frame it to scroll.
+pub fn calendar(series: &[Day], cell: f64, scale: Option<&Quantiles>) -> (String, f64) {
     if series.is_empty() {
-        return frame(width, cell.unwrap_or(12.0), "", "", "");
+        return (frame(cell, cell, "", "", ""), cell);
     }
     let counts: HashMap<&str, i64> = series
         .iter()
@@ -194,9 +194,9 @@ pub fn calendar(
 
     let gutter = 34.0;
     let head = 16.0;
-    let cell = cell.unwrap_or_else(|| ((width - gutter) / weeks - BAR_GAP).clamp(3.0, 18.0));
     let step = cell + if cell >= 6.0 { BAR_GAP } else { 1.0 };
     let height = head + 7.0 * step + 4.0;
+    let width = gutter + weeks * step + 4.0;
 
     let mut parts = String::new();
     for (row, name) in ["Mon", "", "Wed", "", "Fri", "", "Sun"].iter().enumerate() {
@@ -264,11 +264,23 @@ pub fn calendar(
         }
     }
 
-    frame(width, height, &parts, "calendar", "Messages per day")
+    (
+        frame(width, height, &parts, "calendar", "Messages per day"),
+        width,
+    )
 }
 
 /// Who replies to whom: rows answer, columns are answered.
-pub fn matrix(labels: &[String], cells: &[Vec<i64>], width: f64, gutter: f64) -> String {
+///
+/// `keys` are the people's peer keys, in the labels' order: each cell names
+/// both of its people for Focus.
+pub fn matrix(
+    labels: &[String],
+    keys: &[String],
+    cells: &[Vec<i64>],
+    width: f64,
+    gutter: f64,
+) -> String {
     if cells.is_empty() {
         return frame(width, 10.0, "", "", "");
     }
@@ -300,10 +312,14 @@ pub fn matrix(labels: &[String], cells: &[Vec<i64>], width: f64, gutter: f64) ->
             } else {
                 scale.var(*value)
             };
+            let who = match (keys.get(r), keys.get(c)) {
+                (Some(a), Some(b)) => format!(" data-who=\"{} {}\"", esc(a), esc(b)),
+                _ => String::new(),
+            };
             let _ = write!(
                 parts,
                 "<rect class=\"cell\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" \
-                 fill=\"{fill}\" data-tip=\"{} &#8594; {} &#183; {}\"/>",
+                 fill=\"{fill}\" data-tip=\"{} &#8594; {} &#183; {}\"{who}/>",
                 num(x),
                 num(y),
                 num(size),
@@ -391,13 +407,15 @@ pub fn network(
         let _ = write!(
             parts,
             "<line class=\"link\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" \
-             stroke-width=\"{}\" opacity=\"{}\"/>",
+             stroke-width=\"{}\" opacity=\"{}\" data-who=\"{} {}\"/>",
             num(x1),
             num(y1),
             num(x2),
             num(y2),
             num(0.6 + 2.4 * share),
-            num(0.18 + 0.5 * share)
+            num(0.18 + 0.5 * share),
+            esc(&edge.a),
+            esc(&edge.b)
         );
     }
     for node in nodes {
@@ -412,9 +430,10 @@ pub fn network(
         let label = clip(&full, 104.0, 5.4);
         let _ = write!(
             parts,
-            "<g class=\"node\" data-tip=\"{} &#183; {} messages, {} exchanges\">\
+            "<g class=\"node\" data-who=\"{}\" data-tip=\"{} &#183; {} messages, {} exchanges\">\
              <circle class=\"dot\" cx=\"{}\" cy=\"{}\" r=\"{}\"/>\
              <text class=\"nodelabel\" x=\"{}\" y=\"{}\" text-anchor=\"middle\">{}</text></g>",
+            esc(&node.key),
             esc(&label),
             thousands(node.messages),
             thousands(node.degree),

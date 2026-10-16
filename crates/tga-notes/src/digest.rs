@@ -47,6 +47,11 @@ pub struct Row {
     /// The message this answers.
     pub re: Option<i64>,
     pub media: String,
+    /// The name the sender gave the attached file, whatever it is — so a
+    /// spreadsheet or an archive nothing here can open is still *named* to a
+    /// summary rather than reduced to `[document]`. The digest does not write
+    /// it; it has `doc` for what it can read.
+    pub file: String,
     /// Set only for an attachment this build can read the inside of.
     pub doc: Option<Attachment>,
     pub reactions: Option<i64>,

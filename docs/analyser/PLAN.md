@@ -18,7 +18,7 @@ The exporter's job ends when the files are on disk; this begins there. It reads
 |---|---|
 | input | one export folder. Both layouts load without a flag: ours writes `result.json` per topic at the root, Telegram Desktop writes `chats/chat_<id>/result.json`. |
 | output | one self-contained `report.html`, and optionally a `--stats` dump of every figure. |
-| appearance | **dark only**, one hue, hairline rules, square corners. |
+| appearance | **dark only**; grey marks, red for the one mark a chart points at, a blue ramp for shading; each chart in a low panel with its method behind (?). Read on phones as much as desks. |
 | network | none, ever. Not at read time, not in the report. |
 | notes | a hand-written annotation file beside the export, optional. |
 
@@ -111,49 +111,66 @@ as a reply to the message that opened it. Read literally, 2,702 of the UA KOLAB
 export's 3,518 "replies" become answers to a single message and the median
 response time stretches to days.
 
-## Dark only, one hue
+## Dark only, and red for one thing
 
-There is one appearance. `tga-app`'s `theme` has one palette, the report emits
-one `html.dark` block, and neither offers a switch — a light theme is a second
-design to keep in step, and this one has two colours and a red to keep in step
-already.
+There is one appearance. The window has one palette, the report emits one
+`html.dark` block, and neither offers a switch — a light theme is a second
+design to keep in step. The base tokens are the window's own, and
+`the_dark_window_and_the_report_name_the_same_colours` holds them equal.
 
-**One hue does all the work**, and that costs nothing: almost every figure here
-is *magnitude*, whose correct encoding is a single-hue sequential ramp anyway.
-Where something genuinely needs telling apart by identity, the report uses small
-multiples on a shared axis rather than inventing hues the design does not have.
-Event kinds are carried by shape — ● ■ ▲ ◆ — for a measured reason: the four
-colours the source timeline used scored ΔE 19.3 to normal vision and ΔE 6.9 to
-colour-vision deficiency, which forced shape-coding regardless.
+**Red means "look here", and only that** (2026-10-16 redesign, the account
+holder's ask for something calmer). Bars are drawn in a muted grey (`mark`),
+and the one mark each chart points at — the tallest column, the top of a
+ranking — is the accent. When everything was red, nothing was.
 
-The ramp is generated in OKLab rather than eyeballed, holding the accent's hue
-with chroma clamped to the sRGB gamut at each step. It passes four ordinal
-checks, and `palette::tests` re-derives all four from the hex values so an edit
-that breaks one fails the suite instead of quietly shipping a ramp nobody can
-read:
+**Shading is a blue ramp**, because almost every shaded figure is *magnitude*,
+whose encoding is a single-hue sequential ramp, and a red ramp competed with
+the red highlight. It is generated in OKLab (hue 232), and `palette::tests`
+re-derives the ordinal checks — monotone lightness, an even step between
+neighbours, the end step clear of the surface — from the hex values, so an edit
+that breaks one fails the suite.
 
-```
-monotone L       yes
-adjacent dL      0.082   (floor 0.06)
-end vs surface   2.33:1  (floor 2:1)
-hue spread       1 degree
-```
+**A private chat gets two hues, coral and teal (`one`, `two`)**, and never
+relies on them alone: the timeline puts one person above a line and the other
+below it, the hour chart puts them side by side under a named key. Event kinds
+stay shape-coded — ● ■ ▲ ◆ — for a measured reason: the four colours the
+source timeline used scored ΔE 19.3 to normal vision and ΔE 6.9 to
+colour-vision deficiency.
 
-The end step is what sets the span: on near-black, anything darker than 2:1
-stops being a mark and becomes surface. That is why the ramp runs past the
-accent into deeper red rather than starting at it — the accent is a step of the
-hue's ramp, not its end.
+## The page
+
+- **At a glance** opens it: four to six findings computed from the same
+  figures as the charts (`sections/glance.rs`). Nothing is written by a model.
+- **Every chart is a panel**: a title, one sentence saying what it shows
+  (computed), and the method behind a (?) that opens on a tap. The method used
+  to be a paragraph under every chart, competing with the data.
+- **A sticky bar** holds the sections that rendered (built from what was
+  written, so no link scrolls nowhere), the search, and the Focus pill.
+- **People is one table** — who posted, who is on the member list and never
+  did, who posted without being on it — filtered by chips rather than split
+  into sections, with each person's @handle under their name.
+- **Focus**: tap a name and the page draws that person over the timeline and
+  the hour chart and marks their rows, bars and dots. Only the 30 loudest have
+  bars to draw (`focus-data`, JSON); anybody can be marked.
+- **Phones**: the marks whose labels are the point (ranked bars, columns, the
+  time axis) are HTML, so their text is the page's size on any screen
+  (`charts/html.rs`); heat grids, the matrix and the network pan in a frame at
+  a readable size; the people table folds to one line a person that opens on a
+  tap.
+- **A private chat** (exactly two people posted) gets its own layout: a
+  mirrored timeline, both people's hours side by side, a side-by-side panel,
+  and none of the group's rankings, matrix, network or comings and goings.
+- **Sections fold**, remembered per report in localStorage; columns sort.
 
 ## What the design does not carry
 
-Five things the source timeline did that this does not, each of them a decision
+Things the source timeline did that this does not, each of them a decision
 rather than an omission:
 
-1. **Boxes.** Every stat tile, channel card and chart panel sat in a bordered,
-   rounded box, several nested two deep. Here it is hairline rules and square
-   corners. There are no cards.
-2. **Hues.** A blue accent, four note-kind colours and a blue sequential ramp,
-   replaced by two colours and one red. See above.
+1. **Nested boxes.** The source sat tiles inside cards inside panels. Here a
+   chart gets one low panel and nothing nests.
+2. **Hues for categories.** Four note-kind colours, replaced by shapes. See
+   above.
 3. **Repeated chrome.** The date range in the nav bar and again under the page
    title; "all topics" beside the kind filters that already do that job.
 4. **Scale mismatches.** Day-of-week is seven numbers; it does not get seven

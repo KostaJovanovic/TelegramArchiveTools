@@ -10,6 +10,13 @@
 //! Brackets with nothing but spaces between them are one citation, written
 //! as one bracket, and it keeps the first [`MOST`] ids.
 //!
+//! A model will also drop the `#` the prompt asks for and write
+//! `[304615, 304694]`. Unrecognised, those passed through unchecked and were
+//! drawn as plain text, not links. A bracket of bare numbers is a citation
+//! too, but **only when every number in it is an id the model was given**: a
+//! year or a footnote in brackets is not one and stays as it was. Either way
+//! it comes out written as `[#…]`.
+//!
 //! [`Filter`] does this on a stream: it holds back only what may still change
 //! — an unfinished bracket, a citation the next one may join, and the spaces
 //! before them — so the text still appears as it is written.
@@ -29,7 +36,7 @@ pub fn clean(text: &str, known: &HashSet<i64>) -> String {
     let mut rest = text;
     while let Some(open) = rest.find('[') {
         let (before, from) = rest.split_at(open);
-        let Some((ids, len)) = group(from) else {
+        let Some((ids, len)) = group(from, known) else {
             out.push_str(before);
             out.push('[');
             rest = &from[1..];
@@ -60,7 +67,7 @@ pub fn clean(text: &str, known: &HashSet<i64>) -> String {
 /// The citation at the start of `from`, which begins with `[`, and every one
 /// that follows it after nothing but spaces: their ids in order, and how many
 /// bytes of `from` they take. `None` when the first bracket is no citation.
-fn group(from: &str) -> Option<(Vec<i64>, usize)> {
+fn group(from: &str, known: &HashSet<i64>) -> Option<(Vec<i64>, usize)> {
     let mut ids = Vec::new();
     let mut end = 0;
     loop {
@@ -70,7 +77,7 @@ fn group(from: &str) -> Option<(Vec<i64>, usize)> {
         let Some(close) = next.strip_prefix('[').and_then(|_| next.find(']')) else {
             break;
         };
-        let Some(got) = parse(&next[1..close]) else {
+        let Some(got) = ids_in(&next[1..close], known) else {
             break;
         };
         ids.extend(got);
@@ -79,13 +86,35 @@ fn group(from: &str) -> Option<(Vec<i64>, usize)> {
     (!ids.is_empty()).then_some((ids, end))
 }
 
-/// The ids in a bracket's inside, or `None` when it is not a citation.
-fn parse(inside: &str) -> Option<Vec<i64>> {
+/// The ids a bracket's inside cites, or `None` when it is not a citation:
+/// `#1, #2` always, `1, 2` only when every one of them is `known`.
+fn ids_in(inside: &str, known: &HashSet<i64>) -> Option<Vec<i64>> {
+    let (ids, marked) = parse(inside)?;
+    (marked || ids.iter().all(|id| known.contains(id))).then_some(ids)
+}
+
+/// The numbers in a bracket's inside, each with or without its `#`, and
+/// whether every one had it. `None` when anything else is in there.
+fn parse(inside: &str) -> Option<(Vec<i64>, bool)> {
+    let mut marked = true;
     let ids: Option<Vec<i64>> = inside
         .split(',')
-        .map(|part| part.trim().strip_prefix('#')?.trim().parse().ok())
+        .map(|part| {
+            let part = part.trim();
+            let digits = match part.strip_prefix('#') {
+                Some(d) => d.trim(),
+                None => {
+                    marked = false;
+                    part
+                }
+            };
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            digits.parse().ok()
+        })
         .collect();
-    ids.filter(|v| !v.is_empty())
+    ids.filter(|v| !v.is_empty()).map(|v| (v, marked))
 }
 
 /// Whether a bracket's inside so far could still turn out to be a citation.
@@ -95,13 +124,15 @@ fn may_cite(inside: &str) -> bool {
         .all(|c| c == '#' || c == ',' || c == ' ' || c.is_ascii_digit())
 }
 
-/// Every id cited in `text`, in order, repeats kept.
+/// Every id cited in `text`, in order, repeats kept. Read from text that has
+/// been through [`clean`], so a citation is the `[#…]` it wrote, and a bare
+/// bracket left over is not one.
 pub fn cited(text: &str) -> Vec<i64> {
     let mut out = Vec::new();
     let mut rest = text;
     while let Some(open) = rest.find('[') {
         let from = &rest[open..];
-        if let Some(ids) = from.find(']').and_then(|close| parse(&from[1..close])) {
+        if let Some((ids, true)) = from.find(']').and_then(|close| parse(&from[1..close])) {
             out.extend(ids);
         }
         rest = &from[1..];
@@ -158,7 +189,7 @@ impl<'a> Filter<'a> {
             let Some(open) = body.rfind('[') else {
                 break;
             };
-            if parse(&body[open + 1..]).is_none() {
+            if ids_in(&body[open + 1..], self.known).is_none() {
                 break;
             }
             at = open;
@@ -251,6 +282,29 @@ mod tests {
 
     #[test]
     fn cited_ids_are_found_in_order() {
-        assert_eq!(cited("a [#3] b [#1, #2] [photo]"), vec![3, 1, 2]);
+        assert_eq!(cited("a [#3] b [#1, #2] [photo] [2022]"), vec![3, 1, 2]);
+    }
+
+    /// **The model drops the `#`.** `[10, 11]` was passed through unchecked
+    /// and drawn as plain text; it is a citation when every number is an id
+    /// the model was given, and a year or a footnote is not.
+    #[test]
+    fn a_citation_without_its_hash_is_checked_and_written_with_it() {
+        let k = known();
+        assert_eq!(
+            clean("Said [10, 11]. Then [12] [#13].", &k),
+            "Said [#10, #11]. Then [#12, #13]."
+        );
+        // One number not given: not a citation at all, so nothing is dropped.
+        assert_eq!(
+            clean("In [2022], see [1] and [10, 99].", &k),
+            "In [2022], see [1] and [10, 99]."
+        );
+        assert_eq!(clean("[-10] [+10] [ 10 ]", &k), "[-10] [+10] [#10]");
+        let text = "A [10, 11] b [2022] c [12][13] d [10, 99] e [14]";
+        let whole = clean(text, &k);
+        for size in 1..12 {
+            assert_eq!(streamed(text, size, &k), whole, "pieces of {size}");
+        }
     }
 }

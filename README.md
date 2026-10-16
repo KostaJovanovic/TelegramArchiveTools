@@ -51,7 +51,7 @@ The rail has five places:
   so far. **Stop** works at any moment, and whatever was already written stays
   on disk. If the window is in the background when a run ends, Windows shows a
   notification.
-- **Library** — every export in your destination folder, one row per chat.
+- **Analysis** — every export in your destination folder, one row per chat.
   **Make report**, **Open report**, **Read** a database in the window, or
   **Show in folder**. Rows that need a report are ticked already. The search
   box on the right looks inside the messages of every database.
@@ -106,7 +106,7 @@ change:
 | **From / Until** | blank | A folder export of only those days, both included |
 | **Size limit** | 20 MB | Anything bigger is skipped. `0` means no limit — a busy group can run to tens of gigabytes |
 | **Download media** | on | Turn off for text-only pages, which is enormously faster |
-| **Where exports go** | `Exports/` | Point it anywhere. The Library follows it |
+| **Where exports go** | `Exports/` | Point it anywhere. Analysis follows it |
 | **Split forum topics** | on | |
 | **Member list cap** | 10,000 | Large public channels stop serving the list well before that |
 | **Report after each export** | off | Writes each chat's report while the next one downloads |

@@ -261,6 +261,37 @@ impl Reader {
         Ok(self.runtime.block_on(self.store.blob(file_id, kind))?)
     }
 
+    /// When the newest finished update of the chat ran; see
+    /// `Store::last_update`. A catch-up is bookmarked by it.
+    pub fn last_update(&self, chat_id: i64) -> Result<Option<i64>> {
+        Ok(self.runtime.block_on(self.store.last_update(chat_id))?)
+    }
+
+    /// How many updates after `after` and up to `through` added anything, and
+    /// the ids of what they added.
+    pub fn added_by_updates(
+        &self,
+        chat_id: i64,
+        after: Option<i64>,
+        through: i64,
+    ) -> Result<(usize, Vec<i64>)> {
+        Ok(self
+            .runtime
+            .block_on(self.store.added_by_updates(chat_id, after, through))?)
+    }
+
+    /// How many messages were sent at or after `since`, in unix seconds.
+    pub fn count_since(&self, chat_id: i64, since: i64) -> Result<usize> {
+        Ok(self
+            .runtime
+            .block_on(self.store.count_since(chat_id, since))?)
+    }
+
+    /// When the newest message was sent, in unix seconds.
+    pub fn newest(&self, chat_id: i64) -> Result<Option<i64>> {
+        Ok(self.runtime.block_on(self.store.newest(chat_id))?)
+    }
+
     /// [`media_index`].
     pub fn media_index(&self, chat_id: i64) -> Result<HashMap<(i64, String), (i64, String)>> {
         Ok(self

@@ -11,28 +11,32 @@
 //! that stylesheet character for character. Both are gone, and so is it: a
 //! second appearance is a second design to keep in step.
 //!
-//! **One hue does all the work.** The design has two colours and one red, which
-//! rules out a categorical palette — and that turns out to cost nothing,
-//! because almost every figure in this report is *magnitude*, whose correct
-//! encoding is a single-hue sequential ramp anyway. Where something genuinely
-//! needs telling apart by identity, the report uses small multiples on a shared
-//! axis rather than inventing hues the design does not have.
+//! **Red is for what stands out, not for everything.** The report was one red
+//! hue on every bar, heatmap and dot, and a page where everything shouts says
+//! nothing. Now the bulk of every chart is `mark`, a quiet grey-blue; the
+//! accent marks only the one thing a chart points at — the peak, the person in
+//! focus, the event. Magnitude in a heatmap is a single-hue sequential ramp in
+//! a cool blue, which is still the right encoding for it and no longer the
+//! same colour as the highlights drawn over it.
 //!
-//! The ramp is not eyeballed. It is generated in OKLab, holding the accent's
-//! hue, with chroma clamped to the sRGB gamut at each step so the lightness
-//! steps come out even, and it passes four ordinal checks:
+//! **Two more hues, for comparisons only.** `one` and `two` are used where two
+//! things are set side by side — the two people of a private chat — and
+//! nowhere else, so neither ever has to be read as a magnitude.
+//!
+//! The ramp is not eyeballed. It is generated in OKLCH at one hue (232°),
+//! with chroma clamped to the sRGB gamut at each step so the lightness steps
+//! come out even, and it passes four ordinal checks:
 //!
 //! ```text
 //! monotone L       yes
-//! adjacent dL      0.082 (floor 0.06)
-//! end vs surface   2.33:1 (floor 2:1)
-//! hue spread       1 degree
+//! adjacent dL      0.095 (floor 0.06)
+//! end vs surface   over 3:1 (floor 2:1)
+//! hue spread       under 3 degrees
 //! ```
 //!
-//! The end step is what sets the span. On near-black, anything darker than 2:1
-//! stops being a mark and becomes surface. That is why the ramp runs past the
-//! accent into deeper red rather than starting at it — the accent is a step of
-//! the hue's ramp, not its end.
+//! The first step is what sets the span. On near-black, anything darker than
+//! 2:1 stops being a mark and becomes surface, which is why the ramp starts at
+//! a mid blue rather than a deep one.
 //!
 //! `tests` below re-derives all four from the hex values, so an edit that
 //! breaks one fails the suite instead of quietly shipping a ramp nobody can
@@ -62,10 +66,17 @@ pub const TOKENS: Tokens = &[
     // backdrop texture, which is a different thing at a different value, and
     // the drift check compares shared names.
     ("gridline", "#222222"),
+    // The bulk of every bar chart, and its hover. Grey-blue, so the accent
+    // drawn beside it is the only thing on the chart that calls out.
+    ("mark", "#78818e"),
+    ("mark_hi", "#9ca5b1"),
+    // The two sides of a comparison, and only that.
+    ("one", "#f47c6b"),
+    ("two", "#4fccd9"),
 ];
 
 /// Deep-to-pale, magnitude increasing. Validated; see the module docs.
-pub const RAMP: &[&str] = &["#813435", "#a83f41", "#d14a4e", "#fc555b", "#fd8b88"];
+pub const RAMP: &[&str] = &["#27627e", "#3f7e9d", "#579cbe", "#6fbae0", "#91d9fe"];
 
 /// The class the document carries, and the only one it has.
 pub const DEFAULT: &str = "dark";

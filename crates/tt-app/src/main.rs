@@ -23,6 +23,7 @@ mod actions;
 mod bridge;
 mod cli;
 mod diagnostics;
+mod fold;
 mod holder;
 mod instance;
 mod journal;
@@ -301,6 +302,7 @@ fn main() {
     if let Err(e) = started {
         report_startup_failure(&format!("could not open a window: {e}"));
     }
+    log::info!("window gone");
 }
 
 /// Is a window's top-left corner, in logical points, somewhere on the

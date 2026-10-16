@@ -26,7 +26,7 @@ pub fn records(stats: &Stats) -> String {
         } else {
             format!(" <span class=\"num\">{}</span>", esc(&item.unit))
         };
-        let mut about = esc(&item.date);
+        let mut about = esc(&pretty_when(&item.date));
         if !item.who.is_empty() {
             let _ = write!(about, " &#183; {}", esc(&item.who));
         }

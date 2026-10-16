@@ -20,10 +20,6 @@ use tga_notes::Row;
 /// enough that one copy-paste cannot eat a part.
 pub const TEXT_CHARS: usize = 1500;
 
-/// A document's text past this is cut. Its name, date and opening are most of
-/// what a summary can use; the rest is what the report and the reader are for.
-pub const DOC_CHARS: usize = 1500;
-
 /// The text read off a photo past this is cut: ReVision's `OCR_CAP`.
 pub const PHOTO_CHARS: usize = 1500;
 
@@ -61,7 +57,12 @@ pub fn line(row: &Row, topic: Option<&str>) -> String {
         if !doc.date.is_empty() {
             s.push_str(&format!(", dated {} ({})", doc.date, doc.date_src));
         }
-        let inside = flat(&doc.text, DOC_CHARS);
+        // **A document is read whole** (2026-10-16, the account holder's ask;
+        // it was cut at 1,500 characters). What bounds it is the reader's own
+        // cap, `tga_docs::MAX_CHARS`. A message is never split, so a long one
+        // is a part of its own — larger than `PART_TOKENS`, still well inside
+        // the context.
+        let inside = flat(&doc.text, usize::MAX);
         if !inside.is_empty() {
             s.push_str(&format!(": {inside}"));
         }
@@ -72,7 +73,16 @@ pub fn line(row: &Row, topic: Option<&str>) -> String {
             flat(&row.photo_text, PHOTO_CHARS)
         ));
     } else if !row.media.is_empty() {
-        s.push_str(&format!(" [{}]", row.media.replace('_', " ")));
+        let kind = row.media.replace('_', " ");
+        // **Every shared file by its name**: a spreadsheet, a deck, an archive
+        // or a recording nothing here reads the inside of is still what it is
+        // called, which is most of what a summary needs to say it was shared.
+        // A sticker's or a GIF's name is the client's, and says nothing.
+        if row.file.is_empty() || matches!(row.media.as_str(), "sticker" | "animation") {
+            s.push_str(&format!(" [{kind}]"));
+        } else {
+            s.push_str(&format!(" [{kind} \"{}\"]", flat(&row.file, 200)));
+        }
     }
     if let Some(n) = row.reactions.filter(|&n| n > 0) {
         s.push_str(&format!(" ({n} reaction{})", if n == 1 { "" } else { "s" }));
@@ -186,6 +196,41 @@ mod tests {
             line(&r, None),
             "#9 10:02 Ana: [document \"Zapisnik 01.12.docx\", dated 2024-12-01 (filename): Prisutni: …]"
         );
+    }
+
+    #[test]
+    fn a_document_is_read_whole() {
+        let mut r = row(9, "2024-12-02 10:02", "Ana", "");
+        r.doc = Some(Attachment {
+            name: "Statut.docx".into(),
+            text: "č".repeat(TEXT_CHARS * 4),
+            ..Default::default()
+        });
+        let out = line(&r, None);
+        assert!(out.contains(&"č".repeat(TEXT_CHARS * 4)));
+        assert!(!out.contains('…'));
+    }
+
+    #[test]
+    fn a_file_nothing_can_read_is_still_named() {
+        let mut r = row(5, "2024-12-02 11:00", "Ana", "evo budžeta");
+        r.media = "document".into();
+        r.file = "Budžet 2025.xlsx".into();
+        assert_eq!(
+            line(&r, None),
+            "#5 11:00 Ana: evo budžeta [document \"Budžet 2025.xlsx\"]"
+        );
+        r.media = "video_file".into();
+        r.file = "skupština.mp4".into();
+        assert_eq!(
+            line(&r, None),
+            "#5 11:00 Ana: evo budžeta [video file \"skupština.mp4\"]"
+        );
+        // A sticker's file name is the client's and says nothing.
+        r.text.clear();
+        r.media = "sticker".into();
+        r.file = "sticker.webp".into();
+        assert_eq!(line(&r, None), "#5 11:00 Ana: [sticker]");
     }
 
     #[test]

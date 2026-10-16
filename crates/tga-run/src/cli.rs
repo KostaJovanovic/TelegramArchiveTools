@@ -501,6 +501,7 @@ pub(crate) fn digest_row(
         text: msg.text.clone(),
         re: msg.reply_to,
         media: msg.media.clone(),
+        file: msg.file_name.clone(),
         doc: attachment(export, msg, stored),
         reactions: if msg.reactions.is_empty() {
             None

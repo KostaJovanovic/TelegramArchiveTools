@@ -170,6 +170,16 @@ pub fn final_text(about: &About, length: Length, lang: Lang, from_notes: bool) -
              empty. {cite}",
             headings(lang)
         ),
+        // A catch-up: read by someone who was away, beside the same for other
+        // chats, so the gist comes first and stands alone.
+        Length::Brief => format!(
+            "This is a catch-up for someone who was away. First write ONE line in bold, \
+             `**like this**`: what mattered most, in one sentence, with no citation. Then 2 to \
+             6 bullet points starting with `- `, most important first, each one concrete \
+             thing: what happened or was decided, who, and how it ended or what is still \
+             open. {weigh} Fewer bullets when little happened; when nothing of substance \
+             happened, say so in the bold line and write no bullets. No headings. {cite}"
+        ),
     };
     format!(
         "You summarise what happened in {of} {span}. You get {input}\n\n{shape}\n\

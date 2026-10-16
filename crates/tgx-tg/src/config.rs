@@ -237,13 +237,13 @@ pub struct Settings {
 
     /// When a chat finishes exporting, write its report beside it.
     ///
-    /// The window queues the chat's export in the Library's analyser as soon
+    /// The window queues the chat's export in the Analysis view's analyser as soon
     /// as the chat is done, so the reports are written while the next chat
     /// downloads. Off by default: a report of a large chat takes seconds and a
     /// megabyte, and an export is not always something wanted read.
     pub report_after_export: bool,
     /// The analyser's `--digest`: `analysis/digest.jsonl` and `EVENTS.md`
-    /// beside each report. These three were run options on the Library's
+    /// beside each report. These three were run options on Analysis's
     /// foot, held for the session only, beside the selection verbs; they are
     /// settings because they decide what a report contains, not which
     /// exports get one.
@@ -285,6 +285,18 @@ pub struct Settings {
     /// the last one left off: `short`/`detailed`/`sections`, `sr`/`en`/`chat`.
     pub summary_length: String,
     pub summary_lang: String,
+    /// Both Summaries pages: whether "24 h" and "N days" count back from each
+    /// chat's last message (on) or from now (off). One tick box, shown on
+    /// both pages, because the two pages disagreeing about it was the bug.
+    pub summary_from_last: bool,
+    /// Catch up: the days (`since` the last catch-up, or a number of days),
+    /// a forum's topics apart or the chat as one, and which chats — every
+    /// one with something new (`catchup_auto`), or the ones ticked, by
+    /// database path.
+    pub catchup_days: String,
+    pub catchup_by_topic: bool,
+    pub catchup_auto: bool,
+    pub catchup_chosen: Vec<String>,
 
     // Performance
     //
@@ -436,6 +448,11 @@ impl Default for Settings {
             summary_photos: true,
             summary_length: "short".into(),
             summary_lang: "sr".into(),
+            summary_from_last: true,
+            catchup_days: "since".into(),
+            catchup_by_topic: false,
+            catchup_auto: true,
+            catchup_chosen: Vec::new(),
             download_concurrency: 5,
             page_size: 1000,
             sort_mode: "recent".into(),

@@ -87,6 +87,13 @@ What changed from the plan below while building it:
   and the final prompt says discussions count. `prompt::VERSION` 3. Not taken:
   ReVision's 3-hour session cut (days and the longest gap still decide), its
   facts and glossary block, and its `PIN`/`obrisano`/`⏎` markings.
+- **A document is read whole (2026-10-16, the account holder's ask).** Its text
+  was cut at 1,500 characters like a message's; now only `tga-docs`' own
+  `MAX_CHARS` (20,000, an outlier cap) bounds it. A message is never split, so
+  a long document is a part of its own, larger than `PART_TOKENS` and still
+  inside the 32K context; a question that cannot fit the messages behind its
+  notes answers from the notes, as before. No `prompt::VERSION` bump: notes are
+  cached by the part's text, which changed.
 - **Loaded while the view is open (2026-10-15).** The idle clock unloaded
   Gemma two minutes after a summary, so the first question after reading one
   waited for the model to load again. Now the clock runs only after the
@@ -138,6 +145,81 @@ What changed from the plan below while building it:
   `llama-server.exe`, re-checked by PID and path first. A run never stops it:
   it skips the photos, says so, and the finished status counts them.
 
+## Catch up (2026-10-16)
+
+The account holder's ask: "just be quickly informed what was going on in the
+groups". Whole-chat summaries and event extraction are ReVision's job; this
+view now opens on **Catch up**, and the single-chat form is its second page,
+**One chat**.
+
+- **Which chats:** the Analysis view's databases (a folder export records no
+  updates). *Every chat with news*, or the ones *Ticked* on the left
+  (`catchup_auto`, `catchup_chosen`). The list shows what is new in each,
+  counted from the database's indexes on a worker before the model is
+  involved (`tga_run::catchup::survey`), and a box on every row saying
+  whether a press would write it. Ticking a row under *Every chat with news*
+  switches to *Ticked*, starting from what it had picked.
+- **Which days:** *Since last* (the default), *Today*, *3 days*, *7 days*, or
+  *Dates*. Remembered (`catchup_days`), except a range of dates.
+- **"Since last" is counted in database updates, by day.** Every sync is a
+  `runs` row, and every message it adds carries the run's stamp as
+  `first_seen` (`Store::last_update`, `Store::added_by_updates`). A chat's
+  bookmark is the stamp of the newest finished update its last saved catch-up
+  covered, kept per chat id in `<chat folder>\analysis\summaries\caught-up.json`
+  as `{"through": stamp, "at": unix}` (reading a database writes nothing into
+  it). `at` is what the page's "since the last catch-up, 2 days ago" reads —
+  the newest across the chats. The next catch-up reads the
+  messages added since, as **whole days**: every message on a day that had
+  something new, so a new message is read beside what was said around it.
+  A clock time would lose what a late sync brings in. An edit is not news:
+  a message belongs to the update that first stored it. A chat never caught up
+  starts at the last `FIRST_DAYS` (3) days. A run still going is left out.
+- **Only a saved summary moves the bookmark**; a chat that failed is read
+  again next time. "Nothing new" moves it too: the updates were read.
+- **One shape for every chat: `Length::Brief`** — one bold line with the
+  gist, then 2–6 cited bullets, most important first. *Forums* is one switch
+  for the run: *Whole chat* or *Topic by topic* (`catchup_by_topic`), a
+  brief per topic with no overview above them.
+- **Two passes.** Every chat's days are read first, with their photos through
+  the OCR; then Gemma writes each in turn, busiest first, each card filling in
+  as it is written. Per chat, the card would load both models once each.
+- **Saved twice over:** each chat's brief beside it, as any summary
+  (`<days>_brief_<lang>.md`), and the run as a record in
+  `<Analysis folder>\Catch-ups\<when>.json`, listed in the *Earlier
+  catch-ups* menu in the page's heading and reopened as its cards.
+- **Ask about these days** on a card opens One chat on that chat and days,
+  with the brief shown and the question box under it.
+- **The language is a setting** (Settings › Summaries › Language), shared by
+  both pages, rather than a choice on the form.
+- Not done: a catch-up does not sync first; syncing stays the exporter's step.
+- **The two pages are one layout**: the same list (filter, rows, saved
+  things at the foot), the same form rows with one label column
+  (`summaries::form_row`), the same summary line and the same card
+  (`summaries::card`). One chat's Days row is *24 hours · 1 day · 7 days ·
+  30 days · Dates*; From and To show only under Dates, as on Catch up.
+- **"24 hours" is the 24 hours before the chat's last message**, not before
+  now (`Chat::last_hours`), so a chat that went quiet yesterday still has a
+  last day to read. The one range counted in hours: it filters on
+  `Msg::unix` (`Options::after`) inside the calendar days it covers, and is
+  saved as `<end YYYY-MM-DD_HHMM>_24h_…md`. On both pages (*24 h*; it took
+  Catch up's *Today*, so the row fits the window's floor, and a remembered
+  Today opens on it). On Catch up it decides what is **read**, not which
+  chats: every chat has a last 24 hours, so "every chat with news" still
+  means news since the last catch-up (`News::fresh`), and a saved 24-hour
+  brief moves the bookmark like any other. A card remembers its hours
+  (`Card::after`), so *Ask about these days* opens One chat on 24 h.
+- **Where the span counts from is a tick box**, under the Days row of both
+  pages: *From each chat's last message, not from now* (`summary_from_last`,
+  on by default; 2026-10-16, the account holder's ask). It used to be
+  implicit and the pages disagreed — One chat counted every span from the
+  last message, Catch up counted 3 and 7 days from today. Now *24 h* and *N
+  days* both follow the box on both pages; *Since last* and *Dates* ignore it
+  and grey it out. Ticked, Catch up picks chats by news since the last
+  catch-up (as for *Since last*) and moves the bookmark when it saves; a chat
+  never caught up is picked if its own span has anything. Unticked, the span
+  is the calendar's (`summary::clock_hours`, `Days::window(today)`): chats are
+  picked by whether they said anything in it, and the bookmark stays put.
+
 ## Decided (2026-10-14)
 
 | question | answer |
@@ -166,7 +248,7 @@ What changed from the plan below while building it:
 └──────────────────────┘└───────────────────────────────────────────┘
 ```
 
-- **Chats** are the databases in the Library's folder, `tga_run::refresh::library`;
+- **Chats** are the databases in the Analysis folder, `tga_run::refresh::library`;
   **Saved** lists the selected chat's `analysis\summaries\*.md`, newest first.
 - The count, token estimate and part count update as the range changes, **before
   the model is involved**, so a month of a 300k-message chat is never a surprise.
@@ -191,7 +273,7 @@ attachments only for messages in range.
 == 2024-12-02 (Mon) ==
 #18234 09:14 Ana: …
 #18240 09:20 Marko (re #18234): … [photo]
-#18251 10:02 Ana: [doc "Zapisnik 01.12.docx", dated 2024-12-01: …first 1500 chars…]
+#18251 10:02 Ana: [document "Zapisnik 01.12.docx", dated 2024-12-01 (filename): …the whole text…]
 ```
 
 Gemma already reads this shape in ReVision.
@@ -261,7 +343,7 @@ tga-sum      prompts, line rendering, cutting, notes/final calls, the cache,
              llama-server lifecycle. Depends on tga-notes (Row) only.
              MUST NOT depend on tga-read, tga-db, tga-docs, grammers-* or a toolkit.
 tga-run      summary.rs: load the chat, build and filter rows, drive tga-sum,
-             report Progress over mpsc + Wake (the Library's pattern).
+             report Progress over mpsc + Wake (the Analysis view's pattern).
 tt-app       shell/summaries.rs: the rail view.
 ```
 

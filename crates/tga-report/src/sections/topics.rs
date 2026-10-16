@@ -10,7 +10,9 @@ use crate::charts::{self, esc, thousands};
 pub fn topics(stats: &Stats) -> String {
     let rows = &stats.topics;
     let act = &stats.activity;
-    if rows.is_empty() {
+    // One topic is the chat itself, and a table of one row repeats the
+    // figures at the top of the page.
+    if rows.len() <= 1 {
         return String::new();
     }
     let series = &act.per_day;
@@ -59,17 +61,40 @@ pub fn topics(stats: &Stats) -> String {
             short(&topic.top, 22)
         );
     }
-    let headers = "<tr><th>Topic</th><th class=\"presence\">Activity</th>\
-                   <th class=\"n\">Messages</th><th class=\"n\">Voices</th><th class=\"n\">Active days</th>\
-                   <th class=\"n\">Busiest day</th><th class=\"n\">Words/msg</th>\
-                   <th class=\"n\">Media</th><th class=\"n\">Replies</th>\
-                   <th class=\"n\">Reactions</th><th>Loudest</th></tr>";
+    let headers = "<tr><th data-sort=\"t\">Topic</th><th class=\"presence\">Activity</th>\
+                   <th class=\"n\" data-sort=\"n\">Messages</th><th class=\"n\" data-sort=\"n\">Voices</th>\
+                   <th class=\"n\" data-sort=\"n\">Active days</th>\
+                   <th class=\"n\">Busiest day</th><th class=\"n\" data-sort=\"n\">Words/msg</th>\
+                   <th class=\"n\" data-sort=\"n\">Media</th><th class=\"n\" data-sort=\"n\">Replies</th>\
+                   <th class=\"n\" data-sort=\"n\">Reactions</th><th data-sort=\"t\">Loudest</th></tr>";
+    let all: usize = rows.iter().map(|t| t.messages).sum();
+    let take = rows
+        .iter()
+        .max_by_key(|t| t.messages)
+        .filter(|t| t.messages > 0)
+        .map_or(String::new(), |t| {
+            format!(
+                "<b>{}</b> carries {} of the messages.",
+                esc(&t.name),
+                share(t.messages as i64, all as i64)
+            )
+        });
     format!(
-        "{}<div class=\"tablewrap\"><table class=\"wide\"><thead>{headers}</thead><tbody>{body}</tbody></table></div>\
-         <p class=\"caption\">Same time axis as every other row on this page, \
-         and one shading scale across the four. {}</p>{}</section>",
+        "{}{}{}</section>",
         head("Topics", &rows.len().to_string(), "topics"),
-        esc(&scale.caption("messages in a day")),
+        panel(
+            "Every topic",
+            &take,
+            &format!(
+                "Same time axis as every other row on this page, and one shading \
+                 scale across every topic. {}",
+                esc(&scale.caption("messages in a day"))
+            ),
+            &format!(
+                "<div class=\"tablewrap\"><table class=\"wide\"><thead>{headers}</thead>\
+                 <tbody>{body}</tbody></table></div>"
+            ),
+        ),
         clocks(rows)
     )
 }
@@ -93,13 +118,34 @@ fn clocks(rows: &[tga_stats::Topic]) -> String {
     let hours: Vec<String> = (0..24).map(|h| format!("{h:02}")).collect();
     let cells: Vec<Vec<i64>> = rows.iter().map(|t| t.per_hour.to_vec()).collect();
     let grid = charts::heatrows(&labels, &hours, &cells, WIDTH, 24.0, 190.0);
-    format!(
-        "<h3>When each topic is awake</h3><div class=\"split\"><div>{grid}</div>\
-         <aside>{}<p class=\"caption\">One row per topic, one cell per hour of \
-         the day, summed over the whole archive. <b>Each row is scaled to its \
-         own busiest hour</b>, so the rows compare by shape and not by shade: a \
-         bright cell in a small topic is not the same number of messages as a \
-         bright cell in a large one. Hover any cell for both.</p></aside></div>",
-        charts::legend(5, "this row's quietest", "its busiest")
+    // The latest-running topic: the one with the largest share of its own
+    // messages after 22:00 or before 05:00.
+    let late = rows
+        .iter()
+        .filter(|t| t.messages >= 50)
+        .map(|t| {
+            let all: i64 = t.per_hour.iter().sum();
+            let night: i64 = t.per_hour[22..].iter().chain(t.per_hour[..5].iter()).sum();
+            (t, night as f64 / all.max(1) as f64)
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1));
+    let take = late
+        .filter(|(_, part)| *part > 0.0)
+        .map_or(String::new(), |(t, part)| {
+            format!(
+                "<b>{}</b> runs latest: {} of it after 22:00 or before 05:00.",
+                esc(&t.name),
+                pct(part)
+            )
+        });
+    panel(
+        "When each topic is awake",
+        &take,
+        "One row per topic, one cell per hour of the day, summed over the whole \
+         archive. <b>Each row is scaled to its own busiest hour</b>, so the rows \
+         compare by shape and not by shade: a bright cell in a small topic is not \
+         the same number of messages as a bright cell in a large one. Hover or \
+         tap any cell for both.",
+        &(charts::scroll(&grid, 900.0) + &charts::legend(5, "this row's quietest", "its busiest")),
     )
 }

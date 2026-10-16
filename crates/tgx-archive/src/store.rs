@@ -931,6 +931,95 @@ impl Store {
         })
     }
 
+    /// When the newest *finished* update of `chat_id` ran: its `runs.started`,
+    /// which is also the `first_seen` of every message it added. `None` when
+    /// no update has finished.
+    ///
+    /// One update is one timestamp — the engine stamps the run, every message
+    /// it inserts and the run's end with the same `seen_at` — so "what the
+    /// updates after this one added" is a comparison on `first_seen`. A run
+    /// still going is left out: the messages it has added so far are not all
+    /// it will add.
+    pub async fn last_update(&self, chat_id: i64) -> Result<Option<i64>, Error> {
+        let row = self
+            .row(
+                "SELECT MAX(started) FROM runs WHERE chat_id = ?1 AND finished IS NOT NULL",
+                params![chat_id],
+            )
+            .await?;
+        Ok(match row {
+            Some(r) => r.get::<Option<i64>>(0)?,
+            None => None,
+        })
+    }
+
+    /// What the finished updates after `after` and up to `through` added:
+    /// how many of them added anything, and the ids of the messages they
+    /// added, oldest id first. `after: None` is every update up to `through`.
+    pub async fn added_by_updates(
+        &self,
+        chat_id: i64,
+        after: Option<i64>,
+        through: i64,
+    ) -> Result<(usize, Vec<i64>), Error> {
+        let after = after.unwrap_or(i64::MIN);
+        let updates = self
+            .row(
+                "SELECT COUNT(*) FROM runs
+                  WHERE chat_id = ?1 AND finished IS NOT NULL AND new > 0
+                    AND started > ?2 AND started <= ?3",
+                params![chat_id, after, through],
+            )
+            .await?
+            .map(|r| r.get::<i64>(0))
+            .transpose()?
+            .unwrap_or(0);
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id FROM messages
+                  WHERE chat_id = ?1 AND first_seen > ?2 AND first_seen <= ?3
+                  ORDER BY id",
+                params![chat_id, after, through],
+            )
+            .await?;
+        let mut ids = Vec::new();
+        while let Some(r) = rows.next().await? {
+            ids.push(r.get::<i64>(0)?);
+        }
+        Ok((updates.max(0) as usize, ids))
+    }
+
+    /// How many stored messages of `chat_id` were sent at or after `since`
+    /// (unix seconds). On the date index, so it is cheap on any size.
+    pub async fn count_since(&self, chat_id: i64, since: i64) -> Result<usize, Error> {
+        let row = self
+            .row(
+                "SELECT COUNT(*) FROM messages WHERE chat_id = ?1 AND date_unixtime >= ?2",
+                params![chat_id, since],
+            )
+            .await?;
+        Ok(match row {
+            Some(r) => r.get::<i64>(0)?.max(0) as usize,
+            None => 0,
+        })
+    }
+
+    /// When the newest stored message of `chat_id` was sent, unix seconds.
+    /// `None` when none is stored.
+    pub async fn newest(&self, chat_id: i64) -> Result<Option<i64>, Error> {
+        let row = self
+            .row(
+                "SELECT MAX(date_unixtime) FROM messages WHERE chat_id = ?1",
+                params![chat_id],
+            )
+            .await?;
+        Ok(match row {
+            Some(r) => r.get::<Option<i64>>(0)?,
+            None => None,
+        })
+    }
+
     /// The id to resume a database-only run from: the `keep`-th newest stored
     /// message, or 0 when fewer than that are stored.
     ///
@@ -1907,6 +1996,43 @@ mod tests {
             .unwrap();
         assert_eq!(s.message_count(7).await.unwrap(), (0, 0));
         assert!(s.holds_another_chat(8).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn what_each_update_added_is_told_apart_by_its_stamp() {
+        let s = store("updates").await;
+        assert_eq!(s.last_update(1).await.unwrap(), None);
+        // The first update adds 10 and 11; the second re-reads 11 and adds 12.
+        let first = s.start_run(1, "full", None, "{}", 100).await.unwrap();
+        s.merge(1, 10, None, &msg(10, "a"), 100).await.unwrap();
+        s.merge(1, 11, None, &msg(11, "b"), 100).await.unwrap();
+        s.finish_run(first, 2, 0, 0, 0, true, 100).await.unwrap();
+        let second = s.start_run(1, "window", None, "{}", 200).await.unwrap();
+        s.merge(1, 11, None, &msg(11, "b, edited"), 200)
+            .await
+            .unwrap();
+        s.merge(1, 12, None, &msg(12, "c"), 200).await.unwrap();
+        s.finish_run(second, 1, 1, 0, 0, true, 200).await.unwrap();
+        // A third is still running: what it has added so far is not counted.
+        s.start_run(1, "window", None, "{}", 300).await.unwrap();
+        s.merge(1, 13, None, &msg(13, "d"), 300).await.unwrap();
+
+        assert_eq!(s.last_update(1).await.unwrap(), Some(200));
+        assert_eq!(
+            s.added_by_updates(1, None, 200).await.unwrap(),
+            (2, vec![10, 11, 12])
+        );
+        // An edit is not news: 11 belongs to the update that first stored it.
+        assert_eq!(
+            s.added_by_updates(1, Some(100), 200).await.unwrap(),
+            (1, vec![12])
+        );
+        assert_eq!(
+            s.added_by_updates(1, Some(200), 200).await.unwrap(),
+            (0, vec![])
+        );
+        assert_eq!(s.count_since(1, 1_766_071_072).await.unwrap(), 4);
+        assert_eq!(s.count_since(1, 1_766_071_073).await.unwrap(), 0);
     }
 
     #[tokio::test]

@@ -23,7 +23,7 @@ use tgx_ui::tokens::space;
 /// cannot be shorter than a chat row; it is set in tracked micro-type instead,
 /// which distinguishes it by weight rather than by size.
 ///
-/// The Library's rows are this tall too, and read it from here.
+/// The Analysis view's rows are this tall too, and read it from here.
 pub(super) const ROW_HEIGHT: f32 = 46.0;
 
 /// How wide the filter box is.
@@ -651,7 +651,12 @@ fn inside<R>(ui: &mut Ui, rect: egui::Rect, left: f32, add: impl FnOnce(&mut Ui)
         egui::UiBuilder::new()
             .max_rect(inner)
             .layout(Layout::left_to_right(Align::Center)),
-        add,
+        |ui| {
+            // A label is selectable text by default, and selectable text takes
+            // the click: the row's title would be the one place it missed.
+            ui.style_mut().interaction.selectable_labels = false;
+            add(ui)
+        },
     )
     .inner
 }

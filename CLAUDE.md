@@ -298,14 +298,14 @@ its own summary. The second writer always wins a race you did not know you had.
 ## The analyser
 
 Point it at a finished export, folder or database, and it writes one
-self-contained `report.html` beside it. In the window it is the **Library**
-view (`tt-app/src/shell/library.rs`): every export under a folder is a row,
+self-contained `report.html` beside it. In the window it is the **Analysis**
+view (`tt-app/src/shell/analysis.rs`): every export under a folder is a row,
 with what needs a report already ticked. The folder it opens on is the
 exporter's destination, and it lists the Classic folders there one per chat
 beside the databases. A row's **Read** is the way into the Viewer, which is
 not on the rail; a summary's citation is the other, and its way back returns
 to Summaries (`ViewerState::back`). "Report after export" hands each finished chat to it
-(`Library::report_later`). Its workers report on their own `mpsc` channels, not
+(`Analysis::report_later`). Its workers report on their own `mpsc` channels, not
 the bridge's, and wake the window through `tga_run::job::Wake` — a callback,
 so `tga-run` has no toolkit in it.
 
@@ -347,8 +347,14 @@ different fact from an archive with nothing in it.
   invalidates every recorded dump.
 - **Nothing in a notes file is trusted.** Every string is escaped, and a
   malformed entry is dropped, never raised.
-- **One file, no network.** Fonts base64'd, charts inline SVG, every view
-  rendered server-side; JS only filters and pans what is drawn.
+- **One file, no network.** Fonts base64'd, charts inline SVG or HTML, every
+  view rendered server-side; JS filters, sorts, folds and pans what is drawn,
+  and Focus overlays one person from the embedded `focus-data` JSON. With
+  scripting off the page is whole. A name in that JSON writes `<` as `<`.
+- **The report is read on phones.** A mark whose labels are the point is HTML
+  (`charts/html.rs`), not SVG text that shrinks with the drawing; a dense chart
+  pans in `charts::scroll` instead. Check a change at 390 px: the page's
+  `scrollWidth` must equal its width.
 - **Reading a database writes nothing into it.** It is opened through
   `Store::open_read`. SQLite still creates an empty `-wal` and a `-shm` index
   beside a WAL database, even for a reader, and the old rusqlite reader did the
@@ -398,7 +404,11 @@ committed and never skip.
 
 The **Summaries** view (`tt-app/src/shell/summaries.rs`) and `TelegramTools
 summarise` ask a local model what happened in a chat between two days.
-`docs/SUMMARIES.md` is the design record. What must hold:
+`docs/SUMMARIES.md` is the design record. The view opens on **Catch up**
+(`shell/catchup.rs`, `tga_run::catchup`): a brief of every Analysis chat with
+something new, where **"since the last catch-up" is counted in database
+updates** (`runs` + `first_seen`), never on the clock, with a bookmark per
+chat beside its database that only a saved brief moves. What must hold:
 
 - **Loopback only.** `tga_sum::Client` takes a port, never a host, and
   `server::arguments` drops any `--host`/`--port`/`-m` from the user's server
@@ -447,7 +457,9 @@ summarise` ask a local model what happened in a chat between two days.
   `PART_TOKENS` = 4,500 (ReVision's `CHUNK_TOKENS`, where its extraction found
   79% of events, not 47%), and a summary reads raw messages in one call only up
   to that size (`SINGLE_TOKENS`); any other call reads at most `INPUT_TOKENS` =
-  14,000 (its `INPUT_CAP`). Messages are cut at 1,500 characters, and "haha",
+  14,000 (its `INPUT_CAP`). Messages are cut at 1,500 characters — an attached
+  document is not, only by `tga_docs::MAX_CHARS` (2026-10-16, the account
+  holder's ask), and a long one is a part of its own — and "haha",
   "ok" and a lone sticker are dropped unless answered (`lines::trivial`). These
   were 8,000/16,000/1,200 and kept, until a summary skipped a discussion that
   mattered. Change one and say why, against a measurement.

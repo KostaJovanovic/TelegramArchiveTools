@@ -44,6 +44,7 @@ Options
     --detailed          paragraphs by theme, citing message ids as [#id]
     --sections          headed bullet points: key events, decisions, plans,
                         disagreements, open questions; cited
+    --brief             a catch-up: one bold line, then a few cited bullets
     --by-topic          a forum: one summary per topic, busiest first, with an
                         overview above them when --detailed or --sections
     --topic NAME        a forum: that one topic only
@@ -135,6 +136,33 @@ impl Chat {
         Some((first, last))
     }
 
+    /// The 24 hours before the newest message: what was sent after, in unix
+    /// seconds, and the first and last day those hours fall on.
+    ///
+    /// **Before the last message, not before now**, so a chat that went quiet
+    /// yesterday still has a last day to read. Hours, not days, so it reads
+    /// `Msg::unix`, which a clock change does not move.
+    pub fn last_hours(&self) -> Option<(i64, NaiveDate, NaiveDate)> {
+        let newest = self.export.msgs.iter().map(|m| m.unix).max()?;
+        self.hours_before(newest)
+    }
+
+    /// The 24 hours before `end` (unix seconds): what was sent after, and the
+    /// first and last day of the messages in them; `None` when nothing was.
+    pub fn hours_before(&self, end: i64) -> Option<(i64, NaiveDate, NaiveDate)> {
+        let after = end - DAY_SECS;
+        let days = self
+            .export
+            .msgs
+            .iter()
+            .filter(|m| m.unix > after && m.unix <= end)
+            .map(|m| m.when.date());
+        let (from, to) = days.fold(None, |span: Option<(NaiveDate, NaiveDate)>, d| {
+            Some(span.map_or((d, d), |(a, b)| (a.min(d), b.max(d))))
+        })?;
+        Some((after, from, to))
+    }
+
     /// The messages between two days, both inclusive, oldest first — of one
     /// topic, or of all. Attachments are read here, so only the range's are.
     pub fn rows(
@@ -143,11 +171,27 @@ impl Chat {
         to: NaiveDate,
         topic: Option<usize>,
     ) -> Vec<tga_notes::Row> {
+        self.rows_where(|m| (from..=to).contains(&m.when.date()), topic)
+    }
+
+    /// The messages `options` asks for: its days, and its hours when it
+    /// names them.
+    pub fn rows_for(&self, options: &Options) -> Vec<tga_notes::Row> {
+        self.rows_where(|m| options.keeps(m), options.topic)
+    }
+
+    /// The messages `keep` says yes to, oldest first: a catch-up's days need
+    /// not be one run of them.
+    pub fn rows_where(
+        &self,
+        keep: impl Fn(&tga_read::Msg) -> bool,
+        topic: Option<usize>,
+    ) -> Vec<tga_notes::Row> {
         let mut picked: Vec<&tga_read::Msg> = self
             .export
             .msgs
             .iter()
-            .filter(|m| (from..=to).contains(&m.when.date()))
+            .filter(|m| keep(m))
             .filter(|m| topic.is_none_or(|t| m.topic == t))
             .collect();
         picked.sort_by_key(|m| (m.when, m.id));
@@ -242,6 +286,33 @@ fn readings_at(home: &Path) -> Readings {
     )
 }
 
+/// "The last 24 hours" of a chat: see [`Chat::last_hours`].
+pub const DAY_SECS: i64 = 24 * 60 * 60;
+
+/// The 24 hours before `end` on this machine's clock, whatever a chat has in
+/// them: what is after, and the days they fall on. For a span counted from
+/// now, which must say "nothing was said" rather than wait for a message.
+pub fn clock_hours(end: i64) -> (i64, NaiveDate, NaiveDate) {
+    use chrono::TimeZone;
+    let day = |t: i64| {
+        chrono::Local
+            .timestamp_opt(t, 0)
+            .single()
+            .map_or_else(|| chrono::Local::now().date_naive(), |d| d.date_naive())
+    };
+    let after = end - DAY_SECS;
+    (after, day(after + 1), day(end))
+}
+
+/// The day `t` (unix seconds) falls on, on this machine's clock.
+pub fn local_day(t: i64) -> Option<NaiveDate> {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_opt(t, 0)
+        .single()
+        .map(|d| d.date_naive())
+}
+
 /// What to write.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -251,12 +322,45 @@ pub struct Options {
     pub lang: Lang,
     pub by_topic: bool,
     pub topic: Option<usize>,
+    /// Only what was sent after this, in unix seconds: the 24 hours before
+    /// the chat's last message ([`Chat::last_hours`]). `from` and `to` are
+    /// then the days those hours fall on.
+    pub after: Option<i64>,
 }
 
 impl Options {
+    /// Whether `m` is in the days, and the hours when there are any.
+    pub fn keeps(&self, m: &tga_read::Msg) -> bool {
+        (self.from..=self.to).contains(&m.when.date()) && self.after.is_none_or(|a| m.unix > a)
+    }
+
+    /// The end of the hours asked for, on this machine's clock.
+    fn hours_end(&self) -> Option<chrono::DateTime<chrono::Local>> {
+        use chrono::TimeZone;
+        chrono::Local
+            .timestamp_opt(self.after? + DAY_SECS, 0)
+            .single()
+    }
+
+    /// The days, or the hours, in words: `2026-10-15 – 2026-10-16`, or
+    /// `24 hours to 2026-10-16 14:30`.
+    pub fn span(&self) -> String {
+        if let Some(end) = self.hours_end() {
+            return format!("24 hours to {}", end.format("%Y-%m-%d %H:%M"));
+        }
+        if self.from == self.to {
+            self.from.to_string()
+        } else {
+            format!("{} – {}", self.from, self.to)
+        }
+    }
+
     /// The file a summary of these options is saved as, under `home`.
-    pub fn path(&self, home: &Path, chat: &Chat) -> PathBuf {
-        let mut name = if self.from == self.to {
+    /// `topics` are the chat's, by number.
+    pub fn path(&self, home: &Path, topics: &[String]) -> PathBuf {
+        let mut name = if let Some(end) = self.hours_end() {
+            format!("{}_24h", end.format("%Y-%m-%d_%H%M"))
+        } else if self.from == self.to {
             self.from.to_string()
         } else {
             format!("{}_{}", self.from, self.to)
@@ -265,7 +369,8 @@ impl Options {
             // The topic's number as well as its name: two names can make one
             // slug ("Mediji / PR", "Mediji - PR"), and the second summary
             // would be written over the first.
-            name.push_str(&format!("_t{}-{}", t + 1, slug(&chat.topics()[t])));
+            let topic = topics.get(t).map(String::as_str).unwrap_or_default();
+            name.push_str(&format!("_t{}-{}", t + 1, slug(topic)));
         } else if self.by_topic {
             name.push_str("_by-topic");
         }
@@ -292,15 +397,21 @@ fn slug(name: &str) -> String {
     }
 }
 
-/// The saved file: a header saying what this is, then the summary.
-pub fn document(chat: &Chat, options: &Options, summary: &Summary, written: &str) -> String {
-    let span = if options.from == options.to {
-        options.from.to_string()
-    } else {
-        format!("{} – {}", options.from, options.to)
-    };
+/// The saved file: a header saying what this is, then the summary. `title`
+/// and `topics` are the chat's.
+pub fn document(
+    title: &str,
+    topics: &[String],
+    options: &Options,
+    summary: &Summary,
+    written: &str,
+) -> String {
+    let span = options.span();
     let scope = match options.topic {
-        Some(t) => format!("topic “{}”", chat.topics()[t]),
+        Some(t) => format!(
+            "topic “{}”",
+            topics.get(t).map(String::as_str).unwrap_or_default()
+        ),
         None if options.by_topic => "by topic".into(),
         None => "whole group".into(),
     };
@@ -310,8 +421,7 @@ pub fn document(chat: &Chat, options: &Options, summary: &Summary, written: &str
         Lang::AsChat => "the chat's language",
     };
     let mut out = format!(
-        "# {} · {span}\n\n{scope} · {} · {lang} · {} messages · {} · written {written}\n\n",
-        chat.title(),
+        "# {title} · {span}\n\n{scope} · {} · {lang} · {} messages · {} · written {written}\n\n",
         options.length.code(),
         thousands(summary.messages),
         summary.model,
@@ -357,12 +467,13 @@ const CHARS_PER_TOKEN: usize = 3;
 const LINE_TOKENS: usize = 12;
 
 impl Chat {
-    pub fn estimate(&self, from: NaiveDate, to: NaiveDate, topic: Option<usize>) -> Estimate {
+    pub fn estimate(&self, options: &Options) -> Estimate {
         let mut e = Estimate::default();
-        for m in
-            self.export.msgs.iter().filter(|m| {
-                (from..=to).contains(&m.when.date()) && topic.is_none_or(|t| m.topic == t)
-            })
+        for m in self
+            .export
+            .msgs
+            .iter()
+            .filter(|m| options.keeps(m) && options.topic.is_none_or(|t| m.topic == t))
         {
             e.messages += 1;
             e.photos += usize::from(m.media == "photo");
@@ -515,17 +626,16 @@ fn write(
     tx: &crate::job::Waking<Progress>,
 ) -> Result<Finished, String> {
     let client = Client::new(server.port);
-    let mut rows = chat.rows(options.from, options.to, options.topic);
+    let mut rows = chat.rows_for(options);
     if rows.is_empty() {
-        return Err(format!(
-            "Nothing was said between {} and {}.",
-            options.from, options.to
-        ));
+        return Err(format!("Nothing was said in {}.", options.span()));
     }
     // The photos before Gemma: the card holds one model at a time, and the
     // OCR is the small one to load and unload.
     let unread_photos = if server.photos {
-        read_photos(chat, &mut rows, server, keeper, cancel, tx)?
+        read_photos(chat, &mut rows, server, keeper, cancel, &|s| {
+            tx.send(Progress::Step(s))
+        })?
     } else {
         0
     };
@@ -564,9 +674,9 @@ fn write(
     })
     .map_err(|e| e.to_string())?;
 
-    let path = options.path(&chat.home, chat);
+    let path = options.path(&chat.home, &chat.topics());
     let written = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
-    let document = document(chat, options, &summary, &written);
+    let document = document(chat.title(), &chat.topics(), options, &summary, &written);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
@@ -670,7 +780,7 @@ fn answer(
     let rows = match &grounding {
         Some(_) => Vec::new(),
         None => {
-            let mut rows = chat.rows(options.from, options.to, options.topic);
+            let mut rows = chat.rows_for(options);
             if let Some(ocr) = &server.ocr {
                 let pictures = chat.pictures(&rows);
                 kept_readings(
@@ -698,10 +808,7 @@ fn answer(
         Some(g) => g,
         None => {
             if rows.is_empty() {
-                return Err(format!(
-                    "Nothing was said between {} and {}.",
-                    options.from, options.to
-                ));
+                return Err(format!("Nothing was said in {}.", options.span()));
             }
             tx.send(Reply::Step("Reading the days".into()));
             let cache = Cache::at(&chat.home.join("analysis").join("summaries").join("cache"));
@@ -739,16 +846,16 @@ fn answer(
 /// Put the text of the range's photos into their rows: what was read before
 /// at once, the rest by the OCR, started for it if need be. Photos are an
 /// extra, so an OCR that cannot be had is said and the summary goes on
-/// without them; only a stop ends the run. How many were left unread.
-fn read_photos(
+/// without them; only a stop ends the run. How many were left unread. `say`
+/// takes the narration, which names counts and never a message.
+pub(crate) fn read_photos(
     chat: &Chat,
     rows: &mut [tga_notes::Row],
     server: &Server,
     keeper: &Keeper,
     cancel: &AtomicBool,
-    tx: &crate::job::Waking<Progress>,
+    say: &dyn Fn(String),
 ) -> Result<usize, String> {
-    let say = |s: String| tx.send(Progress::Step(s));
     let pictures = chat.pictures(rows);
     if pictures.is_empty() {
         return Ok(0);
@@ -862,6 +969,7 @@ pub fn run(args: Vec<String>, models: &Path) -> Result<()> {
             "--short" => length = Length::Short,
             "--detailed" => length = Length::Detailed,
             "--sections" => length = Length::Sections,
+            "--brief" => length = Length::Brief,
             "--by-topic" => by_topic = true,
             "--topic" => topic = Some(rest.next().context("--topic needs a name")?.clone()),
             "--lang" => {
@@ -977,6 +1085,7 @@ pub fn run(args: Vec<String>, models: &Path) -> Result<()> {
         lang,
         by_topic,
         topic,
+        after: None,
     };
     let topics = chat.topics();
     let request = Request {
@@ -1047,13 +1156,16 @@ pub fn run(args: Vec<String>, models: &Path) -> Result<()> {
         },
     )?;
 
-    let path = out.unwrap_or_else(|| options.path(&chat.home, &chat));
+    let path = out.unwrap_or_else(|| options.path(&chat.home, &chat.topics()));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let written = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
-    std::fs::write(&path, document(&chat, &options, &summary, &written))
-        .with_context(|| format!("writing {}", path.display()))?;
+    std::fs::write(
+        &path,
+        document(chat.title(), &chat.topics(), &options, &summary, &written),
+    )
+    .with_context(|| format!("writing {}", path.display()))?;
     if summary.failed > 0 {
         eprintln!(
             "  warning: {} of {} parts got no readable answer and are missing from the summary",
@@ -1112,6 +1224,38 @@ mod tests {
     }
 
     #[test]
+    fn the_last_24_hours_end_at_the_last_message_not_now() {
+        let dir = synthetic("hours");
+        let chat = Chat::open(&dir, None).unwrap();
+        let (after, from, to) = chat.last_hours().unwrap();
+        let newest = chat.export.msgs.iter().map(|m| m.unix).max().unwrap();
+        assert_eq!(after, newest - DAY_SECS);
+        // 1 and 2 are two days before 3, so only 3 is in its last day.
+        assert_eq!((from, to), (day("2025-01-04"), day("2025-01-04")));
+        let o = Options {
+            from,
+            to,
+            length: Length::Brief,
+            lang: Lang::English,
+            by_topic: false,
+            topic: None,
+            after: Some(after),
+        };
+        assert_eq!(
+            chat.rows_for(&o).iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert_eq!(chat.estimate(&o).messages, 1);
+        // Named by the hour it ends on, so two days' last hours never share
+        // a file.
+        let name = o.path(Path::new("H"), &chat.topics());
+        let name = name.file_name().unwrap().to_string_lossy();
+        assert!(name.ends_with("_24h_brief_en.md"), "{name}");
+        assert!(o.span().starts_with("24 hours to "), "{}", o.span());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_row_keeps_its_whole_text_its_reply_and_its_sender() {
         let dir = synthetic("row");
         let chat = Chat::open(&dir, None).unwrap();
@@ -1134,10 +1278,11 @@ mod tests {
             lang: Lang::English,
             by_topic: false,
             topic: None,
+            after: None,
         };
         let home = Path::new("H");
         let name = |o: &Options| {
-            o.path(home, &chat)
+            o.path(home, &chat.topics())
                 .file_name()
                 .unwrap()
                 .to_string_lossy()
@@ -1157,7 +1302,7 @@ mod tests {
             )
         );
         assert_eq!(
-            o.path(home, &chat).parent().unwrap(),
+            o.path(home, &chat.topics()).parent().unwrap(),
             Path::new("H").join("analysis").join("summaries")
         );
         let _ = std::fs::remove_dir_all(dir);
@@ -1191,11 +1336,16 @@ mod tests {
             kept_readings(&readings, "other.gguf", &mut rows, found).len(),
             1
         );
-        assert_eq!(
-            chat.estimate(day("2025-01-04"), day("2025-01-04"), None)
-                .photos,
-            1
-        );
+        let o = Options {
+            from: day("2025-01-04"),
+            to: day("2025-01-04"),
+            length: Length::Short,
+            lang: Lang::English,
+            by_topic: false,
+            topic: None,
+            after: None,
+        };
+        assert_eq!(chat.estimate(&o).photos, 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1210,6 +1360,7 @@ mod tests {
             lang: Lang::English,
             by_topic: false,
             topic: None,
+            after: None,
         };
         let mut summary = Summary {
             sections: vec![tga_sum::Section {
@@ -1221,10 +1372,22 @@ mod tests {
             lang: Lang::English,
             ..Default::default()
         };
-        let whole = document(&chat, &options, &summary, "2025-01-05 10:00");
+        let whole = document(
+            chat.title(),
+            &chat.topics(),
+            &options,
+            &summary,
+            "2025-01-05 10:00",
+        );
         assert!(!whole.contains("length limit"), "{whole}");
         summary.cut = true;
-        let cut = document(&chat, &options, &summary, "2025-01-05 10:00");
+        let cut = document(
+            chat.title(),
+            &chat.topics(),
+            &options,
+            &summary,
+            "2025-01-05 10:00",
+        );
         assert!(
             cut.contains("> The model reached its length limit, so this summary stops where the limit fell.\n\nIt was decided\n"),
             "{cut}"
