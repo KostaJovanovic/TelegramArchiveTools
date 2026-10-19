@@ -193,6 +193,10 @@ fn serve(conn: TcpStream, s: &Script) {
                             "timings": {"prompt_n": 100, "predicted_n": 20,
                                         "prompt_per_second": 1000.0, "predicted_per_second": 50.0}}),
                 );
+            } else if all.starts_with("You explain a document") {
+                // A document's call has no message ids to cite.
+                let text = format!("\nA motion.\n\n1. Item one [#{STRANGER}].\n2. Item two.");
+                streamed(&mut out, &text, s.ending.load(Ordering::SeqCst));
             } else {
                 let text = format!("\nIt was decided [#{}] and denied [#{STRANGER}].", ids[0]);
                 streamed(&mut out, &text, s.ending.load(Ordering::SeqCst));
@@ -404,6 +408,65 @@ fn a_range_that_does_not_fit_goes_through_notes_and_the_cache_saves_a_rerun() {
     assert!(events
         .iter()
         .all(|e| !matches!(e, Event::Part { cached: false, .. })));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn each_document_is_explained_in_a_call_of_its_own_under_one_heading() {
+    let fake = Fake::start(32_768);
+    let mut rows = chat(2, 10);
+    let doc = |name: &str, text: &str| {
+        Some(tga_notes::Attachment {
+            name: name.into(),
+            text: text.into(),
+            ..Default::default()
+        })
+    };
+    rows[3].doc = doc("Dnevni red.docx", "1. Usvajanje zapisnika\n2. Izbor odbora");
+    // The same file again, and one whose text could not be read.
+    rows[12].doc = doc(
+        "Dnevni red (1).docx",
+        "1. Usvajanje zapisnika\n2. Izbor odbora",
+    );
+    rows[15].doc = doc("Sken.pdf", "");
+    let topics = topics();
+    let dir = std::env::temp_dir().join(format!("tga-sum-docs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cache = Cache::at(&dir);
+    let req = request(&rows, &topics, Length::Detailed, false);
+
+    let (out, events) = run(&fake, &req, &cache);
+    let s = out.unwrap();
+    assert_eq!(s.sections.len(), 2);
+    let docs = &s.sections[1];
+    assert_eq!(docs.heading.as_deref(), Some("Documents"));
+    assert_eq!(
+        docs.text,
+        "### Dnevni red.docx\n\n*Person 3, 2024-12-01, Media* [#1003]\n\n\
+         A motion.\n\n1. Item one.\n2. Item two.\n\n*Text not read:* Sken.pdf."
+    );
+    assert!(events.contains(&Event::Section(Some("Documents".into()))));
+    // The summary, then one call for the document: the duplicate is not
+    // asked about, and the document's text is what it read.
+    let calls = fake.chats();
+    assert_eq!(calls.len(), 2);
+    let user = calls[1]["messages"][1]["content"].as_str().unwrap();
+    assert!(user.starts_with("Document \"Dnevni red.docx\""), "{user}");
+    assert!(user.ends_with("Text:\n\n1. Usvajanje zapisnika\n2. Izbor odbora"));
+    assert!(s.body().contains("## Documents\n\n### Dnevni red.docx"));
+
+    // Again: the explanation comes from the cache.
+    let (again, _) = run(&fake, &req, &cache);
+    assert_eq!(again.unwrap().sections, s.sections);
+    assert_eq!(fake.chats().len(), 3);
+
+    // A catch-up's brief stays a few lines.
+    let (brief, _) = run(
+        &fake,
+        &request(&rows, &topics, Length::Brief, false),
+        &cache,
+    );
+    assert_eq!(brief.unwrap().sections.len(), 1);
     let _ = std::fs::remove_dir_all(dir);
 }
 

@@ -1,4 +1,5 @@
-//! Notes kept between runs, one file per part.
+//! Notes kept between runs, one file per part — and each document's
+//! explanation, one file per document.
 //!
 //! **Keyed on what the model read**, not on the dates: the part's rendered
 //! text, plus the prompt's version, the model file and everything else that
@@ -46,11 +47,26 @@ impl Cache {
     /// Keep `notes` under `key`. A cache that cannot be written is a slower
     /// next run, not a failure of this one.
     pub fn put(&self, key: &str, notes: &[Note]) {
+        let v = json!({ "notes": notes.iter().map(Note::to_json).collect::<Vec<_>>() });
+        self.keep(key, &v);
+    }
+
+    /// A text kept under `key`: a document's explanation.
+    pub fn text(&self, key: &str) -> Option<String> {
+        let path = self.dir.as_ref()?.join(format!("{key}.json"));
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        Some(v.get("text")?.as_str()?.to_string())
+    }
+
+    pub fn put_text(&self, key: &str, text: &str) {
+        self.keep(key, &json!({ "text": text }));
+    }
+
+    fn keep(&self, key: &str, v: &Value) {
         let Some(dir) = &self.dir else { return };
         if std::fs::create_dir_all(dir).is_err() {
             return;
         }
-        let v = json!({ "notes": notes.iter().map(Note::to_json).collect::<Vec<_>>() });
         let _ = replace(&dir.join(format!("{key}.json")), &v.to_string());
     }
 }

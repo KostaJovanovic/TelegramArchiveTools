@@ -463,6 +463,10 @@ chat beside its database that only a saved brief moves. What must hold:
   "ok" and a lone sticker are dropped unless answered (`lines::trivial`). These
   were 8,000/16,000/1,200 and kept, until a summary skipped a discussion that
   mattered. Change one and say why, against a measurement.
+- **Every document is explained on its own.** Below the summary, each
+  document read in the range gets its own call (`prompt::document`): a
+  standalone paragraph, then all of it, every item put to a vote listed.
+  Not in a Brief.
 - **A conversation rests on the same reading.** The question box under the
   summary (`tga_sum::ground` + `answer`, `tga_run::summary::ask`) reads the
   form's days whole up to `INPUT_TOKENS`, else the summary's own cached notes,

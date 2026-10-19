@@ -294,6 +294,17 @@ cuts are exact. Budget per call: context − system prompt − answer reserve
 range fold into one "other topics" line; Detailed and Sections get a short
 overview on top.
 
+**Documents** (2026-10-17, the account holder's ask: a summary said only that
+someone presented a document). Below the summary, under `## Documents`, every
+document whose text was read in the range gets a call of its own
+(`prompt::document`, `DOCUMENT_ANSWER` = 4,000): one paragraph that stands
+alone, then a thorough explanation in the document's order, and **every** item
+put to a vote or a decision as a numbered list, none skipped or merged. A
+document too long to fit beside that answer is read from its beginning, and
+its heading says so. The same text posted twice is explained once; documents
+with no text (not downloaded, scanned) are named on one line. Explanations are
+cached like notes. Not in a catch-up's Brief, which stays a few lines.
+
 **Sampling:** Gemma's own (temperature 1.0, top_k 64, top_p 0.95), thinking
 off. A note answer that is not valid JSON is retried (three attempts, as
 ReVision's `run_local.py`).

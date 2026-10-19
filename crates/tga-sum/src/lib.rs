@@ -11,7 +11,9 @@
 //! ids it rests on — and the summary is written from the notes. Notes are
 //! kept ([`Cache`]), so a re-run, an overlapping range or a sync that changed
 //! one day redoes only what changed. By topic, the same runs once per forum
-//! topic, with an overview above the detailed lengths.
+//! topic, with an overview above the detailed lengths. Below it all, every
+//! document read in the range is explained in a call of its own — in the
+//! summary it is one line among hundreds — except in a catch-up's brief.
 //!
 //! **The model is on this machine.** [`Client`] takes a port, not a host. And
 //! the narration — [`Event::Say`] — carries counts, never a message's text,
@@ -64,6 +66,11 @@ const NOTES_ANSWER: usize = 3_000;
 
 /// The overview paragraph above a by-topic summary.
 const OVERVIEW_ANSWER: usize = 600;
+
+/// One document's explanation: a paragraph, then all of it, every item of an
+/// agenda or a ballot included. Beside a document cut at
+/// `tga_docs::MAX_CHARS` it still fits the 32K context.
+const DOCUMENT_ANSWER: usize = 4_000;
 
 /// Left free in every call: the chat template's own tokens.
 const MARGIN: usize = 256;
@@ -436,7 +443,22 @@ pub fn summarise(
             },
         );
     }
+
+    // A catch-up is skimmed beside other chats' and stays a few lines.
+    if request.length != Length::Brief {
+        if let Some(section) = run.documents(&mut summary, on)? {
+            summary.sections.push(section);
+        }
+    }
     Ok(summary)
+}
+
+/// What the documents section is called.
+fn documents_heading(lang: Lang) -> &'static str {
+    match lang {
+        Lang::Serbian => "Dokumenti",
+        _ => "Documents",
+    }
 }
 
 /// The rows to summarise, as one group or one per topic.
@@ -872,6 +894,158 @@ impl Run<'_> {
         )
     }
 
+    /// Every document read in the range, explained on its own — a gist,
+    /// then all of it — under one heading, and those whose text could not be
+    /// read, named. `None` when the range shared no document.
+    fn documents(
+        &self,
+        summary: &mut Summary,
+        on: &mut dyn FnMut(Event),
+    ) -> Result<Option<Section>, Error> {
+        let lang = self.request.lang;
+        let mut read: Vec<(&Row, &tga_notes::Attachment)> = Vec::new();
+        let mut unread: Vec<&str> = Vec::new();
+        // The same file posted twice is one document, explained once.
+        let mut seen: HashSet<&str> = HashSet::new();
+        for row in self.request.rows {
+            let Some(doc) = &row.doc else { continue };
+            if doc.text.trim().is_empty() {
+                if !unread.contains(&doc.name.as_str()) {
+                    unread.push(&doc.name);
+                }
+            } else if seen.insert(doc.text.trim()) {
+                read.push((row, doc));
+            }
+        }
+        if read.is_empty() && unread.is_empty() {
+            return Ok(None);
+        }
+        let heading = documents_heading(lang);
+        on(Event::Section(Some(heading.to_string())));
+        let mut text = String::new();
+        for (i, (row, doc)) in read.iter().enumerate() {
+            on(Event::Say(format!(
+                "Explaining document {} of {}",
+                i + 1,
+                read.len()
+            )));
+            if i > 0 {
+                text.push_str("\n\n");
+                on(Event::Text("\n\n".into()));
+            }
+            let (one, cut) = self.document(row, doc, on)?;
+            summary.cut |= cut;
+            text.push_str(&one);
+        }
+        if !unread.is_empty() {
+            // Not downloaded, or a scanned PDF with no text in it.
+            let label = match lang {
+                Lang::Serbian => "Tekst nije pročitan",
+                _ => "Text not read",
+            };
+            let mut line = format!("*{label}:* {}.", unread.join(", "));
+            if !text.is_empty() {
+                line.insert_str(0, "\n\n");
+            }
+            on(Event::Text(line.clone()));
+            text.push_str(&line);
+        }
+        Ok(Some(Section {
+            heading: Some(heading.to_string()),
+            text,
+        }))
+    }
+
+    /// One document's heading and explanation, streamed, and whether the
+    /// answer's limit cut it. A refusal leaves this document unexplained,
+    /// not the summary above it unwritten.
+    fn document(
+        &self,
+        row: &Row,
+        doc: &tga_notes::Attachment,
+        on: &mut dyn FnMut(Event),
+    ) -> Result<(String, bool), Error> {
+        let req = self.request;
+        let from = req.from.to_string();
+        let to = req.to.to_string();
+        let topic = req
+            .forum
+            .then(|| req.topics.get(row.topic))
+            .flatten()
+            .map(String::as_str);
+        let about = self.about(topic, &from, &to);
+        let system = prompt::document(&about, req.lang);
+        let room = self.budget(&system, DOCUMENT_ANSWER)?;
+
+        // Too long to read whole beside the answer: its beginning.
+        let whole = doc.text.trim().chars().count();
+        let mut keep = whole;
+        let (mut user, mut early) = document_input(row, doc, None);
+        for _ in 0..3 {
+            let size = self.tokens(&user)?;
+            if size <= room {
+                break;
+            }
+            keep = keep * room / size * 9 / 10;
+            (user, early) = document_input(row, doc, Some(keep));
+        }
+        if keep < whole {
+            on(Event::Say(format!(
+                "a document does not fit: read its first {keep} of {whole} characters"
+            )));
+        }
+
+        let who = if row.who.is_empty() { "?" } else { &row.who };
+        let mut by = format!("{who}, {}", row.t.get(..10).unwrap_or(&row.t));
+        if let Some(t) = topic {
+            by.push_str(&format!(", {t}"));
+        }
+        if early {
+            by.push_str(match req.lang {
+                Lang::Serbian => " — pročitan je samo početak",
+                _ => " — only its beginning was read",
+            });
+        }
+        let head = format!("### {}\n\n*{by}* [#{}]\n\n", doc.name, row.id);
+        on(Event::Text(head.clone()));
+
+        let key = cache::key(&[
+            &prompt::VERSION.to_string(),
+            &self.props.model,
+            req.lang.code(),
+            req.chat,
+            "document",
+            &system,
+            &user,
+        ]);
+        if let Some(kept) = self.cache.text(&key) {
+            on(Event::Text(kept.clone()));
+            return Ok((format!("{head}{kept}"), false));
+        }
+        match self.write(&system, &user, DOCUMENT_ANSWER, &HashSet::new(), false, on) {
+            Ok((text, cut)) => {
+                // A cut answer is not kept: a re-run would lose that it was.
+                if !cut && !text.is_empty() {
+                    self.cache.put_text(&key, &text);
+                }
+                Ok((format!("{head}{text}"), cut))
+            }
+            Err(Error::Server(said)) => {
+                on(Event::Say(format!(
+                    "the model server refused a document ({}), left unexplained",
+                    shorten(&said, REFUSAL_CHARS)
+                )));
+                let line = match req.lang {
+                    Lang::Serbian => "*Model nije objasnio ovaj dokument.*",
+                    _ => "*The model did not explain this document.*",
+                };
+                on(Event::Text(line.into()));
+                Ok((format!("{head}{line}"), false))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// A streamed call whose text is the summary, and whether the length
     /// limit cut it.
     fn write(
@@ -1057,6 +1231,32 @@ fn thousands(n: usize) -> String {
         out.push(c);
     }
     out
+}
+
+/// What a document's call reads: where the document came from, then its
+/// text — only the first `keep` characters, when given — and whether that
+/// text stops before the document does.
+fn document_input(row: &Row, doc: &tga_notes::Attachment, keep: Option<usize>) -> (String, bool) {
+    let mut s = format!("Document \"{}\"", doc.name);
+    if !doc.date.is_empty() {
+        s.push_str(&format!(", dated {} ({})", doc.date, doc.date_src));
+    }
+    let who = if row.who.is_empty() { "?" } else { &row.who };
+    s.push_str(&format!("\nPosted by {who} on {}", row.t));
+    let said = lines::flat(&row.text, lines::TEXT_CHARS);
+    if !said.is_empty() {
+        s.push_str(&format!(", with the message: {said}"));
+    }
+    let text = doc.text.trim();
+    let (text, early) = match keep {
+        Some(n) => (text.chars().take(n).collect::<String>(), true),
+        None => (text.to_string(), doc.cut),
+    };
+    if early {
+        s.push_str("\nThe text stops early: only the document's beginning was read.");
+    }
+    s.push_str(&format!("\n\nText:\n\n{text}"));
+    (s, early)
 }
 
 fn lines_of(notes: &[Note]) -> String {

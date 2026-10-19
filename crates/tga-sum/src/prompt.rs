@@ -4,7 +4,8 @@
 //! checked and parts merged), the **final** text from either the messages or
 //! the notes (streamed prose), and an **overview** above a by-topic summary.
 //! A fourth, **merge**, condenses notes when there are too many for the final
-//! call — the notes prompt pointed at notes rather than messages. A question
+//! call — the notes prompt pointed at notes rather than messages. Each
+//! **document** read in the range is explained in a call of its own. A question
 //! has **chat**, and over notes a **pick** first, which chooses the notes whose
 //! messages the answer should read.
 //!
@@ -190,6 +191,33 @@ pub fn final_text(about: &About, length: Length, lang: Lang, from_notes: bool) -
          Output only the summary.",
         of = about.of(),
         span = about.span(),
+        lang = language(lang),
+    )
+}
+
+/// One document, explained on its own. Among the messages a document is one
+/// line in hundreds, and a summary says only that it was shared; here it is
+/// the whole input.
+pub fn document(about: &About, lang: Lang) -> String {
+    format!(
+        "You explain a document shared in {of}. You get its name, who posted it and \
+         when, the message it came with, and the text inside it.\n\n\
+         First write ONE paragraph of 2 to 4 sentences: what the document is, who it is \
+         from or for, and what it is for or decides. It must stand on its own.\n\
+         Then, after a blank line, explain thoroughly everything of substance in it, in \
+         the document's own order: what it proposes, sets out, asks for or decides — \
+         rules, figures, names, dates and deadlines as written. Short paragraphs, and a \
+         list where the document is one.\n\
+         If the document puts things to a vote or to a decision — an agenda, motions, \
+         proposals, amendments, a ballot, points to accept or reject — list EVERY one of \
+         them as a numbered list, in the document's order and with its own numbering, \
+         each with what exactly it proposes and any options, figures or conditions it \
+         gives. Never skip, merge or shorten away an item, however many there are and \
+         however alike they look.\n\
+         No headings, no message ids. Only what the document says: no guesses, no \
+         advice, no opinion of it. If its text stops early, say so at the end. {lang}\n\
+         Output only the explanation.",
+        of = about.of(),
         lang = language(lang),
     )
 }
