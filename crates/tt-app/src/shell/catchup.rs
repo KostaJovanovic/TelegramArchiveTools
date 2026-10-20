@@ -27,8 +27,8 @@ use std::sync::mpsc::Receiver;
 use tga_run::catchup::{self as run, Card, Days, Group, News, Progress, Record, Step};
 use tga_run::state::Entry;
 use tgx_ui::components::{
-    action, block, button, disclosure, figure, meta, row, rule, segmented, text, tick_mark,
-    EmptyState, GUTTER,
+    action, block, button, disclosure, figure, meta, progress_bar, row, rule, segmented, text,
+    tick_mark, EmptyState, GUTTER,
 };
 use tgx_ui::tokens::space;
 
@@ -105,6 +105,13 @@ pub(super) struct CatchupState {
     /// Bring the open chat's chip into view on the next frame: it was chosen
     /// by Previous or Next, so it may be off the strip's visible part.
     strip_jump: bool,
+    /// When the run going was started.
+    started: Option<std::time::Instant>,
+    /// How long the last run took, kept with its cards so the bar still says
+    /// how it ended; gone when an earlier catch-up is opened.
+    took: Option<std::time::Duration>,
+    /// The chat being written: its parts' notes in, of how many.
+    part: Option<(usize, usize)>,
 }
 
 impl CatchupState {
@@ -148,15 +155,54 @@ impl CatchupState {
 
     /// The written cards, and how far the run has got.
     pub(super) fn progress(&self) -> Option<(usize, usize)> {
-        if !self.running() {
-            return None;
-        }
+        self.running().then(|| self.finished())
+    }
+
+    /// The chats finished — written, failed, or with nothing new — of how
+    /// many. One a stop left unwritten is not finished, so a stopped run's
+    /// bar stays where it stopped.
+    fn finished(&self) -> (usize, usize) {
         let done = self
             .cards
             .iter()
-            .filter(|c| matches!(c.state, CardState::Done(_) | CardState::Failed(_)))
+            .filter(|c| match &c.state {
+                CardState::Done(_) => true,
+                CardState::Failed(why) => why != "Stopped",
+                _ => false,
+            })
             .count();
-        Some((done, self.cards.len()))
+        (done, self.cards.len())
+    }
+
+    /// The bar and its line, while a run goes and after it: the chats
+    /// finished and the clock. `None` for an earlier catch-up opened.
+    fn bar(&self) -> Option<(f32, String)> {
+        let clock = crate::pace::clock(self.elapsed()?);
+        let (done, of) = self.finished();
+        let line = if self.running() {
+            format!("{done} of {of} chats · {clock} elapsed")
+        } else {
+            format!("{done} of {of} chats · took {clock}")
+        };
+        Some((self.fraction(), line))
+    }
+
+    /// How far the run has got, 0 to 1: the chats finished, and of the one
+    /// being written the parts whose notes are in — the summary written from
+    /// them counted as one part more, so a chat is not full before it is.
+    fn fraction(&self) -> f32 {
+        let (done, of) = self.finished();
+        let within = match self.part {
+            Some((d, n)) => d as f32 / (n + 1) as f32,
+            None => 0.0,
+        };
+        (done as f32 + within) / of.max(1) as f32
+    }
+
+    /// The run's clock: how long it has been going, or how long the last
+    /// one took.
+    pub(super) fn elapsed(&self) -> Option<std::time::Duration> {
+        self.started.map(|t| t.elapsed()).or(self.took)
     }
 
     /// Apply what the workers have said since the last frame.
@@ -205,6 +251,7 @@ impl CatchupState {
                     Step::Writing => {
                         card.state = CardState::Writing;
                         card.text.clear();
+                        self.part = None;
                         self.status = format!("Writing {}", card.group.title);
                     }
                     Step::Event(e) => match e {
@@ -214,21 +261,28 @@ impl CatchupState {
                         }
                         tga_run::tga_sum::Event::Section(None) => card.text.push_str("\n\n"),
                         tga_run::tga_sum::Event::Part { done, of, .. } => {
+                            self.part = Some((done, of));
                             self.status = format!("{}: part {done} of {of}", card.group.title);
                         }
                         tga_run::tga_sum::Event::Say(s) => self.status = s,
                         tga_run::tga_sum::Event::Written(_) => {}
                     },
                     Step::Done(Ok(c)) => {
+                        self.part = None;
                         card.text = c.text.clone();
                         card.span = Some((c.from, c.to, c.messages));
                         card.state = CardState::Done(c);
                     }
-                    Step::Done(Err(e)) => card.state = CardState::Failed(e),
+                    Step::Done(Err(e)) => {
+                        self.part = None;
+                        card.state = CardState::Failed(e);
+                    }
                 }
             }
             Progress::Done(done) => {
                 self.job = None;
+                self.part = None;
+                self.took = self.started.take().map(|t| t.elapsed());
                 // The bookmarks moved: what is new is counted again.
                 self.counted = None;
                 self.listed = None;
@@ -383,6 +437,9 @@ impl Shell {
         c.folded = true;
         c.selected = None;
         c.status = "Reading the chats".into();
+        c.started = Some(std::time::Instant::now());
+        c.took = None;
+        c.part = None;
         let wake = ctx.clone();
         c.job = Some(run::spawn(
             targets,
@@ -630,6 +687,7 @@ impl Shell {
                 c.shown = Some(r.path);
                 c.folded = true;
                 c.selected = None;
+                c.took = None;
             }
             None => c.status = format!("{} could not be read", path.display()),
         }
@@ -1095,6 +1153,16 @@ impl Shell {
                 );
             });
         });
+        // Under the strip, not above it: the strip is level with the filter
+        // beside it, and a line above would push it out of step.
+        if let Some((fraction, line)) = c.bar() {
+            ui.add_space(space::STEP);
+            block(ui, |ui| {
+                progress_bar(ui, Some(fraction), &p);
+                ui.add_space(space::TIGHT);
+                ui.label(meta(line, &p));
+            });
+        }
         if !nothing.is_empty() {
             ui.add_space(space::TIGHT);
             block(ui, |ui| {
@@ -1346,4 +1414,66 @@ pub(super) fn no_folder(ui: &mut Ui, p: &tgx_ui::tokens::Palette) {
         Some("Choose the folder your exports are in, in Analysis.".into()),
     )
     .show(ui, p, true);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tga_run::tga_sum::Event;
+
+    fn waiting(n: usize) -> Vec<CardView> {
+        (0..n)
+            .map(|i| CardView {
+                group: Group {
+                    path: PathBuf::from(format!("{i}.sqlite")),
+                    chat_id: None,
+                    title: format!("Chat {i}"),
+                    home: PathBuf::new(),
+                },
+                state: CardState::Waiting,
+                text: String::new(),
+                span: None,
+            })
+            .collect()
+    }
+
+    /// The bar moves with each chat finished, and within the one being
+    /// written with its parts; a stop leaves it where it stopped, and the
+    /// clock stays with the cards.
+    #[test]
+    fn the_bar_follows_the_chats_and_the_parts_and_keeps_the_time() {
+        let mut c = CatchupState {
+            cards: waiting(4),
+            started: Some(std::time::Instant::now()),
+            ..Default::default()
+        };
+        c.apply(Progress::Group(0, Step::Done(Err(run::NOTHING_NEW.into()))));
+        c.apply(Progress::Group(1, Step::Writing));
+        assert_eq!(c.finished(), (1, 4));
+        assert_eq!(c.fraction(), 0.25);
+        // Two parts of three: the summary after them is a fourth.
+        c.apply(Progress::Group(
+            1,
+            Step::Event(Event::Part {
+                done: 2,
+                of: 3,
+                cached: false,
+                secs: 1.0,
+                timings: None,
+            }),
+        ));
+        assert_eq!(c.fraction(), (1.0 + 0.5) / 4.0);
+        c.apply(Progress::Group(
+            1,
+            Step::Done(Err("the server failed".into())),
+        ));
+        assert_eq!(c.fraction(), 0.5);
+
+        c.apply(Progress::Done(Err("cancelled".into())));
+        assert_eq!(c.finished(), (2, 4), "the stopped chats are not finished");
+        let (fraction, line) = c.bar().expect("a finished run keeps its bar");
+        assert_eq!(fraction, 0.5);
+        assert!(line.starts_with("2 of 4 chats · took "), "{line}");
+        assert!(c.started.is_none());
+    }
 }

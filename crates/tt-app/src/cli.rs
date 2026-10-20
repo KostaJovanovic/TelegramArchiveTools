@@ -265,6 +265,20 @@ async fn command(args: Vec<String>) -> Result<()> {
             };
             split(&file, &into, dry_run).await
         }
+        "merge" => {
+            let mut dir = std::path::PathBuf::from(&settings.output_dir);
+            let mut dry_run = false;
+            for a in args.iter().skip(1) {
+                match a.as_str() {
+                    "--dry-run" => dry_run = true,
+                    f if f.starts_with("--") => {
+                        return Err(anyhow!("unknown flag {f:?}\n\n{USAGE}"))
+                    }
+                    folder => dir = folder.into(),
+                }
+            }
+            merge(&dir, dry_run).await
+        }
         "search" => {
             // One positional is the text; two are a folder and the text. The
             // folder defaults to the one the settings write to.
@@ -450,6 +464,52 @@ async fn doctor_dupes(dir: &std::path::Path) -> Result<()> {
     println!("{}:", dir.display());
     for line in report.lines(20) {
         println!("{line}");
+    }
+    Ok(())
+}
+
+/// `merge`: one database per chat out of a file per old name.
+async fn merge(dir: &std::path::Path, dry_run: bool) -> Result<()> {
+    let planned = tgx_tg::merge::plan(dir)
+        .await
+        .map_err(|e| anyhow!("could not read {}: {e}", dir.display()))?;
+    if planned.is_empty() {
+        println!("{}: every chat has one database", dir.display());
+        return Ok(());
+    }
+    let mut whole = true;
+    for p in &planned {
+        println!("{} (id {}) → {}", p.title, p.chat_id, p.into.display());
+        if dry_run {
+            for from in &p.from {
+                println!("  folds in {}", from.display());
+            }
+            continue;
+        }
+        for d in tgx_tg::merge::merge(dir, p).await? {
+            match (&d.result, &d.moved_to) {
+                (Ok(a), Some(to)) => println!(
+                    "  {}: +{} messages ({} deleted since), {} histories joined; moved to {}",
+                    d.from.display(),
+                    a.added,
+                    a.found_deleted,
+                    a.joined,
+                    to.display()
+                ),
+                (Ok(_), None) => {}
+                (Err(e), _) => {
+                    whole = false;
+                    println!("  {}: NOT merged — {e}", d.from.display());
+                }
+            }
+        }
+    }
+    if dry_run {
+        println!("nothing written (--dry-run)");
+    } else if !whole {
+        return Err(anyhow!(
+            "some files were not merged; each is left where it was"
+        ));
     }
     Ok(())
 }
@@ -835,6 +895,12 @@ TelegramTools -- export Telegram chats, and report on what was exported
                        offline: one database per chat out of an older file
                        holding several; merges into an existing one (whose
                        contents win) and renames the original to .split
+  TelegramTools merge [<folder>] [--dry-run]
+                       offline: a chat with a database per old name (a group
+                       renamed between syncs, before this build) back to one —
+                       every older file folded into the one a sync writes to,
+                       then renamed .merged and its folder moved into that
+                       one's merged\\ folder. Nothing is deleted
   TelegramTools import <export folder>... [--db <folder>] [--dry-run]
                        offline: copy those messages into the databases, marked
                        deleted and recovered (only into a database that has
@@ -1129,8 +1195,8 @@ fn refuse_beside_the_window() -> Result<()> {
 
 /// The offline commands that write into what the window may have open:
 /// `import` merges recovered messages into the chats' databases, `split`
-/// merges into them and renames the file it read, and `doctor --fix` moves and
-/// deletes. Their dry runs and reports write nothing and run anywhere.
+/// merges into them and renames the file it read, `merge` does the same and
+/// moves folders, and `doctor --fix` moves and deletes. Their dry runs and reports write nothing and run anywhere.
 ///
 /// **Only export and sync were guarded**, which left the commands that write
 /// the same files without a network free to do it under a sync. Those two
@@ -1140,7 +1206,7 @@ fn refuse_beside_the_window() -> Result<()> {
 fn writes_beside_the_window(args: &[String]) -> bool {
     let has = |flag: &str| args.iter().skip(1).any(|a| a == flag);
     match args.first().map(String::as_str) {
-        Some("import" | "split") => !has("--dry-run"),
+        Some("import" | "split" | "merge") => !has("--dry-run"),
         Some("doctor") => has("--fix"),
         _ => false,
     }
@@ -1620,6 +1686,8 @@ mod tests {
             &["import", r"C:\old export"][..],
             &["split", "big.sqlite"],
             &["split", "big.sqlite", "--into", r"C:\out"],
+            &["merge"],
+            &["merge", r"C:\Exports"],
             &["doctor", "--fix"],
             &["doctor", r"C:\Exports", "--fix"],
         ] {
@@ -1631,6 +1699,7 @@ mod tests {
         for reads in [
             &["import", r"C:\old export", "--dry-run"][..],
             &["split", "big.sqlite", "--dry-run"],
+            &["merge", "--dry-run"],
             &["doctor"],
             &["doctor", "--dupes"],
             &["compare", r"C:\old export"],

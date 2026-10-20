@@ -37,6 +37,13 @@ use crate::Error;
 pub const DEFAULT_OPTIONS: &str =
     "-c 32768 -ngl 99 -fa on --jinja --load-mode none -rea off -np 1 -b 2048 -ub 1024";
 
+/// [`DEFAULT_OPTIONS`] for `model`: its `-c` is [`crate::Sizes::context`],
+/// so a smaller Gemma's bigger parts fit.
+pub fn default_options(model: &Path) -> String {
+    let context = crate::Sizes::of(&lower_name(model)).context;
+    DEFAULT_OPTIONS.replacen("-c 32768", &format!("-c {context}"), 1)
+}
+
 /// Loading 15 GB from a slow disk is minutes. ReVision allows ten.
 const LOAD_DEADLINE: Duration = Duration::from_secs(10 * 60);
 
@@ -345,8 +352,13 @@ impl Keeper {
         if let Some(template) = &launch.template {
             command.arg("--chat-template-file").arg(template);
         }
+        let options = if launch.options.trim().is_empty() {
+            default_options(&launch.model)
+        } else {
+            launch.options.clone()
+        };
         command
-            .args(arguments(&launch.options))
+            .args(arguments(&options))
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log);
@@ -465,6 +477,21 @@ mod tests {
             arguments("  ")[..2],
             ["-c".to_string(), "32768".to_string()]
         );
+    }
+
+    /// A smaller Gemma reads bigger parts, so its server holds more; the
+    /// 26B-A4B and anything not a Gemma keep the measured 32K.
+    #[test]
+    fn a_smaller_gemma_is_started_with_room_for_its_bigger_parts() {
+        let c = |name: &str| arguments(&default_options(Path::new(name)))[1].clone();
+        assert_eq!(c(r"M:\gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf"), "32768");
+        assert_eq!(c("gemma-4-31B-it-qat-UD-Q4_K_XL.gguf"), "32768");
+        assert_eq!(c("Qwen3.8-27B-UD-IQ4_XS.gguf"), "32768");
+        assert_eq!(c("gemma-4-12B-it-qat-UD-Q4_K_XL.gguf"), "49152");
+        assert_eq!(c("gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf"), "65536");
+        assert_eq!(c("gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf"), "65536");
+        let e4b = crate::Sizes::of("gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf");
+        assert_eq!((e4b.part, e4b.input), (18_000, 56_000));
     }
 
     #[test]

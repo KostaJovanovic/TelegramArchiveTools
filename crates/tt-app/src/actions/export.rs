@@ -170,6 +170,21 @@ pub async fn export(settings: Settings, pending: Pending, cancel: Cancel, tx: Ev
     // queue carries on.
     let mut exporter = ChatExporter::new(&session.client, &settings, session.session());
 
+    // **The database each chat already has, found by the id inside it**, as
+    // the command line's `export --db` and `sync` do. Without it the engine
+    // opens the file the chat's *current* title names, so a group renamed
+    // since the last sync started a fresh database under every new name. An
+    // unreadable folder is "none yet": the title then names the file, as for
+    // a chat never synced.
+    let archived = if settings.export_db {
+        tgx_tg::engine::archived_chats(std::path::Path::new(&settings.output_dir))
+            .await
+            .map(|a| a.files)
+            .unwrap_or_default()
+    } else {
+        Default::default()
+    };
+
     // **Popped, not iterated.** The list is the window's too, so its length is
     // not known here and can grow between two turns of this loop.
     while let Some(chat) = pending.take_next() {
@@ -329,6 +344,9 @@ pub async fn export(settings: Settings, pending: Pending, cancel: Cancel, tx: Ev
             Progress::Detail(msg) => log::debug!("{msg}"),
         };
 
+        if let Some(path) = archived.get(&chat.id) {
+            exporter.sync_into(path.clone());
+        }
         match exporter
             .run(
                 chat,

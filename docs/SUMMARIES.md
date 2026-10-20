@@ -135,6 +135,25 @@ What changed from the plan below while building it:
   - **Citations capped.** `[#a][#b][#c]…` with only spaces between is one
     citation, written `[#a, #b, #c]`: unknown ids out, repeats out, then the
     first three.
+- **What a CMŠ Brief got wrong (2026-10-20).** The 26B-A4B against Opus 5.5
+  on the same 24 hours (1,048 messages, 18 parts). Each fix answers one
+  mistake, found by reading the notes the final call was given:
+  - **A demand written as a decision.** One part's note said the kolo was
+    agreed to go unannounced; it rested on one person's appeals. The notes
+    prompt now says a decision is only a vote, a poll adopted or the people
+    responsible agreeing, and a proposal or appeal is told as one; merge and
+    final say it too.
+  - **One document, eight notes.** The program for the website took eight
+    notes, one per section, and with them a bullet over the day's disputes.
+    A document is now one note: who shared it, what it is, what it decides or
+    asks for. Its contents are `prompt::document`'s.
+  - **A neighbour's id.** Over notes, the final call was checked against
+    every id in the range, so #21280 passed for #21281's journalist. It is now
+    checked against the ids the notes it read carry.
+  - **Nine bullets for "2 to 6".** A Brief's bullets past the sixth are
+    dropped as they stream (`Bullets`), and a limit that fell among them
+    cut nothing shown.
+  - `prompt::VERSION` 5: every cached note is taken again.
 - **ReVision's server is reported, and can be stopped (2026-10-15, the
   account holder's ask).** While the view is open and nothing of ours is on
   the port, it looks every 5 s at who listens there (`tt-app/src/holder.rs`:

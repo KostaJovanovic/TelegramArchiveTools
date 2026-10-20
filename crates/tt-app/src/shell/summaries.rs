@@ -51,6 +51,29 @@ pub(super) fn launch_files(
     (exe, chosen_model(settings, &server::models_in(&folder)))
 }
 
+impl Shell {
+    /// What the model a summary would start reads at a time, from the models
+    /// folder as last looked at — never a look at the disk on the frame.
+    pub(super) fn chosen_sizes(&self) -> tga_run::tga_sum::Sizes {
+        let s = &self.settings;
+        let models = self
+            .summaries
+            .found
+            .as_ref()
+            .map_or(&[][..], |f| f.models.as_slice());
+        let chosen = s.summary_models_dir().join(&s.summary_model);
+        let model = if !s.summary_model.is_empty() && models.contains(&chosen) {
+            Some(chosen)
+        } else {
+            server::default_model(models)
+        };
+        let name = model
+            .and_then(|m| m.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+        tga_run::tga_sum::Sizes::of(&name)
+    }
+}
+
 /// The model Settings › Summaries chose, while its file is there; else the
 /// folder's first Gemma, else its first model. `models` is the folder's.
 pub(super) fn chosen_model(
@@ -320,7 +343,7 @@ pub(super) struct SummariesState {
     pub(super) lang: Lang,
     pub(super) scope: Scope,
     /// The estimate, and the inputs it is of — recounted when they change.
-    estimate: Option<(AskKey, Estimate)>,
+    estimate: Option<(AskKey, tga_run::tga_sum::Sizes, Estimate)>,
     job: Option<Job>,
     pub(super) status: String,
     part: Option<(usize, usize)>,
@@ -577,14 +600,20 @@ impl SummariesState {
         self.to = end.to_string();
     }
 
-    /// The estimate for the form as it stands, recounted only when it changed.
-    fn estimate(&mut self) -> Option<Estimate> {
+    /// The estimate for the form as it stands, for a model reading `sizes`,
+    /// recounted only when either changed.
+    fn estimate(&mut self, sizes: tga_run::tga_sum::Sizes) -> Option<Estimate> {
         let chat = self.chat.clone()?;
         let options = self.options().ok()?;
         let key = self.ask_key()?;
-        if self.estimate.as_ref().map(|(k, _)| k) != Some(&key) {
-            let e = chat.estimate(&options);
-            self.estimate = Some((key, e));
+        if self.estimate.as_ref().map(|(k, s, _)| (k, *s)) != Some((&key, sizes)) {
+            let e = chat.estimate(&options, sizes);
+            let same_days = self.estimate.as_ref().is_some_and(|(k, _, _)| *k == key);
+            self.estimate = Some((key, sizes, e));
+            if same_days {
+                // Only the model changed: nothing to open.
+                return Some(e);
+            }
             // A summary of exactly these options already on disk is shown at
             // once — unless one is being written, which is what is shown.
             if self.job.is_none() {
@@ -596,7 +625,7 @@ impl SummariesState {
                 }
             }
         }
-        self.estimate.as_ref().map(|(_, e)| *e)
+        self.estimate.as_ref().map(|(_, _, e)| *e)
     }
 
     /// Read `picked` on a worker, and list its saved summaries. Nothing while
@@ -979,7 +1008,7 @@ impl Shell {
         let ready = !s.using_model()
             && s.chat.is_some()
             && s.options().is_ok()
-            && s.estimate.as_ref().is_some_and(|(_, e)| e.messages > 0);
+            && s.estimate.as_ref().is_some_and(|(_, _, e)| e.messages > 0);
         let running = s.running();
         let mut start = false;
         let mut stop = false;
@@ -1003,9 +1032,12 @@ impl Shell {
         let s = &self.summaries;
         if s.mode == Mode::CatchUp {
             let c = &s.catchup;
-            let right = match c.progress() {
-                Some((done, of)) => format!("{done} of {of} chats"),
-                None => String::new(),
+            let right = match (c.progress(), c.elapsed()) {
+                (Some((done, of)), Some(t)) => {
+                    format!("{done} of {of} chats · {}", crate::pace::clock(t))
+                }
+                (Some((done, of)), None) => format!("{done} of {of} chats"),
+                _ => String::new(),
             };
             return (c.status.clone(), right);
         }
@@ -1511,10 +1543,13 @@ impl Shell {
         }
 
         ui.add_space(space::TIGHT);
+        let folder = self.settings.summary_models_dir();
+        self.summaries.look_for_models(&folder, ui.ctx());
+        let sizes = self.chosen_sizes();
         let line = match (self.summaries.reading.is_some(), self.summaries.options()) {
             (true, _) => "Reading the chat…".to_string(),
             (false, Err(e)) => e,
-            (false, Ok(o)) => match self.summaries.estimate() {
+            (false, Ok(o)) => match self.summaries.estimate(sizes) {
                 None => String::new(),
                 Some(e) if e.messages == 0 => format!("Nothing was said in {}.", o.span()),
                 Some(e) => {
@@ -1678,7 +1713,7 @@ impl Shell {
         let s = &mut self.summaries;
         let ready = s.chat.is_some()
             && s.options().is_ok()
-            && s.estimate.as_ref().is_some_and(|(_, e)| e.messages > 0)
+            && s.estimate.as_ref().is_some_and(|(_, _, e)| e.messages > 0)
             && !s.using_model();
         let (mut send, mut stop, mut clear) = (false, false, false);
         rule(ui, &p);

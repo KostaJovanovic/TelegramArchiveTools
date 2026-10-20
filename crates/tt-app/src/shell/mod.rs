@@ -934,8 +934,9 @@ impl eframe::App for Shell {
             }
         }
         // The elapsed clock moves every second whether or not an event
-        // arrives — a rate-limit wait sends nothing for minutes.
-        if self.exporting {
+        // arrives — a rate-limit wait sends nothing for minutes, and a model
+        // reading a part nothing for one.
+        if self.exporting || self.summaries.catchup.running() {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
 

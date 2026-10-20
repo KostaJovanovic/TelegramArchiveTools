@@ -1,7 +1,7 @@
 //! Load a finished export off disk into a model the metrics can walk.
 //!
-//! A port of `analyser/read.py` from the Python original at
-//! `C:\Users\Kosta\Projekti\telegram`. The only input is a folder.
+//! A port of `analyser/read.py` from the Python original, the old
+//! `Projekti\telegram` project. The only input is a folder.
 //! `result.json` files are found wherever they sit — that app writes one per
 //! topic directly under the export root, while Telegram Desktop writes
 //! `chats/chat_<id>/result.json` — so both layouts load without a flag.

@@ -48,6 +48,10 @@ The agent cannot do these. They involve a login code and a password.
   so a chat renamed on Telegram still syncs into its old database.
 - A file holding several chats (from a very old build) is listed under
   `unreadable` and left alone. `TelegramTools split <file>` breaks it up.
+- One chat in several files — a group renamed between syncs, before the
+  window looked databases up by what is inside them — syncs into the one
+  that last finished a sync. `TelegramTools merge [<folder>] [--dry-run]`
+  folds the others into it and moves their folders into its `merged\`.
 - A sync reads what is new plus the newest 500 messages again, to pick up
   edits, reactions and deletions. **It takes seconds to minutes, not hours.**
   `--full` re-reads the whole history. That is slow on a large chat and is

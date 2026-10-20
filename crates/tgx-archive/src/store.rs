@@ -242,6 +242,21 @@ pub struct ChatEntry {
     pub synced: Option<i64>,
 }
 
+/// What [`Store::absorb`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Absorbed {
+    /// Messages only the other file held.
+    pub added: i64,
+    /// Of those, marked deleted: a full read of this file's went past them
+    /// later and did not see them.
+    pub found_deleted: i64,
+    /// Messages both held whose histories were joined into one.
+    pub joined: i64,
+    /// Messages, media rows and stored files of the chat in the other file
+    /// that this one still lacks — 0, or the fold did not do what it says.
+    pub lacking: i64,
+}
+
 /// One chat with its size, as [`Store::chat_summaries`] reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatSummary {
@@ -1272,6 +1287,404 @@ impl Store {
         Ok(())
     }
 
+    /// **Fold another database of the same chat into this one**, as if this
+    /// file had been the one syncing all along.
+    ///
+    /// For a chat with a file per old name: builds before the window looked a
+    /// chat's database up by the id inside it opened the current title's, so
+    /// every rename between two syncs started a fresh file. `src` is the older
+    /// one; this is the one still syncing, and what it says about the present
+    /// wins. What `src` alone knows comes across:
+    ///
+    /// - **Messages only it holds**, with their earlier versions. One this
+    ///   file's own full read went past later, and did not see, is marked
+    ///   deleted as of that read — the conclusion
+    ///   [`Self::mark_unseen_deleted`] would have drawn had it been here.
+    /// - **The history of a message both hold.** Version numbers are each
+    ///   file's own count, so they are not copied: the two chains are joined,
+    ///   `src`'s first, and renumbered. A text on both sides of the seam is
+    ///   kept once — and "the same" is a sync's test, [`merge_volatile`], so
+    ///   two builds writing one message differently is not an edit. A text `src` last saw is recorded as replaced when this
+    ///   file first saw the next one.
+    /// - **When each thing was first seen**, the earlier of the two — what a
+    ///   catch-up and the Viewer count from.
+    /// - Media, files, thumbnails, participants, profile pictures and runs,
+    ///   where this file has the same row, keeping this file's.
+    ///
+    /// Not [`Self::split_from`], whose `INSERT OR IGNORE` on `versions` would
+    /// file one file's version 2 under the other's, or drop it.
+    pub async fn absorb(&self, src: &Path, chat_id: i64) -> Result<Absorbed, Error> {
+        let src = src.to_string_lossy().into_owned();
+        self.conn
+            .execute("ATTACH DATABASE ?1 AS src", params![src])
+            .await?;
+        let folded = async {
+            self.conn.execute_batch("BEGIN;").await?;
+            let folded = self.fold(chat_id).await;
+            if folded.is_ok() {
+                self.conn.execute_batch("COMMIT;").await?;
+            }
+            folded
+        }
+        .await;
+        if folded.is_err() && !self.conn.is_autocommit() {
+            let _ = self.conn.execute_batch("ROLLBACK;").await;
+        }
+        let done = async {
+            let mut done = folded?;
+            done.lacking = self.lacking_from_src(chat_id).await?;
+            Ok::<Absorbed, Error>(done)
+        }
+        .await;
+        // Detached whatever happened above, as in `split_from`.
+        self.conn.execute_batch("DETACH DATABASE src;").await?;
+        done
+    }
+
+    async fn fold(&self, chat_id: i64) -> Result<Absorbed, Error> {
+        let mut done = Absorbed::default();
+
+        // The messages both hold whose chains differ: `src` has earlier
+        // versions, or its text is not where this file's chain begins. The
+        // rest only need their first sighting moved, below.
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT s.id, s.payload, s.last_seen, m.first_seen
+                   FROM src.messages s
+                   JOIN main.messages m ON m.chat_id = s.chat_id AND m.id = s.id
+                  WHERE s.chat_id = ?1
+                    AND (s.version > 1 OR s.payload <> COALESCE(
+                          (SELECT v.payload FROM main.versions v
+                            WHERE v.chat_id = m.chat_id AND v.id = m.id
+                            ORDER BY v.version LIMIT 1),
+                          m.payload))",
+                params![chat_id],
+            )
+            .await?;
+        let mut differ = Vec::new();
+        while let Some(r) = rows.next().await? {
+            differ.push((
+                r.get::<i64>(0)?,
+                r.get::<String>(1)?,
+                r.get::<i64>(2)?,
+                r.get::<i64>(3)?,
+            ));
+        }
+        drop(rows);
+        for (id, src_current, src_last_seen, here_first_seen) in differ {
+            let mut older = self.chain("src", chat_id, id).await?;
+            older.push((src_current, here_first_seen));
+            let mut newer = self.chain("main", chat_id, id).await?;
+            let current = self
+                .row(
+                    "SELECT payload FROM main.messages WHERE chat_id = ?1 AND id = ?2",
+                    params![chat_id, id],
+                )
+                .await?
+                .map(|r| r.get::<String>(0))
+                .transpose()?
+                .unwrap_or_default();
+            newer.push((current, 0));
+            // **Where the two chains meet**: the longest end of `src`'s that
+            // is the start of this file's. Usually one text, the one the
+            // newer file found on its first read. All of it when `src` was
+            // folded in before — a merge stopped between this commit and the
+            // rename that follows — which is what makes a second fold of the
+            // same file change nothing.
+            //
+            // **"The same" is what a sync would call the same**: a newer text
+            // that `merge_volatile` would not let change the older one. Two
+            // builds write a sender, a service message's actor or a skipped
+            // file differently, and a sync never makes a version of that; a
+            // byte comparison made one of nearly every message in a chat.
+            //
+            // **And an edit is one Telegram dates after the older text was
+            // read.** An edit date the older file read the message after —
+            // or none at all — means no edit came between them, so a text or
+            // an edit date that differs anyway is the two builds again: one
+            // build wrote no `edited` at all, and 532 messages of one chat
+            // read as edited for it. `until` is when the older text was last
+            // read, which only `src`'s current text records (`last_seen`);
+            // an earlier version knows only when it was replaced, which is
+            // no bound at all, so it is held to the plain test.
+            let edit_time = |m: &Map<String, Value>| {
+                m.get("edited_unixtime").and_then(|v| match v {
+                    Value::String(s) => s.parse::<i64>().ok(),
+                    v => v.as_i64(),
+                })
+            };
+            let same = |a: &str, b: &str, until: Option<i64>| -> bool {
+                if a == b {
+                    return true;
+                }
+                let (Ok(a), Ok(mut b)) = (
+                    serde_json::from_str::<Map<String, Value>>(a),
+                    serde_json::from_str::<Map<String, Value>>(b),
+                ) else {
+                    return false;
+                };
+                let edited_between = match until {
+                    Some(until) => {
+                        edit_time(&b).is_some_and(|t| t > until && edit_time(&a) != Some(t))
+                    }
+                    None => true,
+                };
+                if !edited_between {
+                    for key in ["edited", "edited_unixtime", "text", "text_entities"] {
+                        match a.get(key) {
+                            Some(v) => b.insert(key.to_string(), v.clone()),
+                            None => b.remove(key),
+                        };
+                    }
+                }
+                merge_volatile(&a, &b) == a
+            };
+            let last = older.len() - 1;
+            let overlap = (0..=older.len().min(newer.len()))
+                .rev()
+                .find(|&k| {
+                    (0..k).all(|i| {
+                        let at = older.len() - k + i;
+                        let until = (at == last).then_some(src_last_seen);
+                        same(&older[at].0, &newer[i].0, until)
+                    })
+                })
+                .unwrap_or(0);
+            older.truncate(older.len() - overlap);
+            if older.is_empty() {
+                continue;
+            }
+            let joined: Vec<(String, i64)> = older.into_iter().chain(newer).collect();
+            self.conn
+                .execute(
+                    "DELETE FROM main.versions WHERE chat_id = ?1 AND id = ?2",
+                    params![chat_id, id],
+                )
+                .await?;
+            // The last is this file's current text, which stays where it is.
+            let current_version = joined.len() as i64;
+            for (n, (payload, seen)) in joined.into_iter().enumerate() {
+                let version = n as i64 + 1;
+                if version == current_version {
+                    break;
+                }
+                self.conn
+                    .execute(
+                        "INSERT INTO main.versions (chat_id, id, version, payload, seen)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![chat_id, id, version, payload, seen],
+                    )
+                    .await?;
+            }
+            self.conn
+                .execute(
+                    "UPDATE main.messages SET version = ?3 WHERE chat_id = ?1 AND id = ?2",
+                    params![chat_id, id, current_version],
+                )
+                .await?;
+            done.joined += 1;
+        }
+
+        // The earlier first sighting, for every row both hold.
+        for (table, key) in [
+            ("messages", "s.id = t.id"),
+            ("topics", "s.id = t.id"),
+            ("participants", "s.peer = t.peer"),
+        ] {
+            self.conn
+                .execute(
+                    &format!(
+                        "UPDATE main.{table} AS t
+                            SET first_seen = (SELECT s.first_seen FROM src.{table} s
+                                               WHERE s.chat_id = t.chat_id AND {key})
+                          WHERE t.chat_id = ?1 AND EXISTS
+                                (SELECT 1 FROM src.{table} s
+                                  WHERE s.chat_id = t.chat_id AND {key}
+                                    AND s.first_seen < t.first_seen)"
+                    ),
+                    params![chat_id],
+                )
+                .await?;
+        }
+        self.conn
+            .execute(
+                "UPDATE main.chats AS t
+                    SET first_seen = (SELECT s.first_seen FROM src.chats s WHERE s.id = t.id)
+                  WHERE t.id = ?1 AND EXISTS
+                        (SELECT 1 FROM src.chats s WHERE s.id = t.id AND s.first_seen < t.first_seen)",
+                params![chat_id],
+            )
+            .await?;
+
+        // What only `src` holds. The ids are set aside first: once copied,
+        // nothing tells them apart from this file's own.
+        self.conn
+            .execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS absorbing (id INTEGER PRIMARY KEY);
+                 DELETE FROM temp.absorbing;",
+            )
+            .await?;
+        self.conn
+            .execute(
+                "INSERT INTO temp.absorbing
+                 SELECT s.id FROM src.messages s
+                  WHERE s.chat_id = ?1 AND NOT EXISTS
+                        (SELECT 1 FROM main.messages m WHERE m.chat_id = s.chat_id AND m.id = s.id)",
+                params![chat_id],
+            )
+            .await?;
+        for sql in [
+            "INSERT OR IGNORE INTO main.versions SELECT * FROM src.versions
+              WHERE chat_id = ?1 AND id IN (SELECT id FROM temp.absorbing)",
+            "INSERT INTO main.messages SELECT * FROM src.messages
+              WHERE chat_id = ?1 AND id IN (SELECT id FROM temp.absorbing)",
+        ] {
+            self.conn.execute(sql, params![chat_id]).await?;
+        }
+        done.added = self
+            .row("SELECT COUNT(*) FROM temp.absorbing", ())
+            .await?
+            .map(|r| r.get::<i64>(0))
+            .transpose()?
+            .unwrap_or(0);
+        // A full read is a walk from the first message to the last whose
+        // sweep marks whatever it did not see; `started` is the stamp it gave
+        // everything it did. A message `src` last saw before one of this
+        // file's finished full reads, and that read did not bring in, was gone
+        // by then. Before this file's runs gain `src`'s, which come last.
+        done.found_deleted = self
+            .conn
+            .execute(
+                "UPDATE main.messages AS m
+                    SET deleted_seen = (SELECT MIN(r.started) FROM main.runs r
+                                         WHERE r.chat_id = m.chat_id AND r.mode = 'full'
+                                           AND r.reached_end = 1 AND r.started > m.last_seen)
+                  WHERE m.chat_id = ?1 AND m.deleted_seen IS NULL
+                    AND m.id IN (SELECT id FROM temp.absorbing)
+                    AND EXISTS (SELECT 1 FROM main.runs r
+                                 WHERE r.chat_id = m.chat_id AND r.mode = 'full'
+                                   AND r.reached_end = 1 AND r.started > m.last_seen)",
+                params![chat_id],
+            )
+            .await? as i64;
+        self.conn
+            .execute_batch("DELETE FROM temp.absorbing;")
+            .await?;
+
+        for sql in [
+            "INSERT OR IGNORE INTO main.chats SELECT * FROM src.chats WHERE id = ?1",
+            "INSERT OR IGNORE INTO main.topics SELECT * FROM src.topics WHERE chat_id = ?1",
+            "INSERT OR IGNORE INTO main.media SELECT * FROM src.media WHERE chat_id = ?1",
+            "INSERT OR IGNORE INTO main.participants
+                    SELECT * FROM src.participants WHERE chat_id = ?1",
+            "INSERT OR IGNORE INTO main.blobs SELECT * FROM src.blobs
+                  WHERE (file_id, kind) IN (SELECT file_id, kind FROM src.media WHERE chat_id = ?1)",
+            "INSERT OR IGNORE INTO main.thumbs SELECT * FROM src.thumbs
+                  WHERE (file_id, kind) IN (SELECT file_id, kind FROM src.media WHERE chat_id = ?1)",
+            // As in `copy_chat`: this file numbers its own runs.
+            "INSERT INTO main.runs (chat_id, started, finished, mode, root, new, changed,
+                                    deleted, blobs_added, reached_end, settings)
+                  SELECT chat_id, started, finished, mode, root, new, changed,
+                         deleted, blobs_added, reached_end, settings
+                    FROM src.runs s WHERE s.chat_id = ?1 AND NOT EXISTS
+                         (SELECT 1 FROM main.runs r WHERE r.chat_id = s.chat_id
+                             AND r.started = s.started AND r.mode = s.mode)",
+        ] {
+            self.conn.execute(sql, params![chat_id]).await?;
+        }
+
+        // Profile pictures, in a file old enough to have them. Named columns:
+        // the table was added beside the schema, not in it.
+        let has_userpics = self
+            .row(
+                "SELECT 1 FROM src.sqlite_master WHERE type = 'table' AND name = 'userpics'",
+                (),
+            )
+            .await?
+            .is_some();
+        if has_userpics {
+            self.conn
+                .execute(
+                    "INSERT OR IGNORE INTO main.userpics
+                            (chat_id, peer, photo_id, date, current, first_seen, last_seen)
+                     SELECT chat_id, peer, photo_id, date, current, first_seen, last_seen
+                       FROM src.userpics WHERE chat_id = ?1",
+                    params![chat_id],
+                )
+                .await?;
+            // One picture worn now per person: the one seen last.
+            self.conn
+                .execute(
+                    "UPDATE main.userpics AS u SET current = 0
+                      WHERE u.chat_id = ?1 AND u.current = 1 AND EXISTS
+                            (SELECT 1 FROM main.userpics o
+                              WHERE o.chat_id = u.chat_id AND o.peer = u.peer
+                                AND o.current = 1 AND o.last_seen > u.last_seen)",
+                    params![chat_id],
+                )
+                .await?;
+            self.conn
+                .execute(
+                    "INSERT OR IGNORE INTO main.blobs SELECT * FROM src.blobs
+                      WHERE kind = ?2
+                        AND file_id IN (SELECT photo_id FROM src.userpics WHERE chat_id = ?1)",
+                    params![chat_id, USERPIC_KIND],
+                )
+                .await?;
+        }
+        Ok(done)
+    }
+
+    /// One message's earlier versions in `schema`, oldest first, with when
+    /// each was replaced.
+    async fn chain(
+        &self,
+        schema: &str,
+        chat_id: i64,
+        id: i64,
+    ) -> Result<Vec<(String, i64)>, Error> {
+        let mut rows = self
+            .conn
+            .query(
+                &format!(
+                    "SELECT payload, seen FROM {schema}.versions
+                      WHERE chat_id = ?1 AND id = ?2 ORDER BY version"
+                ),
+                params![chat_id, id],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next().await? {
+            out.push((r.get::<String>(0)?, r.get::<i64>(1)?));
+        }
+        Ok(out)
+    }
+
+    /// What of the chat in the attached `src` this file still lacks: its
+    /// messages, its media rows, and the stored files those point at.
+    async fn lacking_from_src(&self, chat_id: i64) -> Result<i64, Error> {
+        let row = self
+            .row(
+                "SELECT
+                   (SELECT COUNT(*) FROM src.messages s WHERE s.chat_id = ?1 AND NOT EXISTS
+                      (SELECT 1 FROM main.messages m WHERE m.chat_id = s.chat_id AND m.id = s.id))
+                 + (SELECT COUNT(*) FROM src.media s WHERE s.chat_id = ?1 AND NOT EXISTS
+                      (SELECT 1 FROM main.media m WHERE m.chat_id = s.chat_id
+                          AND m.message_id = s.message_id AND m.role = s.role))
+                 + (SELECT COUNT(*) FROM src.blobs b
+                     WHERE (b.file_id, b.kind) IN (SELECT file_id, kind FROM src.media WHERE chat_id = ?1)
+                       AND NOT EXISTS (SELECT 1 FROM main.blobs m
+                                        WHERE m.file_id = b.file_id AND m.kind = b.kind))",
+                params![chat_id],
+            )
+            .await?;
+        Ok(match row {
+            Some(r) => r.get::<i64>(0)?,
+            None => 0,
+        })
+    }
+
     /// Mark one message gone from Telegram as of `now`, unless it already is.
     ///
     /// For a message recovered from an old export by `tgx import`: a finished
@@ -1936,6 +2349,160 @@ mod tests {
         .as_object()
         .unwrap()
         .clone()
+    }
+
+    #[tokio::test]
+    async fn an_older_file_of_the_same_chat_folds_in_as_if_it_had_always_been_here() {
+        // The file from before a rename: a full read at 100, a window at 150
+        // that saw #2 edited and #4 deleted.
+        let old_path = tmp("absorb-old");
+        {
+            let s = Store::open(&old_path).await.unwrap();
+            s.upsert_chat(7, "Old name", "private_supergroup", 100)
+                .await
+                .unwrap();
+            let run = s.start_run(7, "full", None, "{}", 100).await.unwrap();
+            for (id, text) in [
+                (1, "a"),
+                (2, "b"),
+                (3, "gone"),
+                (4, "x"),
+                (6, "t"),
+                (7, "u"),
+            ] {
+                s.merge(7, id, None, &msg(id, text), 100).await.unwrap();
+            }
+            s.finish_run(run, 6, 0, 0, 0, true, 100).await.unwrap();
+            let run = s.start_run(7, "window", None, "{}", 150).await.unwrap();
+            for (id, text) in [(1, "a"), (2, "b2"), (3, "gone"), (6, "t"), (7, "u")] {
+                let mut m = msg(id, text);
+                if id == 2 {
+                    m.insert("edited_unixtime".into(), json!("140"));
+                }
+                s.merge(7, id, None, &m, 150).await.unwrap();
+            }
+            s.mark_unseen_deleted(7, 0, &[1, 2, 3, 6, 7].into(), 150)
+                .await
+                .unwrap();
+            s.finish_run(run, 0, 1, 1, 0, true, 150).await.unwrap();
+            s.put_blob(30, "photos", "image/jpeg", None, b"px", 150)
+                .await
+                .unwrap();
+            s.link_media(7, 3, "photo", 30, "photos", "photos/p.jpg")
+                .await
+                .unwrap();
+        }
+        // The file the new name started: a full read at 200 that no longer
+        // finds #3, then a window at 300 that sees #2 edited again.
+        let new_path = tmp("absorb-new");
+        let s = Store::open(&new_path).await.unwrap();
+        s.upsert_chat(7, "New name", "private_supergroup", 200)
+            .await
+            .unwrap();
+        let run = s.start_run(7, "full", None, "{}", 200).await.unwrap();
+        for (id, text) in [(1, "a"), (2, "b2"), (5, "new")] {
+            let mut m = msg(id, text);
+            // A later build names senders differently: not an edit, and a
+            // sync would never have made a version of it.
+            if id == 1 {
+                m.insert("from_id".into(), json!("user31774388x"));
+            }
+            if id == 2 {
+                m.insert("edited_unixtime".into(), json!("140"));
+            }
+            s.merge(7, id, None, &m, 200).await.unwrap();
+        }
+        // #6 carries an edit date the old file read the message after, which
+        // its build never wrote down: the same message twice. #7 was edited
+        // once the old file had stopped: an edit.
+        for (id, text, edited) in [(6, "t, written otherwise", "120"), (7, "u2", "180")] {
+            let mut m = msg(id, text);
+            m.insert("edited".into(), json!("e"));
+            m.insert("edited_unixtime".into(), json!(edited));
+            s.merge(7, id, None, &m, 200).await.unwrap();
+        }
+        s.finish_run(run, 5, 0, 0, 0, true, 200).await.unwrap();
+        let run = s.start_run(7, "window", None, "{}", 300).await.unwrap();
+        let mut b3 = msg(2, "b3");
+        b3.insert("edited_unixtime".into(), json!("250"));
+        s.merge(7, 2, None, &b3, 300).await.unwrap();
+        s.finish_run(run, 0, 1, 0, 0, true, 300).await.unwrap();
+
+        let done = s.absorb(&old_path, 7).await.unwrap();
+        assert_eq!(
+            done,
+            Absorbed {
+                added: 2,
+                found_deleted: 1,
+                joined: 2,
+                lacking: 0
+            }
+        );
+
+        assert_eq!(s.message_count(7).await.unwrap(), (7, 5));
+        assert!(s.versions_of(7, 6).await.unwrap().is_empty());
+        let seven = s.versions_of(7, 7).await.unwrap();
+        assert_eq!(seven.len(), 1);
+        assert_eq!(seven[0].payload["text"], "u");
+        // #2: what the old file saw, then what the new one did, renumbered.
+        let two = s.get(7, 2).await.unwrap().unwrap();
+        assert_eq!(two.payload["text"], "b3");
+        assert_eq!(two.version, 3);
+        let chain: Vec<(i64, String, i64)> = s
+            .versions_of(7, 2)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|v| {
+                (
+                    v.version,
+                    v.payload["text"].as_str().unwrap().into(),
+                    v.seen,
+                )
+            })
+            .collect();
+        assert_eq!(
+            chain,
+            vec![(1, "b".into(), 150), (2, "b2".into(), 300)],
+            "b2 once, though both files held it"
+        );
+        assert!(s.versions_of(7, 1).await.unwrap().is_empty());
+        assert_eq!(s.get(7, 1).await.unwrap().unwrap().version, 1);
+        // #3 went between the two files: the new one's full read did not
+        // find it. #4 the old one saw go, and keeps its date.
+        assert_eq!(s.get(7, 3).await.unwrap().unwrap().deleted_seen, Some(200));
+        assert_eq!(s.get(7, 4).await.unwrap().unwrap().deleted_seen, Some(150));
+        assert!(s.has_blob(30, "photos").await.unwrap());
+        // First seen when the old file first saw it; the title is today's.
+        let first = |sql: &'static str| {
+            let s = &s;
+            async move {
+                s.row(sql, ())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .get::<i64>(0)
+                    .unwrap()
+            }
+        };
+        assert_eq!(
+            first("SELECT first_seen FROM messages WHERE chat_id = 7 AND id = 1").await,
+            100
+        );
+        assert_eq!(
+            first("SELECT first_seen FROM chats WHERE id = 7").await,
+            100
+        );
+        assert_eq!(first("SELECT COUNT(*) FROM runs").await, 4);
+        let chats = Store::chats_in(&new_path).await.unwrap();
+        assert_eq!(chats[0].title, "New name");
+        assert_eq!(chats[0].synced, Some(300));
+
+        // A merge stopped before it renamed the old file, run again.
+        let again = s.absorb(&old_path, 7).await.unwrap();
+        assert_eq!(again, Absorbed::default());
+        assert_eq!(s.versions_of(7, 2).await.unwrap().len(), 2);
+        assert_eq!(first("SELECT COUNT(*) FROM runs").await, 4);
     }
 
     #[tokio::test]

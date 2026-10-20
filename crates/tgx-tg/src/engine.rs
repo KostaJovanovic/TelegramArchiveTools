@@ -645,7 +645,7 @@ impl<'a> ChatExporter<'a> {
     }
 
     /// Sync the next run into this file rather than the one the chat's title
-    /// names.
+    /// names. The next run only: it is cleared as that run starts.
     ///
     /// For a caller that found the database by what is **inside** it —
     /// [`archived_chats`] — and so already knows which file is this chat's.
@@ -865,6 +865,10 @@ impl<'a> ChatExporter<'a> {
     ) -> Result<Finished, ExportError> {
         let started = std::time::Instant::now();
         let detail = detail_wanted();
+        // **This run's, and only this run's.** The window keeps one exporter
+        // for a whole queue; left in place, one chat's file would be opened
+        // for the next, which `open_archive` refuses as a mix-up.
+        let archive_at = self.archive_at.take();
         let RunState {
             sinks,
             result,
@@ -905,7 +909,7 @@ impl<'a> ChatExporter<'a> {
         self.store = if db {
             let (store, path) = open_archive(
                 Path::new(&self.settings.output_dir),
-                self.archive_at.as_deref(),
+                archive_at.as_deref(),
                 chat,
             )
             .await?;
@@ -2272,24 +2276,7 @@ pub struct Archived {
 /// sanitise to one name, and a title changed on Telegram since the last run
 /// would otherwise match nothing.
 pub async fn archived_chats(dir: &Path) -> std::io::Result<Archived> {
-    let ext = tgx_archive::FILE_EXT;
-    let mut found = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                let inner = path.join(format!("{name}.{ext}"));
-                if inner.is_file() {
-                    found.push(inner);
-                }
-            }
-        } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
-            found.push(path);
-        }
-    }
-    // Sorted so the queue comes out in the same order on every press.
-    found.sort();
-
+    let found = database_files(dir)?;
     let mut out = Archived::default();
     let mut seen = std::collections::HashSet::new();
     for path in found {
@@ -2306,6 +2293,12 @@ pub async fn archived_chats(dir: &Path) -> std::io::Result<Archived> {
                     chats.len()
                 ),
             )),
+            // **Several files for one chat: the last one synced wins.** Builds
+            // before the window looked a chat's file up by id opened the
+            // current title's instead, so a chat renamed between syncs left a
+            // database per name. The newest is the one still moving; the
+            // alphabetically first was an old name, and syncing into it would
+            // move the chat back to a folder the user stopped looking at.
             Ok(chats) => {
                 for chat in chats {
                     if seen.insert(chat.id) {
@@ -2314,6 +2307,12 @@ pub async fn archived_chats(dir: &Path) -> std::io::Result<Archived> {
                             out.synced.insert(chat.id, at);
                         }
                         out.chats.push((chat.id, chat.title));
+                    } else if chat.synced > out.synced.get(&chat.id).copied() {
+                        out.files.insert(chat.id, path.clone());
+                        out.synced.extend(chat.synced.map(|at| (chat.id, at)));
+                        if let Some(row) = out.chats.iter_mut().find(|(id, _)| *id == chat.id) {
+                            row.1 = chat.title;
+                        }
                     }
                 }
             }
@@ -2321,6 +2320,29 @@ pub async fn archived_chats(dir: &Path) -> std::io::Result<Archived> {
         }
     }
     Ok(out)
+}
+
+/// The database files directly in `dir` and one folder down, where
+/// [`archive_path`] puts them, sorted — so the queue comes out in the same
+/// order on every press, and a tie between two files goes the same way.
+pub(crate) fn database_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let ext = tgx_archive::FILE_EXT;
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                let inner = path.join(format!("{name}.{ext}"));
+                if inner.is_file() {
+                    found.push(inner);
+                }
+            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
+            found.push(path);
+        }
+    }
+    found.sort();
+    Ok(found)
 }
 
 /// **The chats that already have a Classic export folder in `dir`.**
@@ -2846,6 +2868,40 @@ mod tests {
             skipped,
             vec![parent.join("notes.sqlite"), parent.join("telegram.sqlite")]
         );
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[tokio::test]
+    async fn a_chat_with_a_file_per_old_name_syncs_into_the_newest() {
+        let parent = std::env::temp_dir().join(format!("tgx-arch5-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        // One group, renamed twice, a database per name. "A first" sorts
+        // first and was synced longest ago; "C third" never finished a walk.
+        for (name, synced) in [
+            ("A first", Some(10)),
+            ("B second", Some(30)),
+            ("C third", None),
+        ] {
+            let s = tgx_archive::Store::open(&archive_path(&parent, name).unwrap())
+                .await
+                .unwrap();
+            s.upsert_chat(7, name, "private_supergroup", 1)
+                .await
+                .unwrap();
+            if let Some(at) = synced {
+                let run = s.start_run(7, "database", None, "{}", at).await.unwrap();
+                s.finish_run(run, 0, 0, 0, 0, true, at).await.unwrap();
+            }
+            drop(s);
+        }
+
+        let found = archived_chats(&parent).await.unwrap();
+        assert_eq!(found.chats, vec![(7, "B second".to_string())]);
+        assert_eq!(
+            found.files[&7],
+            parent.join("B second").join("B second.sqlite")
+        );
+        assert_eq!(found.synced[&7], 30);
         let _ = std::fs::remove_dir_all(&parent);
     }
 

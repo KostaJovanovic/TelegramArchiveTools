@@ -211,6 +211,14 @@ before its first message and a chat that exported nothing still owns the file it
 made. A store that will not open now fails **that chat**, not the queue — with a
 file each, the next chat has every chance of working.
 
+**A chat that already has a database is found by the id inside it, never by
+its title** (`archived_chats`, then `ChatExporter::sync_into`). Both front ends
+must do it: the window once did not, and a group renamed every few days got a
+fresh database per name. Where a chat is in several files, the last to finish
+a sync wins; `TelegramTools merge` folds the rest into it (`Store::absorb`,
+which joins two files' edit histories under a sync's own test of "the same",
+`merge_volatile` — a byte comparison read two builds' output as 1,000 edits).
+
 **The database is fed the same map the writers are**, minus `_p`, and renders
 nothing.
 
@@ -462,7 +470,10 @@ chat beside its database that only a saved brief moves. What must hold:
   holder's ask), and a long one is a part of its own — and "haha",
   "ok" and a lone sticker are dropped unless answered (`lines::trivial`). These
   were 8,000/16,000/1,200 and kept, until a summary skipped a discussion that
-  mattered. Change one and say why, against a measurement.
+  mattered. Change one and say why, against a measurement. They are the
+  26B-A4B's: `tga_sum::Sizes::of` gives Gemma 4 E2B/E4B four times them and
+  12B twice, with a server context to match (`server::default_options`) —
+  2026-10-20, the account holder's ask, **not measured**.
 - **Every document is explained on its own.** Below the summary, each
   document read in the range gets its own call (`prompt::document`): a
   standalone paragraph, then all of it, every item put to a vote listed.

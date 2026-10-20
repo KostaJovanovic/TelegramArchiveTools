@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use crate::{Lang, Length};
 
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 /// What the lines and the notes look like, said once for every prompt.
 const READING: &str = "Each line is one message: `#id HH:MM name (re #id): text`. \
@@ -88,6 +88,12 @@ pub fn notes(about: &About, lang: Lang) -> String {
          date or its name.\n\
          - Every meeting that took place is its own note, on the day it was held, with \
          what was decided.\n\
+         - A decision is only what the messages show was decided: a vote or poll \
+         adopted, or the people responsible agreeing to it. A proposal, request, appeal or \
+         opinion is not a decision, however often it is repeated: say who proposed or \
+         asked for what, and whether it was taken up.\n\
+         - A document shared is ONE note: who shared it, what it is, and what it decides \
+         or asks for, in a sentence or two — never a note per section.\n\
          - One fact per note, in one or two sentences, concrete: names, places, numbers \
          and dates as written. Small talk, jokes and greetings are not notes unless they \
          reveal one of the above.\n\
@@ -113,7 +119,8 @@ pub fn merge(about: &About, lang: Lang) -> String {
          same thing into one, keep every major note, keep medium notes that add something, \
          drop minor ones that repeat. A discussion stays one note with its positions and \
          its outcome. Never move a person from one position to another, never fold two \
-         positions into one, and never join two things that only have similar names. \
+         positions into one, never turn a proposal into a decision, and never join two \
+         things that only have similar names. \
          Keep each note's day, weight and ids (at most 10). \
          {lang}\nOutput only the JSON object.",
         of = about.of(),
@@ -185,7 +192,10 @@ pub fn final_text(about: &About, length: Length, lang: Lang, from_notes: bool) -
     format!(
         "You summarise what happened in {of} {span}. You get {input}\n\n{shape}\n\
          Name people as written, and give each person's position only as the input shows \
-         it. Keep apart things with similar names — say which group, meeting or document \
+         it. Say something was decided or agreed only where the input says so; a proposal \
+         or an appeal is told as who proposed or asked for what. Cite for each claim the \
+         messages that say it, not ones beside them. Keep apart things with similar names \
+         — say which group, meeting or document \
          you mean. Mention a date only where the order matters. Only what the \
          input says: no guesses, no advice, no opening like \"in this period\". {lang}\n\
          Output only the summary.",

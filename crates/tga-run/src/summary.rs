@@ -40,6 +40,8 @@ TelegramTools summarise -- a local model's summary of a date range
 Options
     --from YYYY-MM-DD   the first day, inclusive
     --to YYYY-MM-DD     the last day, inclusive (default: the --from day)
+    --last-24h          instead of the days: the 24 hours before the chat's
+                        last message, as Catch up's \"24 h\" reads them
     --short             one paragraph (the default)
     --detailed          paragraphs by theme, citing message ids as [#id]
     --sections          headed bullet points: key events, decisions, plans,
@@ -57,6 +59,9 @@ Options
     --no-cache          ask the model again for every part
     --any-model         use whatever model the server has loaded, not only
                         a Gemma; the prompts and sampling are tuned for Gemma
+    --input PATH        ask no model: write the prompt and the messages a
+                        summary read in one call would send, to put the same
+                        input to another model. It holds the messages' text.
 ";
 
 /// A chat read for summarising: the export, and what turns its messages into
@@ -467,7 +472,8 @@ const CHARS_PER_TOKEN: usize = 3;
 const LINE_TOKENS: usize = 12;
 
 impl Chat {
-    pub fn estimate(&self, options: &Options) -> Estimate {
+    /// `sizes` are the model's that will write it.
+    pub fn estimate(&self, options: &Options, sizes: tga_sum::Sizes) -> Estimate {
         let mut e = Estimate::default();
         for m in self
             .export
@@ -480,9 +486,9 @@ impl Chat {
             e.tokens += m.text.chars().count().min(tga_sum::lines::TEXT_CHARS) / CHARS_PER_TOKEN
                 + LINE_TOKENS;
         }
-        if e.tokens > tga_sum::SINGLE_TOKENS {
+        if e.tokens > sizes.single {
             // A part is cut a little under its budget, at day boundaries.
-            e.parts = e.tokens.div_ceil(tga_sum::PART_TOKENS * 9 / 10);
+            e.parts = e.tokens.div_ceil(sizes.part * 9 / 10);
         }
         e
     }
@@ -955,6 +961,8 @@ pub fn run(args: Vec<String>, models: &Path) -> Result<()> {
     let mut out: Option<PathBuf> = None;
     let mut cache = true;
     let mut any_model = false;
+    let mut last_day = false;
+    let mut input: Option<PathBuf> = None;
 
     let day = |v: Option<&String>, flag: &str| -> Result<NaiveDate> {
         let v = v.with_context(|| format!("{flag} needs a day, YYYY-MM-DD"))?;
@@ -992,15 +1000,20 @@ pub fn run(args: Vec<String>, models: &Path) -> Result<()> {
             "--out" => out = Some(PathBuf::from(rest.next().context("--out needs a path")?)),
             "--no-cache" => cache = false,
             "--any-model" => any_model = true,
+            "--last-24h" => last_day = true,
+            "--input" => input = Some(PathBuf::from(rest.next().context("--input needs a path")?)),
             other => bail!("Unknown option: {other}\n\n{USAGE}"),
         }
     }
-    let Some(from) = from else {
-        bail!("--from is needed: the first day to summarise");
-    };
-    let to = to.unwrap_or(from);
-    if to < from {
-        bail!("--to {to} is before --from {from}");
+    match (from, last_day) {
+        (Some(_), true) => bail!("--from and --last-24h: one or the other"),
+        (None, false) => bail!("--from is needed: the first day to summarise"),
+        _ => {}
+    }
+    if let (Some(from), Some(to)) = (from, to) {
+        if to < from {
+            bail!("--to {to} is before --from {from}");
+        }
     }
     if by_topic && topic.is_some() {
         bail!("--by-topic and --topic: one or the other");
@@ -1008,25 +1021,31 @@ pub fn run(args: Vec<String>, models: &Path) -> Result<()> {
 
     // The server first: reading a large chat takes seconds, and finding out
     // after that there is nothing to talk to is a poor way to spend them.
+    // `--input` asks no model.
     let client = Client::new(port);
-    if !client.healthy() {
-        bail!(
-            "No model server is answering on 127.0.0.1:{port}. Start Gemma first \
-             (the window's Summaries view does), or pass --port."
-        );
-    }
-    let props = client.props()?;
-    if !any_model && !props.model.to_lowercase().contains("gemma") {
-        bail!(
-            "The server on 127.0.0.1:{port} has {} loaded, not Gemma. The prompts and sampling \
-             are tuned for Gemma; pass --any-model to use it anyway.",
-            if props.model.is_empty() {
-                "an unnamed model"
-            } else {
-                &props.model
-            }
-        );
-    }
+    let props = if input.is_some() {
+        None
+    } else {
+        if !client.healthy() {
+            bail!(
+                "No model server is answering on 127.0.0.1:{port}. Start Gemma first \
+                 (the window's Summaries view does), or pass --port."
+            );
+        }
+        let props = client.props()?;
+        if !any_model && !props.model.to_lowercase().contains("gemma") {
+            bail!(
+                "The server on 127.0.0.1:{port} has {} loaded, not Gemma. The prompts and \
+                 sampling are tuned for Gemma; pass --any-model to use it anyway.",
+                if props.model.is_empty() {
+                    "an unnamed model"
+                } else {
+                    &props.model
+                }
+            );
+        }
+        Some(props)
+    };
 
     let started = Instant::now();
     let chat = Chat::open(&path, chat.as_deref())?;
@@ -1046,7 +1065,23 @@ pub fn run(args: Vec<String>, models: &Path) -> Result<()> {
             chat.title()
         );
     }
-    let mut rows = chat.rows(from, to, topic);
+    let (from, to, after) = match from {
+        Some(from) => (from, to.unwrap_or(from), None),
+        None => {
+            let (after, from, to) = chat.last_hours().context("the chat has no messages")?;
+            (from, to, Some(after))
+        }
+    };
+    let options = Options {
+        from,
+        to,
+        length,
+        lang,
+        by_topic,
+        topic,
+        after,
+    };
+    let mut rows = chat.rows_for(&options);
     eprintln!(
         "  read {} messages in {:.1} s; {} in the range",
         thousands(chat.export.msgs.len()),
@@ -1075,18 +1110,9 @@ pub fn run(args: Vec<String>, models: &Path) -> Result<()> {
             .span()
             .map(|(a, b)| format!(" The chat runs from {a} to {b}."))
             .unwrap_or_default();
-        bail!("Nothing was said between {from} and {to}.{span}");
+        bail!("Nothing was said in {}.{span}", options.span());
     }
 
-    let options = Options {
-        from,
-        to,
-        length,
-        lang,
-        by_topic,
-        topic,
-        after: None,
-    };
     let topics = chat.topics();
     let request = Request {
         chat: chat.title(),
@@ -1104,6 +1130,22 @@ pub fn run(args: Vec<String>, models: &Path) -> Result<()> {
     } else {
         Cache::none()
     };
+    if let Some(input) = input {
+        let (system, messages) =
+            tga_sum::one_call(&request).context("nothing was said in these days")?;
+        std::fs::write(
+            &input,
+            format!("=== system ===\n{system}\n\n=== user ===\n{messages}\n"),
+        )
+        .with_context(|| format!("writing {}", input.display()))?;
+        eprintln!(
+            "  the prompt and {} messages, as one call reads them: {}",
+            thousands(rows.len()),
+            input.display()
+        );
+        return Ok(());
+    }
+    let props = props.expect("asked for unless --input");
     let never = AtomicBool::new(false);
     let mut stdout = std::io::stdout();
     eprintln!(
@@ -1245,7 +1287,7 @@ mod tests {
             chat.rows_for(&o).iter().map(|r| r.id).collect::<Vec<_>>(),
             vec![3]
         );
-        assert_eq!(chat.estimate(&o).messages, 1);
+        assert_eq!(chat.estimate(&o, tga_sum::Sizes::of("")).messages, 1);
         // Named by the hour it ends on, so two days' last hours never share
         // a file.
         let name = o.path(Path::new("H"), &chat.topics());
@@ -1345,7 +1387,7 @@ mod tests {
             topic: None,
             after: None,
         };
-        assert_eq!(chat.estimate(&o).photos, 1);
+        assert_eq!(chat.estimate(&o, tga_sum::Sizes::of("")).photos, 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 

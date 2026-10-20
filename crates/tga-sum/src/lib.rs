@@ -61,6 +61,57 @@ pub const SINGLE_TOKENS: usize = PART_TOKENS;
 /// of the 32K context is the answer's.
 pub const INPUT_TOKENS: usize = 14_000;
 
+/// How much one call reads, for the model the server has loaded.
+///
+/// **The sizes above are the 26B-A4B's, as measured.** A smaller Gemma leaves
+/// most of the 16 GB card free, so it is given parts and inputs a few times
+/// bigger, and a server started for it a context to hold them (2026-10-20,
+/// the account holder's ask). That is not measured: the finding behind
+/// [`PART_TOKENS`] is that a model reading a long stretch skims, and nothing
+/// here shows a small model skims less. Judge its summaries before trusting
+/// them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sizes {
+    /// How many times the measured sizes.
+    pub times: usize,
+    pub part: usize,
+    pub single: usize,
+    pub input: usize,
+    /// The context a server is started with for it, unless Settings ›
+    /// Summaries › Server options name their own: room for `input` beside
+    /// the longest answer and the prompt.
+    pub context: usize,
+}
+
+impl Sizes {
+    /// The sizes for a model, by its file name: Gemma 4 E2B and E4B four
+    /// times, 12B twice, anything else — the 26B-A4B, the 31B, another
+    /// family — the measured ones.
+    pub fn of(model: &str) -> Sizes {
+        let name = model.to_lowercase();
+        let times = if !server::is_gemma(&name) {
+            1
+        } else if name.contains("e2b") || name.contains("e4b") {
+            4
+        } else if name.contains("12b") {
+            2
+        } else {
+            1
+        };
+        Sizes {
+            times,
+            part: PART_TOKENS * times,
+            single: SINGLE_TOKENS * times,
+            input: INPUT_TOKENS * times,
+            context: match times {
+                1 => 32_768,
+                2 => 49_152,
+                _ => 65_536,
+            },
+        }
+    }
+}
+
 /// The longest notes answer for one part.
 const NOTES_ANSWER: usize = 3_000;
 
@@ -173,7 +224,20 @@ impl Length {
     fn cites(self) -> bool {
         self != Length::Short
     }
+
+    /// The most bullets this length may write. The prompt asks a Brief for 2
+    /// to 6, and the 26B-A4B wrote nine on a busy day, the last ones the least
+    /// important by its own order (2026-10-20, CMŠ's 24 hours).
+    fn bullets(self) -> Option<usize> {
+        match self {
+            Length::Brief => Some(BRIEF_BULLETS),
+            _ => None,
+        }
+    }
 }
+
+/// [`Length::Brief`]'s most bullets, as its prompt asks.
+const BRIEF_BULLETS: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Lang {
@@ -393,9 +457,17 @@ pub fn summarise(
             "the model server did not say how big its context is".into(),
         ));
     }
+    let sizes = Sizes::of(&props.model);
+    if sizes.times > 1 {
+        on(Event::Say(format!(
+            "{}: parts of up to {} tokens, {}× the measured size",
+            props.model, sizes.part, sizes.times
+        )));
+    }
     let run = Run {
         client,
         props,
+        sizes,
         request,
         cache,
         cancel,
@@ -524,10 +596,47 @@ fn groups<'r>(request: &Request<'r>) -> Groups<'r> {
     }
 }
 
+/// `rows` as the model reads them, by day — with a topic tag on each line
+/// only where the lines mix topics.
+fn days_of(req: &Request, topic: Option<&str>, rows: &[&Row]) -> Vec<cut::Day> {
+    let mixed = req.forum && topic.is_none() && rows.windows(2).any(|w| w[0].topic != w[1].topic);
+    let tag = |r: &Row| mixed.then(|| req.topics.get(r.topic).cloned().unwrap_or_default());
+    cut::days(rows.iter().copied(), &tag)
+}
+
+/// What a summary of `request` hands the model when the whole range is read
+/// in one call: the system prompt, and the messages. Whole chat, not by
+/// topic; no size limit. For putting the same input to another model to
+/// compare against — nothing here sends it anywhere. `None` when nothing
+/// was said.
+pub fn one_call(request: &Request) -> Option<(String, String)> {
+    let whole = Request {
+        by_topic: false,
+        ..request.clone()
+    };
+    let (topic, rows) = groups(&whole).busy.into_iter().next()?;
+    let from = whole.from.to_string();
+    let to = whole.to.to_string();
+    let about = prompt::About {
+        chat: whole.chat,
+        topic: topic.as_deref(),
+        from: &from,
+        to: &to,
+    };
+    let system = prompt::final_text(&about, whole.length, whole.lang, false);
+    let text: Vec<String> = days_of(&whole, topic.as_deref(), &rows)
+        .iter()
+        .map(cut::Day::text)
+        .collect();
+    Some((system, text.join("\n")))
+}
+
 /// One summary's worth of state shared by its calls.
 struct Run<'a> {
     client: &'a Client,
     props: Props,
+    /// What a call reads, for `props.model`.
+    sizes: Sizes,
     request: &'a Request<'a>,
     cache: &'a Cache,
     cancel: &'a AtomicBool,
@@ -586,7 +695,7 @@ impl Run<'_> {
             rows,
             &direct,
             reserve,
-            SINGLE_TOKENS,
+            self.sizes.single,
             summary,
             on,
         )? {
@@ -595,19 +704,24 @@ impl Run<'_> {
                 &text,
                 req.length.answer(),
                 &known,
-                req.length.cites(),
+                Some(req.length),
                 on,
             )?,
             Gathered::Notes(notes, _) => {
                 let system = prompt::final_text(&about, req.length, req.lang, true);
-                let room = self.budget(&system, reserve)?.min(INPUT_TOKENS);
+                let room = self.budget(&system, reserve)?.min(self.sizes.input);
                 let notes = self.fit(&about, notes, room, on)?;
+                // The ids it was shown, not every id in the range: a
+                // neighbour of a real id (#21280 for #21281) is a message in
+                // the range, and was cited for something it does not say.
+                let shown: HashSet<i64> =
+                    notes.iter().flat_map(|n| n.ids.iter().copied()).collect();
                 self.write(
                     &system,
                     &format!("Notes:\n\n{}", lines_of(&notes)),
                     req.length.answer(),
-                    &known,
-                    req.length.cites(),
+                    &shown,
+                    Some(req.length),
                     on,
                 )?
             }
@@ -616,14 +730,8 @@ impl Run<'_> {
         Ok(text)
     }
 
-    /// `rows` as the model reads them, by day — with a topic tag on each line
-    /// only where the lines mix topics.
     fn days(&self, topic: Option<&str>, rows: &[&Row]) -> Vec<cut::Day> {
-        let req = self.request;
-        let mixed =
-            req.forum && topic.is_none() && rows.windows(2).any(|w| w[0].topic != w[1].topic);
-        let tag = |r: &Row| mixed.then(|| req.topics.get(r.topic).cloned().unwrap_or_default());
-        cut::days(rows.iter().copied(), &tag)
+        days_of(self.request, topic, rows)
     }
 
     /// What a call about `rows` reads: the messages themselves when they come
@@ -659,7 +767,7 @@ impl Run<'_> {
         }
 
         let system = prompt::notes(about, req.lang);
-        let budget = self.budget(&system, NOTES_ANSWER)?.min(PART_TOKENS);
+        let budget = self.budget(&system, NOTES_ANSWER)?.min(self.sizes.part);
         let parts = cut::cut(&days, &counts, budget);
         on(Event::Say(format!(
             "{} messages, {total} tokens: {} parts of up to {budget}",
@@ -758,7 +866,7 @@ impl Run<'_> {
     ) -> Result<Vec<Note>, Error> {
         notes.sort_by(|a, b| a.day.cmp(&b.day));
         let system = prompt::merge(about, self.request.lang);
-        let budget = self.budget(&system, NOTES_ANSWER)?.min(PART_TOKENS);
+        let budget = self.budget(&system, NOTES_ANSWER)?.min(self.sizes.part);
         for round in 1..=MERGE_ROUNDS {
             let size = self.tokens(&lines_of(&notes))?;
             if size <= room {
@@ -889,7 +997,7 @@ impl Run<'_> {
             &input.join("\n\n"),
             OVERVIEW_ANSWER,
             &HashSet::new(),
-            false,
+            None,
             on,
         )
     }
@@ -1022,7 +1130,7 @@ impl Run<'_> {
             on(Event::Text(kept.clone()));
             return Ok((format!("{head}{kept}"), false));
         }
-        match self.write(&system, &user, DOCUMENT_ANSWER, &HashSet::new(), false, on) {
+        match self.write(&system, &user, DOCUMENT_ANSWER, &HashSet::new(), None, on) {
             Ok((text, cut)) => {
                 // A cut answer is not kept: a re-run would lose that it was.
                 if !cut && !text.is_empty() {
@@ -1047,22 +1155,25 @@ impl Run<'_> {
     }
 
     /// A streamed call whose text is the summary, and whether the length
-    /// limit cut it.
+    /// limit cut it. `length` is the summary's, for its citations and its
+    /// bullets; `None` for a text that has neither.
     fn write(
         &self,
         system: &str,
         user: &str,
         answer: usize,
         known: &HashSet<i64>,
-        cites: bool,
+        length: Option<Length>,
         on: &mut dyn FnMut(Event),
     ) -> Result<(String, bool), Error> {
         let body = self.body(system, user, answer);
         let none = HashSet::new();
+        let cites = length.is_some_and(Length::cites);
         stream_cited(
             self.client,
             &body,
             if cites { known } else { &none },
+            length.and_then(Length::bullets),
             self.cancel,
             on,
         )
@@ -1096,19 +1207,22 @@ fn body(messages: Value, max_tokens: usize) -> Value {
 /// Stream `body`'s answer through the citation check: `on` gets each piece
 /// as [`Event::Text`], then [`Event::Written`]. The whole text, trimmed, and
 /// whether it stopped at its length limit — said as it happens, since the
-/// text then ends wherever the limit fell.
+/// text then ends wherever the limit fell. Bullets past `bullets` are
+/// dropped as they come, and a limit that fell among them cut nothing shown.
 fn stream_cited(
     client: &Client,
     body: &Value,
     known: &HashSet<i64>,
+    bullets: Option<usize>,
     cancel: &AtomicBool,
     on: &mut dyn FnMut(Event),
 ) -> Result<(String, bool), Error> {
     let mut filter = cite::Filter::new(known);
+    let mut most = Bullets::new(bullets);
     let mut text = String::new();
     let mut started = false;
     let streamed = client.stream(body, cancel, &mut |piece| {
-        let mut shown = filter.push(piece);
+        let mut shown = most.push(&filter.push(piece));
         if !started {
             // The model's habit of opening on a blank line.
             shown = shown.trim_start().to_string();
@@ -1119,19 +1233,95 @@ fn stream_cited(
             on(Event::Text(shown));
         }
     })?;
-    let rest = filter.finish();
+    let mut rest = most.push(&filter.finish());
+    rest.push_str(&most.finish());
     if !rest.is_empty() {
         text.push_str(&rest);
         on(Event::Text(rest));
     }
     on(Event::Written(streamed.timings));
-    if streamed.cut {
+    if most.over {
+        on(Event::Say(format!(
+            "the answer went past {} bullets; the rest is left out",
+            bullets.unwrap_or_default()
+        )));
+    }
+    let cut = streamed.cut && !most.over;
+    if cut {
         on(Event::Say(format!(
             "the answer reached its limit of {} tokens and stops there",
             body["max_tokens"].as_u64().unwrap_or_default()
         )));
     }
-    Ok((text.trim().to_string(), streamed.cut))
+    Ok((text.trim().to_string(), cut))
+}
+
+/// A streamed text cut before its bullet past the most: a line beginning
+/// `- ` or `* `. A line's first two characters are held until they show
+/// whether it is one.
+struct Bullets {
+    most: Option<usize>,
+    seen: usize,
+    /// The current line's start, while it could still be a bullet.
+    held: String,
+    /// At the start of a line.
+    start: bool,
+    /// Past the most: everything from here is dropped.
+    over: bool,
+}
+
+impl Bullets {
+    fn new(most: Option<usize>) -> Self {
+        Bullets {
+            most,
+            seen: 0,
+            held: String::new(),
+            start: true,
+            over: false,
+        }
+    }
+
+    fn push(&mut self, text: &str) -> String {
+        let Some(most) = self.most else {
+            return text.to_string();
+        };
+        let mut out = String::new();
+        for c in text.chars() {
+            if self.over {
+                break;
+            }
+            if !self.start {
+                out.push(c);
+                self.start = c == '\n';
+                continue;
+            }
+            self.held.push(c);
+            if self.held == "-" || self.held == "*" {
+                continue;
+            }
+            if self.held == "- " || self.held == "* " {
+                self.seen += 1;
+                if self.seen > most {
+                    self.over = true;
+                    self.held.clear();
+                    break;
+                }
+            }
+            out.push_str(&self.held);
+            self.held.clear();
+            self.start = c == '\n';
+        }
+        out
+    }
+
+    /// What was held when the text ended.
+    fn finish(&mut self) -> String {
+        if self.over {
+            String::new()
+        } else {
+            std::mem::take(&mut self.held)
+        }
+    }
 }
 
 /// What a call asked for JSON came back with.
@@ -1342,6 +1532,7 @@ pub fn ground(
     };
     let run = Run {
         client,
+        sizes: Sizes::of(&props.model),
         props,
         request: &whole,
         cache,
@@ -1366,7 +1557,7 @@ pub fn ground(
         &rows,
         &direct,
         reserve,
-        INPUT_TOKENS,
+        run.sizes.input,
         &mut summary,
         on,
     )?;
@@ -1384,7 +1575,7 @@ pub fn ground(
         Gathered::Notes(notes, days) => {
             let room = run
                 .budget(&prompt::chat(&about, prompt::Basis::Notes), reserve)?
-                .min(INPUT_TOKENS);
+                .min(run.sizes.input);
             let listed = run.fit(&about, notes, room, on)?;
             grounding.text = lines_of(&listed);
             grounding.notes = true;
@@ -1467,6 +1658,7 @@ pub fn answer(
         client,
         &body(Value::Array(messages), CHAT_ANSWER),
         known,
+        None,
         cancel,
         on,
     )?;
@@ -1526,7 +1718,8 @@ fn sources(
     )));
 
     // The room left after the prompt, the conversation and the answer.
-    let n_ctx = client.props()?.n_ctx;
+    let props = client.props()?;
+    let n_ctx = props.n_ctx;
     let mut spoken = String::new();
     for turn in history {
         spoken.push_str(&turn.question);
@@ -1539,7 +1732,9 @@ fn sources(
         + client.tokens(&spoken, cancel)?
         + CHAT_ANSWER
         + MARGIN;
-    let room = n_ctx.saturating_sub(used).min(INPUT_TOKENS);
+    let room = n_ctx
+        .saturating_sub(used)
+        .min(Sizes::of(&props.model).input);
 
     let index = Index::of(&grounding.days);
     for count in (1..=picked.len()).rev() {
@@ -1688,6 +1883,37 @@ impl<'g> Index<'g> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `text` through [`Bullets`], fed in pieces of `size` characters.
+    fn bulleted(most: Option<usize>, text: &str, size: usize) -> (String, bool) {
+        let mut b = Bullets::new(most);
+        let chars: Vec<char> = text.chars().collect();
+        let mut out = String::new();
+        for piece in chars.chunks(size) {
+            out.push_str(&b.push(&piece.iter().collect::<String>()));
+        }
+        out.push_str(&b.finish());
+        (out, b.over)
+    }
+
+    #[test]
+    fn a_brief_keeps_its_first_bullets_however_the_stream_cuts_them() {
+        let text = "**Gist.**\n\n- one [#1]\n- two\n- three\n* four\n- five\n";
+        for size in [1, 2, 3, 7, 100] {
+            assert_eq!(
+                bulleted(Some(2), text, size),
+                ("**Gist.**\n\n- one [#1]\n- two\n".to_string(), true),
+                "pieces of {size}"
+            );
+            assert_eq!(bulleted(Some(5), text, size), (text.to_string(), false));
+            assert_eq!(bulleted(None, text, size), (text.to_string(), false));
+        }
+        // A dash that starts no bullet is text.
+        assert_eq!(
+            bulleted(Some(1), "- a\n-5 degrees\n--\n-", 1),
+            ("- a\n-5 degrees\n--\n-".to_string(), false)
+        );
+    }
 
     #[test]
     fn merging_says_where_it_is_and_what_is_left() {

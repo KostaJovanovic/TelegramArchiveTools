@@ -34,6 +34,9 @@ struct Script {
     /// Refuse this many notes calls with `refuse_status` first.
     refusals: AtomicUsize,
     refuse_status: AtomicUsize,
+    /// A streamed answer also cites the message after the first id it was
+    /// sent: in the range, but in no note.
+    beside: AtomicBool,
     /// Every chat request, as sent.
     seen: Mutex<Vec<Value>>,
 }
@@ -198,7 +201,10 @@ fn serve(conn: TcpStream, s: &Script) {
                 let text = format!("\nA motion.\n\n1. Item one [#{STRANGER}].\n2. Item two.");
                 streamed(&mut out, &text, s.ending.load(Ordering::SeqCst));
             } else {
-                let text = format!("\nIt was decided [#{}] and denied [#{STRANGER}].", ids[0]);
+                let mut text = format!("\nIt was decided [#{}] and denied [#{STRANGER}].", ids[0]);
+                if s.beside.load(Ordering::SeqCst) {
+                    text.push_str(&format!(" Also [#{}].", ids[0] + 1));
+                }
                 streamed(&mut out, &text, s.ending.load(Ordering::SeqCst));
             }
         }
@@ -409,6 +415,35 @@ fn a_range_that_does_not_fit_goes_through_notes_and_the_cache_saves_a_rerun() {
         .iter()
         .all(|e| !matches!(e, Event::Part { cached: false, .. })));
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn over_notes_only_the_ids_the_notes_carry_may_be_cited() {
+    // Messages read whole: the message beside the first was given, so stays.
+    let fake = Fake::start(32_768);
+    fake.script.beside.store(true, Ordering::SeqCst);
+    let rows = chat(2, 10);
+    let topics = topics();
+    let req = request(&rows, &topics, Length::Detailed, false);
+    let (out, _) = run(&fake, &req, &Cache::none());
+    assert_eq!(
+        out.unwrap().sections[0].text,
+        "It was decided [#1000] and denied. Also [#1001]."
+    );
+
+    // Through notes it is in the range but in no note: the model was never
+    // shown it, so it is dropped.
+    let fake = Fake::start(6_000);
+    fake.script.beside.store(true, Ordering::SeqCst);
+    let rows = chat(6, 40);
+    let req = request(&rows, &topics, Length::Detailed, false);
+    let (out, _) = run(&fake, &req, &Cache::none());
+    let s = out.unwrap();
+    assert!(s.parts > 1, "{} parts", s.parts);
+    assert_eq!(
+        s.sections[0].text,
+        "It was decided [#1000] and denied. Also."
+    );
 }
 
 #[test]

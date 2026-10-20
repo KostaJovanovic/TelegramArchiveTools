@@ -18,8 +18,11 @@ use std::path::PathBuf;
 /// **This was `L:\9 telegram export\telegram.sqlite`**, one file holding UA
 /// KOLAB and Telegram's service chat. `tgx split` took it apart into one
 /// database per chat, `<title>\<title>.sqlite`, and the flat file is gone. UA
-/// KOLAB's own is the same chat the old file's largest was.
-const DEFAULT: &str = r"L:\9 telegram export\UA KOLAB";
+/// KOLAB's own is the same chat the old file's largest was. It was renamed on
+/// Telegram when it was archived, which started a second file under the new
+/// name; `tgx merge` folded the first into it, so the chat's one file is now
+/// the archived name's.
+const DEFAULT: &str = r"L:\9 telegram export\UA KOLAB (ARHIVIRANO)";
 
 /// The folder the exporter syncs every chat's database into.
 const OUTPUT: &str = r"L:\9 telegram export";

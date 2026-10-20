@@ -41,7 +41,8 @@ $ErrorActionPreference = "Stop"
 # Pinned, so two runs on different days write the same notes stamp.
 $stamp = "2026-10-12"
 $dbs = @(
-    "L:\9 telegram export\UA KOLAB\UA KOLAB.sqlite",
+    # UA KOLAB's own file since `merge` folded the pre-archive one into it.
+    "L:\9 telegram export\UA KOLAB (ARHIVIRANO)\UA KOLAB (ARHIVIRANO).sqlite",
     "L:\9 telegram export\Admini\Admini.sqlite",
     "L:\9 telegram export\admini x koord vol2\admini x koord vol2.sqlite"
 )
