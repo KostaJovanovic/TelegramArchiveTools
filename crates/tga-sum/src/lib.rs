@@ -710,7 +710,11 @@ impl Run<'_> {
             Gathered::Notes(notes, _) => {
                 let system = prompt::final_text(&about, req.length, req.lang, true);
                 let room = self.budget(&system, reserve)?.min(self.sizes.input);
-                let notes = self.fit(&about, notes, room, on)?;
+                let mut notes = self.fit(&about, notes, room, on)?;
+                // Most important first, then by day: ReVision's day entry. By
+                // day alone, a major dispute sat among ninety notes and two
+                // medium ones on documents took its bullet (CMŠ, 2026-10-20).
+                notes.sort_by(|a, b| (a.rank(), &a.day).cmp(&(b.rank(), &b.day)));
                 // The ids it was shown, not every id in the range: a
                 // neighbour of a real id (#21280 for #21281) is a message in
                 // the range, and was cited for something it does not say.

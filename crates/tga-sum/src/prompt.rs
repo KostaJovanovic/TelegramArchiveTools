@@ -151,7 +151,8 @@ pub fn headings(lang: Lang) -> &'static str {
 pub fn final_text(about: &About, length: Length, lang: Lang, from_notes: bool) -> String {
     let input = if from_notes {
         "notes taken from the messages, one per line: `- YYYY-MM-DD [weight] what happened \
-         [#ids]`, where the ids are the messages each note rests on"
+         [#ids]`, where the ids are the messages each note rests on. The [major] notes come \
+         first, then [medium], then [minor]; a major note matters more than any medium one"
             .to_string()
     } else {
         format!("the messages themselves. {READING}")
