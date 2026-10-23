@@ -1,0 +1,27 @@
+[package]
+name = "tga-links"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The links a chat shared: found, cleaned, fetched politely and read."
+
+# **The one crate in the analyser that goes out to the internet**, and only
+# when Settings › Summaries › Read linked pages is on. ReVision's system
+# (`studio/links.py`, `studio/linkfetch.py`), ported: the same cleaning, the
+# same kinds, the same politeness. `tga-sum` keeps its loopback-only client;
+# `tga-run` is the only crate that may depend on this one, which `layering.rs`
+# holds.
+#
+# `ureq` on Windows' own TLS (`native-tls` is SChannel there): no OpenSSL and
+# no second crypto library in the binary. `dom_smoothie` is a port of
+# Mozilla's Readability, standing in for ReVision's trafilatura.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+ureq = { version = "3.4.2", default-features = false, features = ["native-tls", "gzip"] }
+dom_smoothie = "0.18.2"
+encoding_rs = "0.8.42"
+percent-encoding = "2.3.2"
+url = "2.5.8"

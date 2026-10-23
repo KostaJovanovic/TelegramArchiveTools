@@ -690,6 +690,7 @@ fn prepare(
             &chat,
             rows,
             (from, to, Some(after)),
+            options.lang,
             server,
             keeper,
             cancel,
@@ -764,6 +765,7 @@ fn prepare(
         &chat,
         rows,
         (from, to, None),
+        options.lang,
         server,
         keeper,
         cancel,
@@ -772,8 +774,9 @@ fn prepare(
     .map(|p| (p, mark))
 }
 
-/// The rows picked, their photos read: one chat ready for the model, or
-/// `None` when nothing was picked.
+/// The rows picked, their linked pages and photos read: one chat ready for
+/// the model, or `None` when nothing was picked. `lang` is the catch-up's,
+/// which the pages are asked for in.
 #[allow(clippy::too_many_arguments)]
 fn finish(
     group: &Group,
@@ -781,6 +784,7 @@ fn finish(
     chat: &Chat,
     mut rows: Vec<tga_notes::Row>,
     (from, to, after): (NaiveDate, NaiveDate, Option<i64>),
+    lang: Lang,
     server: &Server,
     keeper: &Keeper,
     cancel: &AtomicBool,
@@ -788,6 +792,9 @@ fn finish(
 ) -> Result<Option<Prepared>, String> {
     if rows.is_empty() {
         return Ok(None);
+    }
+    if server.links {
+        summary::read_links(chat, &mut rows, lang, cancel, say)?;
     }
     let unread_photos = if server.photos {
         summary::read_photos(chat, &mut rows, server, keeper, cancel, say)?
@@ -1032,6 +1039,7 @@ mod tests {
             launch: None,
             photos: false,
             ocr: None,
+            links: false,
         }
     }
 

@@ -75,6 +75,39 @@ What changed from the plan below while building it:
     capitals stays capital in the Cyrillic fix (`Йован` → `Јован`).
   - **Off switch:** Settings › Summaries › Read text in photos
     (`summary_photos`, on by default).
+- **Linked pages are read (2026-10-20, the account holder's ask: "use the
+  same system" as ReVision).** `tga-links` ports ReVision's
+  `studio/links.py` and `studio/linkfetch.py`. Chosen with the account
+  holder: for summaries; fetched at summary time, for the days asked, kept
+  per chat; Telegram links skipped.
+  - **Find:** every link in a message's text, a `text_link`'s target and the
+    link preview's address (`tga_read::Msg::links`), cleaned as `links.clean`
+    does — so one page shared five times is one fetch.
+  - **Fetch, by kind** (`links.kind_of`): a page's main text and metadata; a
+    public Google Doc, Sheet or Slides exported as text; a public Drive file
+    downloaded and read by `tga-docs`; a social or video page's public preview
+    (X through its oEmbed). Meeting rooms, payment pages and Telegram links
+    are never fetched. ReVision's statuses (`read`, `failed`, `login`,
+    `noaccess`, `gone`, `folder`, `skip`); only `failed` is tried again.
+  - **ReVision's politeness:** 4 sites at once, each host one request at a
+    time, 2 s apart, 25 s timeout, 10 MB a page and 100 MB a file, its browser
+    and preview user agents.
+  - **Not like ReVision:** trafilatura is `dom_smoothie` (Readability); no
+    yt-dlp, so a video is its preview, not its subtitles; no images are kept;
+    no model reads each link into a card of its own — the page sits beside
+    the message, and the summary's own calls read it. The "Preview, then
+    page" choice comes to the page's own Open Graph preview when it has no
+    article, because no export here carries Telegram's preview text.
+  - **Added, not in ReVision:** nothing on this machine's network is fetched.
+    Every hop, redirects included, is resolved first and refused if an
+    address is loopback, private, link-local or CGNAT: a message can link
+    `http://127.0.0.1:8080`, which is the model server.
+  - **In the line:** `[linked page "title" (site, published day): text]`, the
+    text cut at 20,000 characters (ReVision's `TEXT_CAP`). `prompt::VERSION` 6
+    for the sentence explaining it.
+  - **Switch:** Settings › Summaries › Read linked pages (`summary_links`,
+    **off** by default); `summarise --links` on the command line. A question
+    uses the pages a summary fetched and fetches none.
 - **ReVision's sizes and rules (2026-10-15).** A summary skipped a discussion
   the account holder knew mattered. Parts were 8,000 tokens and one call took
   up to 16,000 — while ReVision's 47%→79% finding, quoted in the code, was
@@ -358,6 +391,10 @@ says to close apps rather than changing the context size.
 - **Loopback only.** The client refuses any host but `127.0.0.1`, `localhost`,
   `::1`. Chat text never leaves the machine. CLAUDE.md's "the analyser never
   touches the network" becomes exactly that sentence.
+- **Read linked pages is the exception, and only outward.** With it on,
+  `tga-links` requests the pages the messages linked: each site learns that
+  this machine opened the link, and nothing else — no chat text is sent. Off
+  by default.
 - `tgx.log` gets counts, parts, token figures and timings, **never text** — held
   by a test, like `a_detail_line_never_carries_the_message_text`.
 - Summaries sit beside the database in `Exports\`, which already carries the
@@ -372,6 +409,8 @@ tga-sum      prompts, line rendering, cutting, notes/final calls, the cache,
              a loopback HTTP client on std::net (no new dependency), and the
              llama-server lifecycle. Depends on tga-notes (Row) only.
              MUST NOT depend on tga-read, tga-db, tga-docs, grammers-* or a toolkit.
+tga-links    the linked pages: find, clean, fetch, keep. ureq on SChannel,
+             dom_smoothie. Only tga-run depends on it.
 tga-run      summary.rs: load the chat, build and filter rows, drive tga-sum,
              report Progress over mpsc + Wake (the Analysis view's pattern).
 tt-app       shell/summaries.rs: the rail view.

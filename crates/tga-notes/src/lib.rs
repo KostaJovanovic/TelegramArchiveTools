@@ -36,7 +36,7 @@ use serde_json::Value;
 
 pub mod digest;
 
-pub use digest::{write_brief, write_digest, Attachment, Row, BRIEF};
+pub use digest::{write_brief, write_digest, Attachment, Page, Row, BRIEF};
 
 /// Where the analyser looks, in order. The first that exists wins.
 pub const CANDIDATES: &[&str] = &["events.json", "analysis/events.json"];

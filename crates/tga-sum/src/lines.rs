@@ -23,6 +23,39 @@ pub const TEXT_CHARS: usize = 1500;
 /// The text read off a photo past this is cut: ReVision's `OCR_CAP`.
 pub const PHOTO_CHARS: usize = 1500;
 
+/// A linked page's text past this is cut: ReVision's `TEXT_CAP` for a link
+/// (~7K tokens). A message is never split, so a line with a long page is a
+/// part of its own, as a long document's is.
+pub const PAGE_CHARS: usize = 20_000;
+
+/// ` [linked page "title" (site, published day): text]`.
+fn page_part(page: &tga_notes::Page) -> String {
+    let mut s = String::from(" [linked page");
+    if !page.title.is_empty() {
+        s.push_str(&format!(" \"{}\"", flat(&page.title, 300)));
+    }
+    let about: Vec<String> = [
+        flat(&page.site, 100),
+        if page.date.is_empty() {
+            String::new()
+        } else {
+            format!("published {}", page.date)
+        },
+    ]
+    .into_iter()
+    .filter(|p| !p.is_empty())
+    .collect();
+    if !about.is_empty() {
+        s.push_str(&format!(" ({})", about.join(", ")));
+    }
+    let text = flat(&page.text, PAGE_CHARS);
+    if !text.is_empty() {
+        s.push_str(&format!(": {text}"));
+    }
+    s.push(']');
+    s
+}
+
 /// One message, rendered. `topic` names its topic when lines mix topics.
 pub fn line(row: &Row, topic: Option<&str>) -> String {
     let time = row.t.get(11..16).unwrap_or(&row.t);
@@ -84,6 +117,9 @@ pub fn line(row: &Row, topic: Option<&str>) -> String {
             s.push_str(&format!(" [{kind} \"{}\"]", flat(&row.file, 200)));
         }
     }
+    for page in &row.pages {
+        s.push_str(&page_part(page));
+    }
     if let Some(n) = row.reactions.filter(|&n| n > 0) {
         s.push_str(&format!(" ({n} reaction{})", if n == 1 { "" } else { "s" }));
     }
@@ -95,7 +131,11 @@ pub fn line(row: &Row, topic: Option<&str>) -> String {
 /// nothing attached. ReVision's `normalize.TRIVIAL`, except that any run of
 /// "ha" counts ("hahaha" slipped through its pattern).
 pub fn trivial(row: &Row) -> bool {
-    if row.service.is_some() || row.doc.is_some() || !row.photo_text.is_empty() {
+    if row.service.is_some()
+        || row.doc.is_some()
+        || !row.photo_text.is_empty()
+        || !row.pages.is_empty()
+    {
         return false;
     }
     let text = row.text.trim();
@@ -243,6 +283,29 @@ mod tests {
             line(&r, None),
             "#4 10:30 Ana: vidi [photo with text: Protest u petak u podne]"
         );
+    }
+
+    #[test]
+    fn a_linked_page_follows_the_message_with_its_title_site_and_text() {
+        let mut r = row(6, "2024-12-02 10:40", "Ana", "https://portal.rs/a");
+        r.pages.push(tga_notes::Page {
+            title: "Studenti blokirali fakultet".into(),
+            site: "Portal".into(),
+            date: "2024-12-02".into(),
+            text: "Plenum je\n\ndoneo odluku.".into(),
+        });
+        r.reactions = Some(2);
+        assert_eq!(
+            line(&r, None),
+            "#6 10:40 Ana: https://portal.rs/a [linked page \"Studenti blokirali fakultet\" \
+             (Portal, published 2024-12-02): Plenum je doneo odluku.] (2 reactions)"
+        );
+        r.pages[0] = tga_notes::Page {
+            text: "x".repeat(PAGE_CHARS + 10),
+            ..Default::default()
+        };
+        let out = line(&r, None);
+        assert!(out.contains(&format!("[linked page: {}…]", "x".repeat(PAGE_CHARS - 1))));
     }
 
     #[test]

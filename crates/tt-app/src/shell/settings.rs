@@ -144,8 +144,10 @@ impl Shell {
             ui,
             "output_dir",
             "Export folder",
-            "Each chat gets a folder here, or a database in a folder of its own. \
-             Analysis lists what is in it.",
+            Help::Pop(
+                "Each chat gets a folder here, or a database in a folder of its own. \
+                 Analysis lists what is in it.",
+            ),
             &mut self.form.output_dir,
             "Where exports go",
             &["Browse"],
@@ -455,7 +457,9 @@ impl Shell {
             ui,
             "summary_models",
             "Models folder",
-            "The models and llama-server.exe, each in it or in a folder of its own inside it.",
+            Help::Pop(
+                "The models and llama-server.exe, each in it or in a folder of its own inside it.",
+            ),
             &mut self.form.summary_models,
             "Where the models are",
             &["Browse", "Open"],
@@ -528,7 +532,7 @@ impl Shell {
             ui,
             "summary_server",
             "Model server",
-            &about_server,
+            Help::Pop(&about_server),
             &mut self.form.summary_server,
             "Blank: llama-server.exe in the models folder",
             &["Browse"],
@@ -547,7 +551,7 @@ impl Shell {
             ui,
             "summary_options",
             "Server options",
-            "For a server started from here. Blank suits Gemma 4 26B on a 16 GB card.",
+            Help::Fold(SERVER_OPTIONS, &SERVER_FLAGS),
             &mut self.form.summary_options,
             tga_run::tga_sum::server::DEFAULT_OPTIONS,
             &[],
@@ -591,12 +595,29 @@ impl Shell {
              then makes way for the model.",
             &p,
         );
+        let links = switch(
+            ui,
+            "summary_links",
+            "Read linked pages",
+            self.settings.summary_links,
+            true,
+            "Fetches the pages the days' messages linked — articles, public Google Docs and \
+             Drive files, the public preview of a social post or a video — and puts what they \
+             say beside the message. Goes out to the internet: each site sees a visit from \
+             this machine. Each page is fetched once and kept beside the chat. Telegram \
+             links, meeting rooms and payment pages are never fetched, nor anything on this \
+             machine's own network.",
+            &p,
+        );
         self.how_to_add_a_model(ui, &folder);
         if commit {
             self.commit_settings();
         }
         if photos {
             self.toggle_setting(|s| s.summary_photos = !s.summary_photos);
+        }
+        if links {
+            self.toggle_setting(|s| s.summary_links = !s.summary_links);
         }
         if let Some(l) = lang {
             self.summaries.lang = l;
@@ -1042,6 +1063,107 @@ const ADD_A_MODEL: [&str; 5] = [
 const LLAMA_RELEASES: &str = "https://github.com/ggml-org/llama.cpp/releases";
 const HUGGING_FACE: &str = "https://huggingface.co/models?library=gguf";
 
+/// Settings › Summaries › Server options, unfolded. The defaults are
+/// `tga_sum::server::DEFAULT_OPTIONS`; keep the first group in step with it.
+const SERVER_OPTIONS: &str = "Passed to llama-server when a server is started from here; one \
+     already running is used as it is. Blank uses the grey line, which suits Gemma 4 26B on a \
+     16 GB card, with a longer -c for a smaller Gemma. Anything typed replaces that whole line, \
+     so start from it and change what you need. --host, --port, -m, --mmproj and --api-key are \
+     set here and dropped from what you type: the server only ever listens on this machine.";
+const SERVER_FLAGS: [(&str, &[(&str, &str)]); 2] = [
+    (
+        "The default line",
+        &[
+            (
+                "-c 32768",
+                "Context, in tokens: everything the model reads and writes in one call. A \
+                 larger context costs graphics memory; lower it if the model does not fit.",
+            ),
+            (
+                "-ngl 99",
+                "How many of the model's layers go on the graphics card; 99 is all of them. \
+                 Lower it on a smaller card and the rest run from RAM, more slowly.",
+            ),
+            (
+                "-fa on",
+                "Flash attention: the context takes less memory and is read faster. on, off \
+                 or auto.",
+            ),
+            (
+                "--jinja",
+                "Talk to the model through the chat template in its file. Gemma needs it.",
+            ),
+            (
+                "--load-mode none",
+                "Read the model into memory instead of mapping the file. Mapped, Windows counted \
+                 about 22 GB against the server and the machine ran short. Older llama.cpp \
+                 builds call this --no-mmap.",
+            ),
+            (
+                "-rea off",
+                "Reasoning off: the model answers without writing out its thinking first. \
+                 Faster, and what the prompts expect.",
+            ),
+            (
+                "-np 1",
+                "One request at a time, with the whole context for it. More slots split the \
+                 context between them, and nothing here asks two things at once.",
+            ),
+            (
+                "-b 2048",
+                "How many tokens of the input are taken per step.",
+            ),
+            (
+                "-ub 1024",
+                "How many of those go to the card at once. Higher reads the input faster and \
+                 costs memory; lower it if loading runs out.",
+            ),
+        ],
+    ),
+    (
+        "Others worth knowing",
+        &[
+            (
+                "-ncmoe 6",
+                "Keeps the experts of the first N layers in RAM. For a mixture-of-experts \
+                 model like the 26B-A4B this fits a smaller card for little loss of speed; \
+                 raise N until it loads.",
+            ),
+            (
+                "-ctk q8_0 -ctv q8_0",
+                "Holds the context in 8 bits: about half its memory, for a small loss. -ctv \
+                 needs -fa on.",
+            ),
+            (
+                "-t 8",
+                "CPU threads for the part of the work not on the card.",
+            ),
+            (
+                "--mlock",
+                "Keeps the model in RAM, never paged out to disk.",
+            ),
+            (
+                "-dev CUDA0",
+                "Which graphics card to use, where there is more than one. \
+                 --list-devices names them.",
+            ),
+            (
+                "--chat-template-file \"C:\\path\\template.jinja\"",
+                "A chat template for a model whose file carries none. Quote a path with \
+                 spaces in it.",
+            ),
+            (
+                "-v",
+                "Writes more into llama-server.log, in TelegramToolsData, when a start fails.",
+            ),
+            (
+                "--temp, --top-k, --top-p",
+                "Have no effect here: every request sends its own sampling.",
+            ),
+        ],
+    ),
+];
+
 /// How far a `?` hangs past the column's right edge: its gap and its square.
 const HANG: f32 = OPTION_GAP + OPTION_H;
 
@@ -1087,27 +1209,59 @@ fn option<R>(
     p: &Palette,
     control: impl FnOnce(&mut Ui, f32) -> R,
 ) -> R {
-    ui.horizontal(|ui| {
-        let width = ui.available_width();
-        let origin = ui.cursor().min;
-        let out = control(ui, width);
-        if let Some(why) = why {
-            // A child placed by hand, not a widget in the line: the line is
-            // the column's width, and the `?` is not in it.
-            let square = egui::Rect::from_min_size(
-                egui::pos2(origin.x + width + OPTION_GAP, origin.y),
-                egui::Vec2::splat(OPTION_H),
-            );
-            let mut beside = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(square)
-                    .layout(Layout::left_to_right(Align::Min)),
-            );
-            help_button(&mut beside, key, why, p);
-        }
-        out
-    })
-    .inner
+    explained(ui, key, why.map(Help::Pop), p, control)
+}
+
+/// What a `?` opens.
+#[derive(Clone, Copy)]
+enum Help<'a> {
+    /// A sentence or two, in a popup over the boxes below.
+    Pop(&'a str),
+    /// A reference, unfolded under the line and pushing the boxes below it
+    /// down: too long for a popup, and read while typing into the field it
+    /// is about, which a popup closes on. A sentence, then groups of
+    /// `(flag, what it does)` under their headings.
+    Fold(&'a str, &'a [(&'a str, &'a [(&'a str, &'a str)])]),
+}
+
+/// [`option`], with either kind of [`Help`].
+fn explained<R>(
+    ui: &mut Ui,
+    key: &str,
+    help: Option<Help>,
+    p: &Palette,
+    control: impl FnOnce(&mut Ui, f32) -> R,
+) -> R {
+    let (out, open) = ui
+        .horizontal(|ui| {
+            let width = ui.available_width();
+            let origin = ui.cursor().min;
+            let out = control(ui, width);
+            let mut open = false;
+            if let Some(help) = help {
+                // A child placed by hand, not a widget in the line: the line
+                // is the column's width, and the `?` is not in it.
+                let square = egui::Rect::from_min_size(
+                    egui::pos2(origin.x + width + OPTION_GAP, origin.y),
+                    egui::Vec2::splat(OPTION_H),
+                );
+                let mut beside = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(square)
+                        .layout(Layout::left_to_right(Align::Min)),
+                );
+                match help {
+                    Help::Pop(why) => help_button(&mut beside, key, why, p),
+                    Help::Fold(..) => open = fold_button(&mut beside, key, p),
+                }
+            }
+            (out, open)
+        })
+        .inner;
+    if let (true, Some(Help::Fold(why, groups))) = (open, help) {
+        fold(ui, why, groups, p);
+    }
+    out
 }
 
 /// A setting with a fixed set of values, as `Name: Value`. A click moves to
@@ -1184,14 +1338,14 @@ fn path_option(
     ui: &mut Ui,
     key: &str,
     label: &str,
-    why: &str,
+    help: Help,
     buffer: &mut String,
     hint: &str,
     buttons: &[&str],
     p: &Palette,
 ) -> (bool, Option<usize>) {
     ui.label(meta(label, p));
-    option(ui, key, Some(why), p, |ui, width| {
+    explained(ui, key, Some(help), p, |ui, width| {
         let gap = ui.spacing().item_spacing.x;
         let room = (width - buttons.len() as f32 * (BUTTON_W + gap)).max(NUMBER_W);
         let entry = ui.add_sized(egui::vec2(room, OPTION_H), field(buffer, p).hint_text(hint));
@@ -1313,6 +1467,57 @@ fn help_button(ui: &mut Ui, key: &str, why: &str, p: &Palette) {
         .show(|ui| {
             ui.set_max_width(HELP_W);
             ui.add(egui::Label::new(text(why, p)).wrap());
+        });
+}
+
+/// The square `?` of a [`Help::Fold`]: a click opens the explanation under
+/// the line and another closes it. Returns whether it is open. Open, its
+/// border stays at the ink colour, as under the pointer.
+///
+/// Kept in egui's memory under `key`, like the popup, so it stays open while
+/// the field beside it is typed into, and for the rest of the session.
+fn fold_button(ui: &mut Ui, key: &str, p: &Palette) -> bool {
+    let id = egui::Id::new(("settings-fold", key));
+    let mut open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let hit = option_box(ui, OPTION_H, "?", true, p);
+    if hit.clicked() {
+        open = !open;
+        ui.data_mut(|d| d.insert_temp(id, open));
+    }
+    if open {
+        ui.painter().rect_stroke(
+            hit.rect,
+            egui::CornerRadius::ZERO,
+            Stroke::new(1.0_f32, p.fg),
+            egui::StrokeKind::Inside,
+        );
+    }
+    open
+}
+
+/// A [`Help::Fold`]'s explanation, the column's width, in the popup's frame.
+fn fold(ui: &mut Ui, why: &str, groups: &[(&str, &[(&str, &str)])], p: &Palette) {
+    egui::Frame::NONE
+        .fill(p.bg)
+        .stroke(Stroke::new(1.0_f32, p.hairline))
+        .inner_margin(Margin::same(12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.add(egui::Label::new(text(why, p)).wrap());
+            for (heading, flags) in groups {
+                ui.add_space(space::BREAK / 2.0);
+                ui.label(eyebrow(heading, p));
+                for (flag, what) in *flags {
+                    ui.add_space(space::TIGHT);
+                    ui.label(
+                        egui::RichText::new(*flag)
+                            .font(tgx_ui::fonts::mono(window::READING))
+                            .color(p.fg),
+                    );
+                    ui.add(egui::Label::new(meta(*what, p)).wrap());
+                }
+            }
         });
 }
 

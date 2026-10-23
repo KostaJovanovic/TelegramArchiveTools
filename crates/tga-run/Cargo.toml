@@ -27,6 +27,9 @@ tga-report = { path = "../tga-report" }
 # The summary: rows in, a local model's text out. It reads no export itself,
 # which is why the reading happens here.
 tga-sum = { path = "../tga-sum" }
+# The pages a chat linked, fetched for a summary that asks for them: the
+# analyser's one way out to the internet, and only this crate may take it.
+tga-links = { path = "../tga-links" }
 
 anyhow = { workspace = true }
 

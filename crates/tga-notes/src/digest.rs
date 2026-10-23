@@ -58,6 +58,21 @@ pub struct Row {
     /// The text in the message's photo, when something read it: a summary's
     /// OCR (`tga-sum`). The digest neither fills nor writes it.
     pub photo_text: String,
+    /// The pages the message linked, when a summary fetched them
+    /// (`tga-links`). The digest neither fills nor writes it.
+    pub pages: Vec<Page>,
+}
+
+/// A page a message linked to, as read. Strings for the reason
+/// [`Attachment`]'s are.
+#[derive(Debug, Clone, Default)]
+pub struct Page {
+    pub title: String,
+    pub site: String,
+    /// When the page says it was published, `YYYY-MM-DD`, or empty.
+    pub date: String,
+    /// Its main text, or its description when it had no more.
+    pub text: String,
 }
 
 /// A document attachment, read.

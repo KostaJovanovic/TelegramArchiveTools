@@ -281,6 +281,11 @@ pub struct Settings {
     /// Read the text in the range's photos (PaddleOCR-VL, in the models
     /// folder) before the summary is written.
     pub summary_photos: bool,
+    /// Fetch the web pages the range's messages linked, and put what they
+    /// say beside the message (`tga-links`, ReVision's system). **The one
+    /// setting that sends a summary out to the internet**, so it is off until
+    /// it is turned on.
+    pub summary_links: bool,
     /// The Summaries view's last choices, so the next summary starts where
     /// the last one left off: `short`/`detailed`/`sections`, `sr`/`en`/`chat`.
     pub summary_length: String,
@@ -446,6 +451,7 @@ impl Default for Settings {
             summary_options: String::new(),
             summary_idle_minutes: 2,
             summary_photos: true,
+            summary_links: false,
             summary_length: "short".into(),
             summary_lang: "sr".into(),
             summary_from_last: true,

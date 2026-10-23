@@ -509,6 +509,7 @@ pub(crate) fn digest_row(
             Some(msg.reaction_total())
         },
         photo_text: String::new(),
+        pages: Vec::new(),
     }
 }
 

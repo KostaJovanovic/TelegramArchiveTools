@@ -35,7 +35,7 @@ TelegramTools summarise -- a local model's summary of a date range
 
     `summarize` and `summary` are the same command. Needs a llama-server
     already running on this machine with the model loaded (the window's
-    Summaries view starts one); nothing leaves 127.0.0.1.
+    Summaries view starts one); nothing leaves 127.0.0.1 unless --links.
 
 Options
     --from YYYY-MM-DD   the first day, inclusive
@@ -57,6 +57,10 @@ Options
     --out PATH          where to write it (default: beside the export, in
                         analysis\\summaries\\)
     --no-cache          ask the model again for every part
+    --links             read the web pages the messages linked, and put what
+                        they say beside the message. Goes out to the
+                        internet, politely; each page is fetched once and kept
+                        in analysis\\summaries\\cache\\links.json
     --any-model         use whatever model the server has loaded, not only
                         a Gemma; the prompts and sampling are tuned for Gemma
     --input PATH        ask no model: write the prompt and the messages a
@@ -236,6 +240,29 @@ impl Chat {
         out
     }
 
+    /// The links among `rows`: the row each is on, and the links its message
+    /// carries that are ever fetched, cleaned and each once.
+    fn links(&self, rows: &[tga_notes::Row]) -> Vec<(usize, Vec<tga_links::Link>)> {
+        let at: std::collections::HashMap<i64, usize> =
+            rows.iter().enumerate().map(|(i, r)| (r.id, i)).collect();
+        let mut out = Vec::new();
+        for m in &self.export.msgs {
+            let Some(&row) = at.get(&m.id) else { continue };
+            let mut links = tga_links::found(&m.text);
+            for l in m.links.iter().filter_map(|u| tga_links::link(u)) {
+                if !links.iter().any(|o| o.url == l.url) {
+                    links.push(l);
+                }
+            }
+            links.retain(|l| l.kind.fetched());
+            if !links.is_empty() {
+                out.push((row, links));
+            }
+        }
+        out.sort_by_key(|(row, _)| *row);
+        out
+    }
+
     fn bytes(&self, picture: &Picture) -> Option<Vec<u8>> {
         match picture {
             Picture::Disk(path) => std::fs::read(path).ok(),
@@ -289,6 +316,123 @@ fn readings_at(home: &Path) -> Readings {
             .join("cache")
             .join("photos.json"),
     )
+}
+
+/// The linked pages kept beside an export.
+fn pages_at(home: &Path) -> tga_links::Pages {
+    tga_links::Pages::at(
+        &home
+            .join("analysis")
+            .join("summaries")
+            .join("cache")
+            .join("links.json"),
+    )
+}
+
+/// What the model reads of a card.
+fn page_of(card: &tga_links::Card) -> tga_notes::Page {
+    tga_notes::Page {
+        title: card.title.clone(),
+        site: card.site.clone(),
+        date: card.date.clone(),
+        text: card.text.clone(),
+    }
+}
+
+/// Fill `rows`' pages from what was fetched before; the links never fetched,
+/// or that failed for a reason that may pass, are returned, each once.
+fn kept_pages(
+    pages: &tga_links::Pages,
+    rows: &mut [tga_notes::Row],
+    links: &[(usize, Vec<tga_links::Link>)],
+) -> Vec<tga_links::Link> {
+    let mut todo: Vec<tga_links::Link> = Vec::new();
+    for (row, list) in links {
+        rows[*row].pages = list
+            .iter()
+            .filter_map(|l| pages.get(&l.url))
+            .filter(|c| c.readable())
+            .map(page_of)
+            .collect();
+        for l in list {
+            if pages.wants(l) && !todo.iter().any(|t| t.url == l.url) {
+                todo.push(l.clone());
+            }
+        }
+    }
+    todo
+}
+
+/// The language a page is asked for in: the summary's, and none when it is
+/// written in whatever the chat is.
+fn page_lang(lang: Lang) -> Option<&'static str> {
+    match lang {
+        Lang::Serbian => Some("sr"),
+        Lang::English => Some("en"),
+        Lang::AsChat => None,
+    }
+}
+
+/// Put the pages the range's messages linked into their rows: what was
+/// fetched before at once, the rest fetched now (`tga-links`, ReVision's
+/// system). **This goes out to the internet**, which is why it is a setting
+/// and off until it is turned on. Links are an extra, so a page that cannot
+/// be had is counted and the summary goes on; only a stop ends the run.
+/// `say` takes the narration, which names counts and never a link.
+pub(crate) fn read_links(
+    chat: &Chat,
+    rows: &mut [tga_notes::Row],
+    lang: Lang,
+    cancel: &AtomicBool,
+    say: &dyn Fn(String),
+) -> Result<(), String> {
+    let links = chat.links(rows);
+    if links.is_empty() {
+        return Ok(());
+    }
+    let mut pages = pages_at(&chat.home);
+    let todo = kept_pages(&pages, rows, &links);
+    if !todo.is_empty() {
+        let started = Instant::now();
+        let total = todo.len();
+        say(format!("Reading linked pages: 0 of {total}"));
+        // A linked file is read as an attached one is.
+        let fetcher = tga_links::Fetcher::new(
+            page_lang(lang),
+            Box::new(|ext, bytes| {
+                tga_docs::extract_bytes(bytes, &format!("linked.{ext}")).unwrap_or_default()
+            }),
+        );
+        let mut counts: std::collections::BTreeMap<&'static str, usize> = Default::default();
+        let mut done = 0;
+        fetcher.fetch_all(todo, cancel, &mut |card| {
+            *counts.entry(card.status.word()).or_default() += 1;
+            pages.put(card);
+            done += 1;
+            if done % 5 == 0 {
+                pages.save();
+                say(format!("Reading linked pages: {done} of {total}"));
+            }
+        });
+        pages.save();
+        let read = counts.remove("read").unwrap_or(0);
+        let rest: Vec<String> = counts.iter().map(|(k, n)| format!("{n} {k}")).collect();
+        let msg = format!(
+            "Read {read} of {done} linked pages in {:.0} s{}",
+            started.elapsed().as_secs_f64(),
+            if rest.is_empty() {
+                String::new()
+            } else {
+                format!("; not read: {}", rest.join(", "))
+            }
+        );
+        say(msg);
+        if cancel.load(Ordering::Relaxed) {
+            return Err(tga_sum::Error::Cancelled.to_string());
+        }
+        kept_pages(&pages, rows, &links);
+    }
+    Ok(())
 }
 
 /// "The last 24 hours" of a chat: see [`Chat::last_hours`].
@@ -561,6 +705,9 @@ pub struct Server {
     /// The OCR to read them with, on the same port: `None` when its files
     /// were not found beside the model.
     pub ocr: Option<Launch>,
+    /// Whether to read the pages the range's messages linked first: the one
+    /// switch that lets a summary go out to the internet.
+    pub links: bool,
 }
 
 /// What a summary run tells the window.
@@ -600,7 +747,8 @@ impl Job {
 }
 
 /// Write a summary on a worker. The server is started on it too, if it has to
-/// be, so the window never waits for a model to load.
+/// be, so the window never waits for a model to load; the linked pages are
+/// read on it, when the server asks for them.
 pub fn spawn(
     chat: Arc<Chat>,
     options: Options,
@@ -635,6 +783,13 @@ fn write(
     let mut rows = chat.rows_for(options);
     if rows.is_empty() {
         return Err(format!("Nothing was said in {}.", options.span()));
+    }
+    // The pages first: they need no model, and the server may still be
+    // loading for nothing if the run is stopped while they are read.
+    if server.links {
+        read_links(chat, &mut rows, options.lang, cancel, &|s| {
+            tx.send(Progress::Step(s))
+        })?;
     }
     // The photos before Gemma: the card holds one model at a time, and the
     // OCR is the small one to load and unload.
@@ -795,6 +950,12 @@ fn answer(
                     &mut rows,
                     pictures,
                 );
+            }
+            // Pages fetched before; a question fetches none, as it reads
+            // no photos.
+            if server.links {
+                let links = chat.links(&rows);
+                kept_pages(&pages_at(&chat.home), &mut rows, &links);
             }
             rows
         }
@@ -963,6 +1124,7 @@ pub fn run(args: Vec<String>, models: &Path) -> Result<()> {
     let mut any_model = false;
     let mut last_day = false;
     let mut input: Option<PathBuf> = None;
+    let mut links = false;
 
     let day = |v: Option<&String>, flag: &str| -> Result<NaiveDate> {
         let v = v.with_context(|| format!("{flag} needs a day, YYYY-MM-DD"))?;
@@ -1001,6 +1163,7 @@ pub fn run(args: Vec<String>, models: &Path) -> Result<()> {
             "--no-cache" => cache = false,
             "--any-model" => any_model = true,
             "--last-24h" => last_day = true,
+            "--links" => links = true,
             "--input" => input = Some(PathBuf::from(rest.next().context("--input needs a path")?)),
             other => bail!("Unknown option: {other}\n\n{USAGE}"),
         }
@@ -1105,6 +1268,11 @@ pub fn run(args: Vec<String>, models: &Path) -> Result<()> {
             count - left.len()
         );
     }
+    let never = AtomicBool::new(false);
+    if links {
+        read_links(&chat, &mut rows, lang, &never, &|s| eprintln!("  {s}"))
+            .map_err(anyhow::Error::msg)?;
+    }
     if rows.is_empty() {
         let span = chat
             .span()
@@ -1146,7 +1314,6 @@ pub fn run(args: Vec<String>, models: &Path) -> Result<()> {
         return Ok(());
     }
     let props = props.expect("asked for unless --input");
-    let never = AtomicBool::new(false);
     let mut stdout = std::io::stdout();
     eprintln!(
         "  model {} on 127.0.0.1:{port}, {} tokens of context",
@@ -1388,6 +1555,35 @@ mod tests {
             after: None,
         };
         assert_eq!(chat.estimate(&o, tga_sum::Sizes::of("")).photos, 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_link_fetched_before_fills_its_line_and_nothing_is_fetched_again() {
+        let dir = synthetic("links");
+        let chat = Chat::open(&dir, None).unwrap();
+        let mut rows = chat.rows(day("2025-01-02"), day("2025-01-02"), None);
+        let links = chat.links(&rows);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].0, 1);
+        assert_eq!(links[0].1[0].url, "https://example.com");
+
+        let mut pages = pages_at(&chat.home);
+        assert_eq!(kept_pages(&pages, &mut rows, &links).len(), 1);
+        pages.put(tga_links::Card {
+            link: "https://example.com".into(),
+            status: tga_links::Status::Read,
+            title: "Example Domain".into(),
+            text: "This domain is for use in examples.".into(),
+            ..Default::default()
+        });
+        pages.save();
+        // Everything is kept, so this asks nothing of the network.
+        let never = AtomicBool::new(false);
+        read_links(&chat, &mut rows, Lang::English, &never, &|_| {}).unwrap();
+        assert_eq!(rows[1].pages.len(), 1);
+        assert_eq!(rows[1].pages[0].title, "Example Domain");
+        assert!(rows[0].pages.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

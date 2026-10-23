@@ -710,11 +710,7 @@ impl Run<'_> {
             Gathered::Notes(notes, _) => {
                 let system = prompt::final_text(&about, req.length, req.lang, true);
                 let room = self.budget(&system, reserve)?.min(self.sizes.input);
-                let mut notes = self.fit(&about, notes, room, on)?;
-                // Most important first, then by day: ReVision's day entry. By
-                // day alone, a major dispute sat among ninety notes and two
-                // medium ones on documents took its bullet (CMŠ, 2026-10-20).
-                notes.sort_by(|a, b| (a.rank(), &a.day).cmp(&(b.rank(), &b.day)));
+                let notes = self.fit(&about, notes, room, on)?;
                 // The ids it was shown, not every id in the range: a
                 // neighbour of a real id (#21280 for #21281) is a message in
                 // the range, and was cited for something it does not say.
@@ -1183,29 +1179,77 @@ impl Run<'_> {
         )
     }
 
-    /// A request body, with Gemma's own sampling and its thinking off.
+    /// A request body, with the loaded model's own sampling and its thinking
+    /// off.
     fn body(&self, system: &str, user: &str, max_tokens: usize) -> Value {
-        body(
+        sampled(
             json!([
                 { "role": "system", "content": system },
                 { "role": "user", "content": user }
             ]),
             max_tokens,
+            Sampling::of(&self.props.model),
         )
     }
 }
 
+/// What a model's makers give as its sampling, thinking off.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sampling {
+    pub temperature: f64,
+    pub top_k: u32,
+    pub top_p: f64,
+    /// Sent only when not zero, so Gemma's requests are as they were.
+    pub presence_penalty: f64,
+}
+
+impl Sampling {
+    /// Gemma's own. ReVision tried 0.2: it looped past the answer limit on 6
+    /// of 13 parts.
+    pub const GEMMA: Sampling = Sampling {
+        temperature: 1.0,
+        top_k: 64,
+        top_p: 0.95,
+        presence_penalty: 0.0,
+    };
+
+    /// Qwen3.8's model card, for its non-thinking mode.
+    pub const QWEN: Sampling = Sampling {
+        temperature: 0.7,
+        top_k: 20,
+        top_p: 0.8,
+        presence_penalty: 1.5,
+    };
+
+    /// By the model's file name; Gemma's for anything not a Qwen.
+    pub fn of(model: &str) -> Sampling {
+        if model.to_lowercase().contains("qwen") {
+            Sampling::QWEN
+        } else {
+            Sampling::GEMMA
+        }
+    }
+}
+
 /// A request body for `messages`, with Gemma's own sampling and its thinking
-/// off.
+/// off: a question's, which does not look at the model loaded.
 fn body(messages: Value, max_tokens: usize) -> Value {
-    json!({
+    sampled(messages, max_tokens, Sampling::GEMMA)
+}
+
+fn sampled(messages: Value, max_tokens: usize, s: Sampling) -> Value {
+    let mut body = json!({
         "messages": messages,
-        "temperature": 1.0,
-        "top_k": 64,
-        "top_p": 0.95,
+        "temperature": s.temperature,
+        "top_k": s.top_k,
+        "top_p": s.top_p,
         "max_tokens": max_tokens,
         "chat_template_kwargs": { "enable_thinking": false }
-    })
+    });
+    if s.presence_penalty != 0.0 {
+        body["presence_penalty"] = json!(s.presence_penalty);
+    }
+    body
 }
 
 /// Stream `body`'s answer through the citation check: `on` gets each piece

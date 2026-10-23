@@ -98,6 +98,10 @@ pub struct Msg {
     pub sticker_emoji: String,
     pub emoji: Vec<String>,
     pub domains: Vec<String>,
+    /// Every address the message linked, as written: a link in the text, a
+    /// `text_link`'s target, the link preview's page. For a summary that
+    /// reads linked pages (`tga-links`); nothing else reads it.
+    pub links: Vec<String>,
     pub mentions: Vec<String>,
     pub hashtags: Vec<String>,
     pub reactions: Vec<Reaction>,
@@ -438,8 +442,15 @@ fn entities(raw: &Value, out: &mut Msg) {
             let kind = as_text(ent.get("type"));
             let text = as_text(ent.get("text"));
             match kind.as_str() {
-                "link" => out.domains.push(domain_of(&text)),
-                "text_link" => out.domains.push(domain_of(&as_text(ent.get("href")))),
+                "link" => {
+                    out.domains.push(domain_of(&text));
+                    out.links.push(text);
+                }
+                "text_link" => {
+                    let href = as_text(ent.get("href"));
+                    out.domains.push(domain_of(&href));
+                    out.links.push(href);
+                }
                 "mention" => out
                     .mentions
                     .push(text.trim_start_matches('@').to_lowercase()),
@@ -466,6 +477,9 @@ fn entities(raw: &Value, out: &mut Msg) {
                 let host = domain_of(&url);
                 if !host.is_empty() && !out.domains.contains(&host) {
                     out.domains.push(host);
+                }
+                if !out.links.contains(&url) {
+                    out.links.push(url);
                 }
             }
         }
@@ -567,6 +581,7 @@ pub fn one(raw: &Value, topic: usize, root: Option<i64>) -> Option<Msg> {
         media_saved: false,
         sticker_emoji: as_text(raw.get("sticker_emoji")),
         domains: Vec::new(),
+        links: Vec::new(),
         mentions: Vec::new(),
         hashtags: Vec::new(),
         reactions: Vec::new(),

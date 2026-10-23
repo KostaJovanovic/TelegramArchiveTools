@@ -48,6 +48,7 @@ pub fn msg(id: i64, who: &str, when: NaiveDateTime, reply_to: Option<i64>) -> Ms
         sticker_emoji: String::new(),
         emoji: Vec::new(),
         domains: Vec::new(),
+        links: Vec::new(),
         mentions: Vec::new(),
         hashtags: Vec::new(),
         reactions: Vec::new(),

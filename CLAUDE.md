@@ -11,7 +11,9 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 - **The analyser** (`tga-*`) reads a finished export, a folder or a database,
   and writes one self-contained `report.html` beside it. It never touches the
   network — except that a **summary** (`tga-sum`) talks to a model server on
-  `127.0.0.1`, and only when asked for one.
+  `127.0.0.1`, and only when asked for one; and with Settings › Summaries ›
+  **Read linked pages** on (off by default), `tga-links` fetches the pages a
+  summary's messages linked.
 
 They were two repositories until 2026-10-12; `TELEGRAMTOOLS.md` is the merge
 plan and its log, and says which phase is done. They ship as one binary,
@@ -75,6 +77,7 @@ cargo run -p tt-app -- analyse <output folder> --refresh [--force]
 cargo run -p tt-app -- analyse --from-stats <s.json> --out <p>
 cargo run -p tt-app -- summarise <folder or .sqlite> --from D [--to D]
         [--short|--detailed|--sections] [--by-topic|--topic T] [--lang sr|en|chat]
+        [--links]
 cargo test -p tga-sum --test fake_server        # the whole summary pipeline, no GPU
 ```
 
@@ -161,6 +164,10 @@ tga-sum      a local model's summary of a date range: digest rows in, text out.
              Line rendering, cutting into parts, prompts, notes cache, a loopback
              HTTP client on std::net, the llama-server keeper. Reads no export.
              MUST NOT depend on tga-read, tga-db, tga-docs, tga-metrics or a toolkit.
+tga-links    the pages a chat linked: found, cleaned, fetched politely, read.
+             ReVision's links system, ported. The analyser's only way out to
+             the internet; only tga-run may depend on it, and no other tga-*
+             crate links an HTTP client.
 tga-run      running an analysis: the `analyse` and `summarise` command lines,
              the library of exports, the workers. No toolkit. The only crate
              that reaches tga-docs and tga-db.
@@ -474,6 +481,22 @@ chat beside its database that only a saved brief moves. What must hold:
   26B-A4B's: `tga_sum::Sizes::of` gives Gemma 4 E2B/E4B four times them and
   12B twice, with a server context to match (`server::default_options`) —
   2026-10-20, the account holder's ask, **not measured**.
+- **Linked pages are read the way ReVision reads them** (`tga-links`, from its
+  `links.py` and `linkfetch.py`), only with **Read linked pages** on or
+  `--links`. A link is its cleaned address (tracking parameters, `www.`/`m.`,
+  `youtu.be` and Google's share suffixes off), fetched once per chat and kept
+  in `cache\links.json`; only a `failed` one is tried again. By kind: a page's
+  text (`dom_smoothie`, Readability, for trafilatura), a public Google Doc as
+  text, a public Drive file read by `tga-docs`, the public preview of a social
+  or video page (no yt-dlp here, so no subtitles). Telegram links (an invite
+  is a credential), meeting rooms and payment pages are never fetched. Four
+  sites at once, one request per host at a time, 2 s apart, 25 s timeout, 10
+  MB a page. **Never this machine's network**: every hop, redirects
+  included, is resolved and refused if any address is loopback, private,
+  link-local or CGNAT, since a message can link `127.0.0.1:8080`. A page
+  lands in `Row::pages` and on the line as `[linked page "title" (site,
+  published day): text]`, cut at `lines::PAGE_CHARS` = 20,000 (ReVision's
+  `TEXT_CAP`). The narration names counts, never an address.
 - **Every document is explained on its own.** Below the summary, each
   document read in the range gets its own call (`prompt::document`): a
   standalone paragraph, then all of it, every item put to a vote listed.
@@ -640,6 +663,12 @@ the same `sqlite3_*` symbols and fail at link time; **`rusqlite` is the same
 clash under another name and must not be added.** Bump it deliberately, on its
 own commit, in step with grammers' pin, with the parity legs green either side —
 the `winresource` rule, for the same reason.
+
+`ureq` (in `tga-links` only) is `default-features = false` with
+`native-tls` and `gzip`: on Windows that is SChannel, so no OpenSSL and no
+second crypto library. Its automatic redirects are off on purpose
+(`max_redirects(0)`): `tga-links` follows them itself so each hop is checked
+against the local network. `dom_smoothie` (Readability) brings html5ever.
 
 `egui_extras` is the egui project's own companion crate, held at the same
 version as `eframe` and taken `default-features = false` — its image, SVG,

@@ -406,6 +406,49 @@ fn tga_sum_reads_no_export_and_has_no_window() {
     }
 }
 
+/// `tga-links` is the analyser's one way out to the internet: the pages a
+/// chat linked, fetched for a summary that asks for them. Only the runner may
+/// reach it, so a report can never fetch anything, and `tga-sum` keeps its
+/// loopback-only client on `std::net`. No other analyser crate links an HTTP
+/// client of its own, and `tga-links` reads no export and has no window.
+#[test]
+fn only_the_analysers_runner_reaches_the_internet() {
+    for name in crates("") {
+        if name == "tga-run" {
+            continue;
+        }
+        let names = dependency_names(&manifest(&name));
+        assert!(
+            !names.iter().any(|n| n == "tga-links"),
+            "{name}/Cargo.toml depends on tga-links — only tga-run may fetch a linked page. \
+             See docs/SUMMARIES.md."
+        );
+    }
+    for name in crates("tga-") {
+        if name == "tga-links" {
+            continue;
+        }
+        let names = dependency_names(&manifest(&name));
+        for client in ["ureq", "reqwest", "hyper", "native-tls", "rustls", "curl"] {
+            assert!(
+                !names.iter().any(|n| n == client),
+                "{name}/Cargo.toml depends on {client} — tga-links is the analyser's only \
+                 way out to the internet."
+            );
+        }
+    }
+    let names = dependency_names(&manifest("tga-links"));
+    for banned in [
+        "tga-read", "tga-db", "tga-docs", "tga-sum", "tga-run", "tgx-ui", "eframe", "egui",
+    ] {
+        assert!(
+            !names.iter().any(|n| n == banned),
+            "tga-links/Cargo.toml depends on {banned} — it is handed links and returns \
+             cards; the runner reads the export and the documents."
+        );
+    }
+}
+
 /// `tga-docs` links a zip reader, an XML parser and a PDF parser that panics
 /// on bad input, and `tga-db` links the store. Neither belongs anywhere near
 /// the report, so the one crate that drives a run is the only one that may

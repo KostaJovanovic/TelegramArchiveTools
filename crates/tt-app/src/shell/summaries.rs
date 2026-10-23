@@ -904,6 +904,7 @@ pub(super) fn summary_server(settings: &tgx_tg::config::Settings) -> Server {
         launch,
         photos: settings.summary_photos,
         ocr,
+        links: settings.summary_links,
     }
 }
 

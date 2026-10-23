@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use crate::{Lang, Length};
 
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 
 /// What the lines and the notes look like, said once for every prompt.
 const READING: &str = "Each line is one message: `#id HH:MM name (re #id): text`. \
@@ -24,6 +24,8 @@ A line `== YYYY-MM-DD Day ==` starts a day. `[photo]`, `[video]` and the like ma
 attachments; `[document \"name\", dated …: text]` is a file with the text inside it; \
 `[photo with text: …]` is a photo — a poster, a screenshot, a page — and the text a \
 machine read off it, which may have misread a letter or two; \
+`[linked page \"title\" (site, published day): text]` is a web page the message linked \
+to and what it says — what somebody shared, not what they wrote; \
 `(N reactions)` says how much the room reacted. A name in square brackets after the \
 time is the forum topic the message was posted in.";
 
@@ -151,8 +153,7 @@ pub fn headings(lang: Lang) -> &'static str {
 pub fn final_text(about: &About, length: Length, lang: Lang, from_notes: bool) -> String {
     let input = if from_notes {
         "notes taken from the messages, one per line: `- YYYY-MM-DD [weight] what happened \
-         [#ids]`, where the ids are the messages each note rests on. The [major] notes come \
-         first, then [medium], then [minor]; a major note matters more than any medium one"
+         [#ids]`, where the ids are the messages each note rests on"
             .to_string()
     } else {
         format!("the messages themselves. {READING}")
