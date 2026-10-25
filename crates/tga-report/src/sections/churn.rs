@@ -31,7 +31,7 @@ pub fn churn(stats: &Stats) -> String {
     let peak = argmax(&active_counts);
     let active_take = format!(
         "Most voices in <b>{}</b>: {} people posted.",
-        esc(&months[peak]),
+        esc(&pretty_month(&months[peak])),
         thousands(active_counts[peak])
     );
 
@@ -98,7 +98,7 @@ pub fn churn(stats: &Stats) -> String {
     let arrivals = if joins.is_empty() {
         // Nothing to draw, and the reason is still worth one tap.
         format!(
-            "<p class=\"caption\">Arrivals cannot be dated. {}</p>",
+            "<div class=\"caption\">Arrivals cannot be dated. {}</div>",
             how(&note)
         )
     } else {
@@ -109,7 +109,7 @@ pub fn churn(stats: &Stats) -> String {
                 "{} of {} current members carry a join date; most joined in <b>{}</b>.",
                 thousands(churn.roster_dated),
                 thousands(churn.roster_size as i64),
-                esc(&months[busiest])
+                esc(&pretty_month(&months[busiest]))
             ),
             &note,
             &joins,

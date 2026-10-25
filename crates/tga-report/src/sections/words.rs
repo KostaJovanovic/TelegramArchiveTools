@@ -77,8 +77,8 @@ fn script(stats: &Stats) -> String {
             ("Latin", "Cyrillic")
         };
         return format!(
-            "<p class=\"caption\">Written almost entirely in {main}: {} of the letters \
-             are {other}. {}</p>",
+            "<div class=\"caption\">Written almost entirely in {main}: {} of the letters \
+             are {other}. {}</div>",
             pct(minority),
             how(&method)
         );

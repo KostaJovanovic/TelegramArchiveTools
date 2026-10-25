@@ -59,9 +59,9 @@ fn monthly(
         .fold(read[0], |best, x| if x.1 < best.1 { x } else { best });
     let take = format!(
         "Highest in <b>{}</b> at {}, lowest in <b>{}</b> at {}.",
-        esc(&months[hi]),
+        esc(&pretty_month(&months[hi])),
         esc(&shown(hi_v)),
-        esc(&months[lo]),
+        esc(&pretty_month(&months[lo])),
         esc(&shown(lo_v))
     );
     panel(title, &take, method, &chart)

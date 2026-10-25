@@ -20,8 +20,13 @@ pub fn topics(stats: &Stats) -> String {
     let scale = Quantiles::new(every_count(by_topic));
 
     let mut body = String::new();
-    for topic in rows {
+    for (index, topic) in rows.iter().enumerate() {
         let key = topic.index.to_string();
+        let cut = if index >= charts::CLIP {
+            " class=\"cut\""
+        } else {
+            ""
+        };
         let mini = if series.is_empty() {
             String::new()
         } else {
@@ -42,11 +47,13 @@ pub fn topics(stats: &Stats) -> String {
         };
         let _ = write!(
             body,
-            "<tr><td class=\"name\">{}</td><td class=\"presence\">{mini}</td>\
-             <td class=\"n\">{}</td><td class=\"n\">{}</td><td class=\"n\">{}</td>\
-             <td class=\"n\">{peak}</td><td class=\"n\">{}</td>\
-             <td class=\"n\">{}</td><td class=\"n\">{}</td><td class=\"n\">{}</td>\
-             <td>{}</td></tr>",
+            "<tr{cut}><td class=\"name\">{}</td><td class=\"presence\" data-l=\"Activity\">{mini}</td>\
+             <td class=\"n\" data-l=\"Messages\">{}</td><td class=\"n\" data-l=\"Voices\">{}</td>\
+             <td class=\"n\" data-l=\"Active days\">{}</td>\
+             <td class=\"n\" data-l=\"Busiest day\">{peak}</td><td class=\"n\" data-l=\"Words/msg\">{}</td>\
+             <td class=\"n\" data-l=\"Media\">{}</td><td class=\"n\" data-l=\"Replies\">{}</td>\
+             <td class=\"n\" data-l=\"Reactions\">{}</td>\
+             <td data-l=\"Loudest\">{}</td></tr>",
             esc(&topic.name),
             thousands(topic.messages as i64),
             thousands(topic.voices as i64),
@@ -91,8 +98,9 @@ pub fn topics(stats: &Stats) -> String {
                 esc(&scale.caption("messages in a day"))
             ),
             &format!(
-                "<div class=\"tablewrap\"><table class=\"wide\"><thead>{headers}</thead>\
-                 <tbody>{body}</tbody></table></div>"
+                "<div class=\"tablewrap\"><table class=\"wide stack\"><thead>{headers}</thead>\
+                 <tbody>{body}</tbody></table></div>{}",
+                charts::more_button(rows.len().saturating_sub(charts::CLIP))
             ),
         ),
         clocks(rows)

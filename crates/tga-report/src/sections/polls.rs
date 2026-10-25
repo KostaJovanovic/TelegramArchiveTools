@@ -51,7 +51,7 @@ pub fn polls(stats: &Stats) -> String {
             "Polls each month",
             &format!(
                 "Most in <b>{}</b>: {}.",
-                esc(&p.per_month[busiest].label),
+                esc(&pretty_month(&p.per_month[busiest].label)),
                 shown(values[busiest])
             ),
             "",

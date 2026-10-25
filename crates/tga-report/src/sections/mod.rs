@@ -23,8 +23,10 @@ use crate::charts::{self, esc, Day, Quantiles};
 
 /// The viewBox width every chart on the page is drawn in.
 pub const WIDTH: f64 = 1120.0;
-/// How many people get a row before the rest go behind the switch.
-const PEOPLE_SHOWN: usize = 30;
+/// How many people get a row before the rest go behind the switch: the same
+/// number as every other long list ([`charts::CLIP`]). `report.js` carries it
+/// too, as `SHOWN`, because the people table re-cuts itself when filtered.
+const PEOPLE_SHOWN: usize = charts::CLIP;
 /// The matrix is unreadable past this, and the network diagram says the rest.
 const MATRIX_PEOPLE: usize = 16;
 
@@ -85,6 +87,17 @@ pub fn pretty_date(iso: &str) -> String {
             text.trim_start_matches('0').to_string()
         }
         Err(_) => iso.to_string(),
+    }
+}
+
+/// `2025-09` -> `Sep 2025`, for a sentence. An axis keeps the short form.
+///
+/// In a take the bare `2025-09` broke at its hyphen on a phone, leaving the
+/// month alone on the next line. Anything else comes back unchanged.
+pub fn pretty_month(month: &str) -> String {
+    match NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d") {
+        Ok(day) => day.format("%b %Y").to_string(),
+        Err(_) => month.to_string(),
     }
 }
 
@@ -220,8 +233,39 @@ fn figures(items: &[(String, &str)]) -> String {
 /// `(name, numeric)` per column; cells are markup and escape their own input.
 ///
 /// Every column sorts on a tap of its header (`data-sort`), by the number in
-/// it when it is numeric.
+/// it when it is numeric. Past [`charts::CLIP`] rows the rest go behind Show
+/// more; see [`table_all`] for the one kind of table that keeps every row.
 fn table(headers: &[(&str, bool)], rows: &[Vec<String>]) -> String {
+    let cut = rows.len().saturating_sub(charts::CLIP);
+    table_rows(headers, rows, charts::CLIP) + &charts::more_button(cut)
+}
+
+/// A table that shows every row: the numbers behind a chart, in a
+/// [`data_view`]. That is already folded away behind its own disclosure, and
+/// its whole job is to be the complete figures.
+fn table_all(headers: &[(&str, bool)], rows: &[Vec<String>]) -> String {
+    table_rows(headers, rows, usize::MAX)
+}
+
+/// Whether a table becomes a stack of cards on a phone: four columns or
+/// more, or any text column after the first. Two short columns — a tag and
+/// its count — read better left as a table.
+fn stacks(headers: &[(&str, bool)]) -> bool {
+    headers.len() >= 4 || headers.iter().skip(1).any(|(_, numeric)| !numeric)
+}
+
+fn table_rows(headers: &[(&str, bool)], rows: &[Vec<String>], keep: usize) -> String {
+    // A stacking table labels every cell with its column, which is what the
+    // phone layout prints beside the value once the header row is a line of
+    // sort buttons. The other tables keep their header and need no labels.
+    let stack = stacks(headers);
+    let label = |name: &str| {
+        if stack {
+            format!(" data-l=\"{}\"", esc(name))
+        } else {
+            String::new()
+        }
+    };
     let head: String = headers
         .iter()
         .map(|(name, numeric)| {
@@ -234,23 +278,30 @@ fn table(headers: &[(&str, bool)], rows: &[Vec<String>]) -> String {
         .collect();
     let body: String = rows
         .iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(index, row)| {
             let cells: String = row
                 .iter()
                 .zip(headers.iter())
-                .map(|(cell, (_, numeric))| {
+                .map(|(cell, (name, numeric))| {
+                    let l = label(name);
                     if *numeric {
-                        format!("<td class=\"n\">{cell}</td>")
+                        format!("<td class=\"n\"{l}>{cell}</td>")
                     } else {
-                        format!("<td>{cell}</td>")
+                        format!("<td{l}>{cell}</td>")
                     }
                 })
                 .collect();
-            format!("<tr>{cells}</tr>")
+            if index >= keep {
+                format!("<tr class=\"cut\">{cells}</tr>")
+            } else {
+                format!("<tr>{cells}</tr>")
+            }
         })
         .collect();
+    let class = if stack { " class=\"stack\"" } else { "" };
     format!(
-        "<div class=\"tablewrap\"><table><thead><tr>{head}</tr></thead>\
+        "<div class=\"tablewrap\"><table{class}><thead><tr>{head}</tr></thead>\
          <tbody>{body}</tbody></table></div>"
     )
 }
@@ -448,6 +499,17 @@ mod tests {
         let names = Names::new();
         assert_eq!(label_for(&names, "user123"), "user123");
         assert_eq!(label_for(&names, ""), "unknown");
+    }
+
+    #[test]
+    fn a_long_table_shows_seven_and_a_data_view_shows_everything() {
+        let rows: Vec<Vec<String>> = (0..9).map(|i| vec![i.to_string()]).collect();
+        let cut = table(&[("N", true)], &rows);
+        assert_eq!(cut.matches("<tr class=\"cut\">").count(), 2);
+        // The button follows the wrap, which is what the script opens.
+        assert!(cut.ends_with("</table></div><button class=\"more\" type=\"button\" data-cut=\"7\">Show 2 more</button>"));
+        let whole = table_all(&[("N", true)], &rows);
+        assert!(!whole.contains("cut") && !whole.contains("<button"));
     }
 
     #[test]

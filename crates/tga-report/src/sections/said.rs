@@ -65,7 +65,7 @@ pub fn said(stats: &Stats) -> String {
             &(charts::hbars(&rows, Some(0))
                 + &data_view(
                     "Attachments, as numbers",
-                    &table(
+                    &table_all(
                         &[
                             ("Kind", false),
                             ("Sent", true),

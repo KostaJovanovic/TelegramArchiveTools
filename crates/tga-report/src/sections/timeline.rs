@@ -211,7 +211,7 @@ pub fn timeline(stats: &Stats, notes: &Notes, names: &Names) -> String {
         how(&(method + &note)),
         data_view(
             "Messages per month",
-            &table(&[("Month", false), ("Messages", true)], &months)
+            &table_all(&[("Month", false), ("Messages", true)], &months)
         )
     )
 }

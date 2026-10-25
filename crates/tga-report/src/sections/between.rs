@@ -10,6 +10,10 @@ use tga_stats::Stats;
 use super::*;
 use crate::charts::{self, esc, thousands};
 
+/// How many of the people who went quiet the table carries. It shows the
+/// first [`charts::CLIP`] of them, like every long list.
+const QUIET_ROWS: usize = 30;
+
 /// The `dynamics` branch: pairs, answer latency, tenure, retention and depth.
 ///
 /// It renders nothing at all when the branch is absent, which is the ordinary
@@ -195,7 +199,7 @@ pub fn between(stats: &Stats) -> String {
         .map(|(at, n)| {
             format!(
                 "Most returns in <b>{}</b>: {} people.",
-                esc(&months[at]),
+                esc(&pretty_month(&months[at])),
                 thousands(*n)
             )
         })
@@ -227,7 +231,7 @@ pub fn between(stats: &Stats) -> String {
     quiet.sort_by_key(|row| std::cmp::Reverse(row.dormant_days));
     let quiet_rows: Vec<Vec<String>> = quiet
         .iter()
-        .take(PEOPLE_SHOWN)
+        .take(QUIET_ROWS)
         .map(|row| {
             vec![
                 short(&row.name, 30),
@@ -249,7 +253,7 @@ pub fn between(stats: &Stats) -> String {
                 ("Messages", true),
                 ("Last seen", false),
                 ("Days since", true),
-                ("", false),
+                ("Status", false),
             ],
             &quiet_rows,
         )
@@ -302,7 +306,7 @@ pub fn between(stats: &Stats) -> String {
                 &(charts::hbars(&bars, Some(0))
                     + &data_view(
                         "Correspondents, as numbers",
-                        &table(
+                        &table_all(
                             // The arrows as characters: `table` escapes every
                             // header, so an entity here reached the page as the
                             // literal text `&rarr;`.
@@ -338,7 +342,7 @@ pub fn between(stats: &Stats) -> String {
             &(answer_chart
                 + &data_view(
                     "Answer times, as numbers",
-                    &table(
+                    &table_all(
                         &[("Hour", false), ("Replies", true), ("Median", false)],
                         &answer_rows,
                     )
@@ -375,7 +379,7 @@ pub fn between(stats: &Stats) -> String {
                 &(ret_chart
                     + &data_view(
                         "Month by month, as numbers",
-                        &table(
+                        &table_all(
                             &[
                                 ("Month", false),
                                 ("Spoke", true),

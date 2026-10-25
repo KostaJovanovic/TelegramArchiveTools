@@ -162,7 +162,7 @@
   /* -- people: filter, show all, search ---------------------------------- */
   /* One function decides which rows show, so the chips, the search box, the
      sort and Show all cannot disagree about it. */
-  var SHOWN=30;
+  var SHOWN=7;
   var ptable=document.querySelector('.people-table');
   var prows=ptable?Array.prototype.slice.call(ptable.tBodies[0].rows):[];
   var phay=prows.map(function(r){return (r.textContent||'').toLowerCase();});
@@ -253,6 +253,24 @@
       });
       keyed.forEach(function(k){body.appendChild(k[2]);});
       if(table===ptable)applyPeople();
+      /* A list still cut to its first rows is cut again in the new order, or
+         sorting would show the same seven scattered down the table. */
+      var wrap=table.closest('.tablewrap'),cut=wrap&&wrap.nextElementSibling;
+      if(cut&&cut.hasAttribute('data-cut')){
+        var keep=parseInt(cut.getAttribute('data-cut'),10);
+        Array.prototype.forEach.call(body.rows,function(r,i){r.classList.toggle('cut',i>=keep);});
+      }
+    });
+  });
+
+  /* -- show more --------------------------------------------------------- */
+  /* Every long list is drawn whole and its rows past the first few marked
+     `cut`; the button after it shows them and goes away. */
+  document.querySelectorAll('button.more[data-cut]').forEach(function(b){
+    b.addEventListener('click',function(){
+      var list=b.previousElementSibling;
+      if(list)list.querySelectorAll('.cut').forEach(function(n){n.classList.remove('cut');});
+      b.remove();
     });
   });
 

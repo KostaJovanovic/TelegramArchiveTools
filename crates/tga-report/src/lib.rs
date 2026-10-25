@@ -413,7 +413,7 @@ mod tests {
             bob < ana,
             "the table is ranked by dormancy, not by messages"
         );
-        assert!(html.contains("<td class=\"n\">177</td>"));
+        assert!(html.contains("<td class=\"n\" data-l=\"Days since\">177</td>"));
         assert!(html.contains("30 Jun 2025, the last day in this archive"));
         // Escaped like every other name that came out of an export.
         assert!(!html.contains("Bob & Co <the second>"));
@@ -463,8 +463,9 @@ mod tests {
             "<th class=\"n\" data-sort=\"n\">Stayed</th><th class=\"n\" data-sort=\"n\">Came back</th>"
         ));
         assert!(old.contains(
-            "<td>2025-03</td><td class=\"n\">3</td><td class=\"n\">0</td>\
-             <td class=\"n\">2</td><td class=\"n\">1</td>"
+            "<td data-l=\"Month\">2025-03</td><td class=\"n\" data-l=\"Spoke\">3</td>\
+             <td class=\"n\" data-l=\"New\">0</td><td class=\"n\" data-l=\"Stayed\">2</td>\
+             <td class=\"n\" data-l=\"Came back\">1</td>"
         ));
         if let Some(dynamics) = stats.dynamics.as_mut() {
             dynamics.retention.came_back = vec![0, 0, 1];

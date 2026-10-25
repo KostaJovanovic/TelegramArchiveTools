@@ -161,6 +161,27 @@ colour-vision deficiency.
   mirrored timeline, both people's hours side by side, a side-by-side panel,
   and none of the group's rankings, matrix, network or comings and goings.
 - **Sections fold**, remembered per report in localStorage; columns sort.
+- **A long list shows seven** (2026-10-25, the account holder's ask): every
+  ranked bar list and table in a panel, the people table and the topics
+  included, puts its rows past `charts::CLIP` behind Show more. The rows are
+  all in the document, marked `cut`, and only a page running the script hides
+  them, so with scripting off the list is whole and there is no button. A
+  search shows them all; a sort cuts a list that was not opened again in its
+  new order. The bar a chart points at is never cut — its sentence names it —
+  and the tables inside an "…as numbers" view (`table_all`) are whole, since
+  that view is already folded away and is the complete figures.
+- **On a phone a wide table is a stack of cards** (2026-10-25, the account
+  holder's ask). A table of four columns or more, or one with text past its
+  first column, is `stack`: every cell carries its column as `data-l`, and
+  under 820 px the row becomes a card — the first cell its title, the rest a
+  wrapping run of "label value" pairs — while the header stays as one row of
+  sort buttons that pans. Two-column tables of numbers keep their table.
+  Alongside it: anything a thumb presses is at least 30 px, the micro-type
+  is 11 px, and a chart that pans is drawn a quarter wider so its labels
+  reach the page's own size. A take names a month as `Jan 2026`, because
+  `2026-01` broke at its hyphen. Checked by loading the page in a 390 px
+  frame: `scrollWidth` equals the width, nothing outside a pan region
+  overflows.
 
 ## What the design does not carry
 

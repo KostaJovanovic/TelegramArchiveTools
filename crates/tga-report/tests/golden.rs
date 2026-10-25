@@ -183,6 +183,13 @@ fn every_interactive_feature_is_drawn_into_the_document() {
         ("a shape-coded marker", "<g class=\"ev k"),
         ("the between-people section", "<section id=\"between\">"),
         ("its nav entry", "href=\"#between\""),
+        ("a long list cut to seven", "<tr class=\"cut\">"),
+        ("a long bar list cut to seven", "<li class=\"cut\">"),
+        ("its Show more", "type=\"button\" data-cut=\"7\">Show "),
+        (
+            "the rule that hides cut rows",
+            "html.js:not(.searching) .cut{display:none!important}",
+        ),
     ] {
         assert!(html.contains(needle), "the report lost {what}");
     }
@@ -323,14 +330,14 @@ fn the_golden_exercises_the_cases_it_was_built_for() {
             "Bob &amp; Co &lt;the second&gt; &amp; Person 4",
         ),
         ("both directions of a pair", "13 \u{2194} 10"),
-        ("an hour that met the floor", "<td>2 min</td>"),
-        ("an hour that did not", "<td>&#8212;</td>"),
+        ("an hour that met the floor", "<td data-l=\"Median\">2 min</td>"),
+        ("an hour that did not", "<td data-l=\"Median\">&#8212;</td>"),
         ("the chain-length buckets", " chains\""),
         ("the month-over-month chart", "<h3>Who came back</h3>"),
         // Nine months of real archive reaches both of these. The old fixture
         // covered seven days, in which nobody *can* fade or leave, so they were
         // pushed out to unit tests in `lib.rs`; the golden carries them now.
-        ("somebody fading out", "<td>fading</td>"),
+        ("somebody fading out", "<td data-l=\"Status\">fading</td>"),
         (
             "dormancy measured against the archive",
             "26 Aug 2026, the last day in this archive",

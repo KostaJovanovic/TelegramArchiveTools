@@ -158,7 +158,7 @@ pub fn rhythm(stats: &Stats) -> String {
         ),
         data_view(
             "Hour of day, as numbers",
-            &table(&[("Hour", false), ("Messages", true)], &hour_rows)
+            &table_all(&[("Hour", false), ("Messages", true)], &hour_rows)
         )
     )
 }

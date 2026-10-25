@@ -139,6 +139,11 @@ details.how[open]>summary{color:var(--bg);background:var(--fg);border-color:var(
   box-shadow:0 12px 32px rgba(0,0,0,.55);
 }
 .panel>details.how .howtext{left:auto;right:0}
+/* A <details> cannot sit inside a <p>, so a caption carrying a (?) is a div,
+   and the button follows its sentence rather than starting a line. */
+div.caption{position:relative}
+.caption>details.how{position:static;margin:0 0 0 6px}
+.caption>details.how .howtext{top:calc(100% + 6px)}
 .howtext b{color:var(--fg);font-weight:500}
 
 /* -- figures: hairline-separated ----------------------------------------- */
@@ -366,6 +371,9 @@ td.name .handle{display:block;line-height:1.35}
 }
 tr.overflow,tr.off{display:none!important}
 html:not(.js) tr.overflow{display:table-row!important}
+/* A long list's rows past the first seven. Only a page running the script
+   hides them, and a search shows them, so nothing it finds is out of sight. */
+html.js:not(.searching) .cut{display:none!important}
 .nomatch{display:none!important}
 details.data{margin:12px 0 0}
 details.data summary{
@@ -491,5 +499,62 @@ td.emo.two{text-align:right}
   table.rows tbody tr:hover td{background:none}
   table.vs td.n{width:auto}
   td.vsbar{width:28%}
+
+  /* The micro-type is a desk size; a phone gets a point more of it. */
+  .eyebrow,h2,th,.toc a,.found,.role,.tagpill,details.data summary,
+  .events .cite,.events .w,.events .tags span{font-size:11px}
+
+  /* Everything a thumb presses is at least 36px across. */
+  .toc a{padding:10px 12px}
+  .find{padding:9px 12px}
+  .fold{width:36px;height:36px;margin:-10px -10px -10px 0}
+  .fold::before{left:14px;top:12px}
+  section.folded .fold::before{left:13px;top:14px}
+  details.how>summary{width:32px;height:32px;line-height:30px}
+  .panel>details.how{top:9px;right:9px}
+  .panel h3,.take{padding-right:40px}
+  .chip,.more,.kind-filter{padding:9px 14px}
+  details.data summary{padding:8px 0}
+  .focus button{width:32px;height:32px}
+  th[data-sort]{padding-top:10px}
+
+  /* A chart that pans is drawn a quarter wider than at a desk, which is
+     what brings its labels from 8-9px up to the page's own size. */
+  .scrollin{min-width:calc(var(--mw,0px)*1.25)!important}
+  .axis,.nodelabel{font-size:11px}
+
+  /* A wide table becomes a stack of cards: the first cell is the card's
+     title, and the rest follow as a run of "label value" pairs that wraps. A
+     table of a name and one long cell drops the label, which only repeats the
+     panel's title. The header stays, as one row of buttons that still sort
+     and pans if it is long. */
+  table.stack,table.stack tbody{display:block}
+  table.stack thead{display:block;margin:0 0 4px}
+  table.stack thead tr{display:flex;gap:6px;padding:0 0 8px;overflow-x:auto;scrollbar-width:none}
+  table.stack thead tr::-webkit-scrollbar{display:none}
+  table.stack th{flex:0 0 auto;border:1px solid var(--hairline);border-radius:999px;
+    padding:9px 12px;letter-spacing:.08em;white-space:nowrap}
+  table.stack th+th{padding-left:12px}
+  table.stack th:not([data-sort]),table.stack th:empty,
+  table.stack th:nth-child(2):last-child{display:none}
+  table.stack tbody tr{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 18px;
+    padding:10px 0;border-bottom:1px solid var(--rule)}
+  table.stack tbody tr:first-child{border-top:1px solid var(--rule)}
+  table.stack td{display:block;flex:0 1 auto;border:0;padding:0;text-align:left;
+    min-width:0;overflow-wrap:anywhere}
+  table.stack td+td{padding-left:0}
+  table.stack td::before{content:attr(data-l);margin-right:6px;color:var(--muted);font-size:11.5px;
+    font-family:'Geist','Segoe UI',system-ui,sans-serif}
+  table.stack td.n{text-align:left;white-space:nowrap}
+  table.stack td:first-child,table.stack td.presence,
+  table.stack td:nth-child(2):last-child{flex:1 1 100%}
+  table.stack td:nth-child(2):last-child::before{display:none}
+  table.stack td:first-child{font-weight:500;padding:0 0 2px}
+  table.stack td:first-child::before{display:none}
+  table.stack td:empty{display:none}
+  table.stack td .at{display:inline;margin-left:6px}
+  table.stack td.presence{width:auto;padding:0 0 4px}
+  table.stack td.presence::before{display:none}
+  table.wide.stack td.name,table.wide.stack td.presence{min-width:0}
 }
 @media print{.bar,#tip,.fold,details.how{display:none}body{max-width:none}.panel{break-inside:avoid}}

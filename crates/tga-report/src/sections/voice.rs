@@ -95,7 +95,7 @@ pub fn voice(stats: &Stats) -> String {
         &(charts::hbars(&rows, Some(0))
             + &data_view(
                 "Notes, as numbers",
-                &table(
+                &table_all(
                     &[
                         ("Person", false),
                         ("Voice", true),
@@ -121,7 +121,7 @@ pub fn voice(stats: &Stats) -> String {
             "Recorded each month",
             &format!(
                 "Most in <b>{}</b>: {}.",
-                esc(&v.per_month[busiest].label),
+                esc(&pretty_month(&v.per_month[busiest].label)),
                 duration(values[busiest] as f64)
             ),
             "",

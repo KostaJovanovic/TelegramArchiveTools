@@ -35,17 +35,51 @@ impl HBar {
     }
 }
 
+/// How many rows a long list shows before the rest go behind Show more.
+///
+/// **Cut by the script, never by the server.** Every row is in the document;
+/// the ones past this carry `cut`, which only a page running the script hides
+/// (`html.js`), and stop being hidden while a search is on. With scripting off
+/// the list is whole and the button is not drawn, the same arrangement as the
+/// people table's.
+pub const CLIP: usize = 7;
+
+/// The button that shows a list's cut rows, or nothing when none were cut.
+///
+/// It must directly follow the list it opens: the script reveals the cut rows
+/// of the element before it. `data-cut` carries [`CLIP`], so a sorted list can
+/// be cut again to its new first rows.
+pub fn more_button(cut: usize) -> String {
+    if cut == 0 {
+        return String::new();
+    }
+    format!(
+        "<button class=\"more\" type=\"button\" data-cut=\"{CLIP}\">Show {} more</button>",
+        thousands(cut as i64)
+    )
+}
+
 /// Ranked horizontal bars: label, bar, value at the tip.
 ///
 /// Horizontal because the labels are people's names and topic titles, which do
 /// not fit under a column and must never be rotated to make them. `hot` is the
 /// row the chart points at, drawn in the accent; every other bar is `mark`.
+///
+/// Past [`CLIP`] rows the rest are cut — except `hot`, which stays in view
+/// wherever it is, because the sentence above the chart names it. A list whose
+/// hot row is last shows the first six and that one.
 pub fn hbars(rows: &[HBar], hot: Option<usize>) -> String {
     if rows.is_empty() {
         return String::new();
     }
     let top = rows.iter().map(|r| r.value).fold(0.0f64, f64::max);
     let top = if top <= 0.0 { 1.0 } else { top };
+    let keep = match hot {
+        Some(h) if h >= CLIP && rows.len() > CLIP => CLIP - 1,
+        _ => CLIP,
+    };
+    let is_cut = |index: usize| index >= keep && Some(index) != hot;
+    let cut = (0..rows.len()).filter(|i| is_cut(*i)).count();
     let mut out = String::from("<ol class=\"hbars\">");
     for (index, row) in rows.iter().enumerate() {
         let shown = if row.shown.is_empty() {
@@ -58,10 +92,10 @@ pub fn hbars(rows: &[HBar], hot: Option<usize>) -> String {
         } else {
             format!(" data-who=\"{}\"", esc(&row.who))
         };
-        let cls = if Some(index) == hot {
-            " class=\"hot\""
-        } else {
-            ""
+        let cls = match (Some(index) == hot, is_cut(index)) {
+            (true, _) => " class=\"hot\"",
+            (false, true) => " class=\"cut\"",
+            (false, false) => "",
         };
         let _ = write!(
             out,
@@ -75,6 +109,7 @@ pub fn hbars(rows: &[HBar], hot: Option<usize>) -> String {
         );
     }
     out.push_str("</ol>");
+    out.push_str(&more_button(cut));
     out
 }
 
@@ -314,13 +349,15 @@ pub fn time_axis(series: &[Day]) -> String {
 
 /// A chart too dense to shrink, in a frame that scrolls sideways instead.
 ///
-/// `min_width` is the width the chart's text is the right size at — its
-/// viewBox width — so on a narrow screen it keeps that size and pans, and on
-/// a wide one it fills the measure as before.
+/// `min_width` is the width the chart's text is the right size at, so on a
+/// narrow screen it keeps that size and pans, and on a wide one it fills the
+/// measure as before. It rides along as `--mw` too: a phone draws the frame a
+/// quarter wider than that (`report.css`), because "the right size" at a desk
+/// came out at 8–9 px on a 390 px screen.
 pub fn scroll(chart: &str, min_width: f64) -> String {
     format!(
-        "<div class=\"scrollx\"><div class=\"scrollin\" style=\"min-width:{}px\">{chart}</div></div>",
-        num(min_width)
+        "<div class=\"scrollx\"><div class=\"scrollin\" style=\"--mw:{w}px;min-width:{w}px\">{chart}</div></div>",
+        w = num(min_width)
     )
 }
 
@@ -331,4 +368,39 @@ pub fn scroll_fixed(chart: &str, width: f64) -> String {
         "<div class=\"scrollx end\"><div class=\"scrollin\" style=\"width:{}px\">{chart}</div></div>",
         num(width)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bars(n: usize) -> Vec<HBar> {
+        (0..n)
+            .map(|i| HBar::new(format!("row {i}"), (n - i) as f64, ""))
+            .collect()
+    }
+
+    #[test]
+    fn a_long_list_shows_seven_and_cuts_the_rest() {
+        let html = hbars(&bars(10), Some(0));
+        assert_eq!(html.matches("<li class=\"cut\"").count(), 3);
+        assert!(html.ends_with(
+            "</ol><button class=\"more\" type=\"button\" data-cut=\"7\">Show 3 more</button>"
+        ));
+        // Seven or fewer is not cut at all, and has no button.
+        let short = hbars(&bars(7), Some(0));
+        assert!(!short.contains("cut") && !short.contains("<button"));
+    }
+
+    #[test]
+    fn the_bar_a_chart_points_at_is_never_cut() {
+        // Slowest first, quickest last and hot: the sentence above names it.
+        let html = hbars(&bars(12), Some(11));
+        assert_eq!(html.matches("<li class=\"cut\"").count(), 5);
+        assert!(html.contains("<li class=\"hot\"><span class=\"hl\" title=\"row 11\">"));
+        assert!(html.contains("Show 5 more"));
+        // Six above it, so seven are in view.
+        assert!(!html.contains("<li class=\"cut\"><span class=\"hl\" title=\"row 5\">"));
+        assert!(html.contains("<li class=\"cut\"><span class=\"hl\" title=\"row 6\">"));
+    }
 }
