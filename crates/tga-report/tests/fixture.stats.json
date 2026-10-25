@@ -10765,6 +10765,170 @@
    }
   ]
  },
+ "history": {
+  "events": [
+   {
+    "action": "migrate_from_group",
+    "date": "2025-12-14 16:36",
+    "id": 1,
+    "key": "user49",
+    "name": "Person 49",
+    "title": "(title removed)",
+    "topic": 3
+   },
+   {
+    "action": "edit_group_title",
+    "date": "2025-12-14 16:36",
+    "id": 4,
+    "key": "user1",
+    "name": "Bob & Co <the second>",
+    "title": "A name & <a tag>",
+    "topic": 3
+   },
+   {
+    "action": "topic_created",
+    "date": "2025-12-14 16:41",
+    "id": 12,
+    "key": "user1",
+    "name": "Bob & Co <the second>",
+    "title": "(title removed)",
+    "topic": 2
+   },
+   {
+    "action": "pin_message",
+    "date": "2025-12-14 16:42",
+    "id": 14,
+    "key": "user1",
+    "name": "Bob & Co <the second>",
+    "pinned": 6,
+    "pinned_text": "(text removed)",
+    "pinned_who": "Bob & Co <the second>",
+    "topic": 3
+   },
+   {
+    "action": "topic_created",
+    "date": "2025-12-14 16:42",
+    "id": 15,
+    "key": "user1",
+    "name": "Bob & Co <the second>",
+    "title": "(title removed)",
+    "topic": 1
+   },
+   {
+    "action": "topic_edit",
+    "date": "2025-12-14 16:45",
+    "id": 25,
+    "key": "user1",
+    "name": "Bob & Co <the second>",
+    "title": "(title removed)",
+    "topic": 3
+   },
+   {
+    "action": "topic_created",
+    "date": "2025-12-18 16:17",
+    "id": 66,
+    "key": "user1",
+    "name": "Bob & Co <the second>",
+    "title": "(title removed)",
+    "topic": 0
+   },
+   {
+    "action": "topic_edit",
+    "date": "2026-02-17 14:41",
+    "id": 3187,
+    "key": "user1",
+    "name": "Bob & Co <the second>",
+    "title": "(title removed)",
+    "topic": 2
+   },
+   {
+    "action": "poll_append_answer",
+    "date": "2026-05-21 11:58",
+    "id": 5609,
+    "key": "user8",
+    "name": "Person 8",
+    "topic": 3
+   },
+   {
+    "action": "poll_append_answer",
+    "date": "2026-05-21 12:02",
+    "id": 5612,
+    "key": "user7",
+    "name": "Person 7",
+    "topic": 3
+   },
+   {
+    "action": "poll_append_answer",
+    "date": "2026-05-21 13:17",
+    "id": 5615,
+    "key": "user11",
+    "name": "Person 11",
+    "topic": 3
+   },
+   {
+    "action": "pin_message",
+    "date": "2026-05-22 21:48",
+    "id": 5694,
+    "key": "user4",
+    "name": "Person 4",
+    "pinned": 5662,
+    "pinned_text": "(text removed)",
+    "pinned_who": "Person 4",
+    "topic": 3
+   },
+   {
+    "action": "pin_message",
+    "date": "2026-06-02 14:16",
+    "id": 6707,
+    "key": "user7",
+    "name": "Person 7",
+    "pinned": 6459,
+    "pinned_text": "(text removed)",
+    "pinned_who": "Person 15",
+    "topic": 3
+   }
+  ],
+  "kinds": [
+   [
+    "join_group_by_link",
+    26
+   ],
+   [
+    "invite_members",
+    18
+   ],
+   [
+    "remove_members",
+    6
+   ],
+   [
+    "topic_created",
+    3
+   ],
+   [
+    "pin_message",
+    3
+   ],
+   [
+    "poll_append_answer",
+    3
+   ],
+   [
+    "topic_edit",
+    2
+   ],
+   [
+    "migrate_from_group",
+    1
+   ],
+   [
+    "edit_group_title",
+    1
+   ]
+  ],
+  "shown": 13,
+  "total": 13
+ },
  "people": {
   "known_members": 43,
   "members_who_spoke": 41,
@@ -13303,6 +13467,1461 @@
   "votes_named": 1601,
   "votes_total": 1601
  },
+ "polls": {
+  "askers": [
+   {
+    "count": 2,
+    "key": "user4",
+    "name": "Person 4"
+   },
+   {
+    "count": 2,
+    "key": "user7",
+    "name": "Person 7"
+   },
+   {
+    "count": 1,
+    "key": "user13",
+    "name": "Person 13"
+   },
+   {
+    "count": 1,
+    "key": "user9",
+    "name": "Person 9"
+   },
+   {
+    "count": 1,
+    "key": "user29",
+    "name": "Person 28"
+   }
+  ],
+  "closed": 0,
+  "forwarded": 0,
+  "median_voters": 12,
+  "per_month": [
+   [
+    "2025-12",
+    1
+   ],
+   [
+    "2026-01",
+    1
+   ],
+   [
+    "2026-02",
+    1
+   ],
+   [
+    "2026-03",
+    0
+   ],
+   [
+    "2026-04",
+    0
+   ],
+   [
+    "2026-05",
+    2
+   ],
+   [
+    "2026-06",
+    1
+   ],
+   [
+    "2026-07",
+    0
+   ],
+   [
+    "2026-08",
+    1
+   ]
+  ],
+  "rows": [
+   {
+    "answers": [
+     [
+      "(text removed)",
+      0
+     ],
+     [
+      "(text removed)",
+      0
+     ]
+    ],
+    "closed": false,
+    "date": "2025-12-30 13:50",
+    "forwarded": false,
+    "id": 728,
+    "key": "user13",
+    "name": "Person 13",
+    "question": "(text removed)",
+    "topic": 3,
+    "voters": 8
+   },
+   {
+    "answers": [
+     [
+      "(text removed)",
+      6
+     ],
+     [
+      "(text removed)",
+      6
+     ]
+    ],
+    "closed": false,
+    "date": "2026-01-05 18:06",
+    "forwarded": false,
+    "id": 1172,
+    "key": "user9",
+    "name": "Person 9",
+    "question": "(text removed)",
+    "topic": 3,
+    "voters": 12
+   },
+   {
+    "answers": [
+     [
+      "(text removed)",
+      0
+     ],
+     [
+      "(text removed)",
+      3
+     ],
+     [
+      "(text removed)",
+      9
+     ]
+    ],
+    "closed": false,
+    "date": "2026-02-17 15:03",
+    "forwarded": false,
+    "id": 3188,
+    "key": "user29",
+    "name": "Person 28",
+    "question": "(text removed)",
+    "topic": 3,
+    "voters": 12
+   },
+   {
+    "answers": [
+     [
+      "(text removed)",
+      2
+     ],
+     [
+      "(text removed)",
+      2
+     ],
+     [
+      "(text removed)",
+      6
+     ],
+     [
+      "(text removed)",
+      8
+     ],
+     [
+      "(text removed)",
+      3
+     ],
+     [
+      "(text removed)",
+      6
+     ],
+     [
+      "(text removed)",
+      3
+     ],
+     [
+      "(text removed)",
+      5
+     ]
+    ],
+    "closed": false,
+    "date": "2026-05-21 11:58",
+    "forwarded": false,
+    "id": 5608,
+    "key": "user4",
+    "name": "Person 4",
+    "question": "(text removed)",
+    "topic": 3,
+    "voters": 24
+   },
+   {
+    "answers": [
+     [
+      "(text removed)",
+      1
+     ],
+     [
+      "(text removed)",
+      3
+     ],
+     [
+      "(text removed)",
+      0
+     ],
+     [
+      "(text removed)",
+      9
+     ],
+     [
+      "(text removed)",
+      3
+     ],
+     [
+      "(text removed)",
+      3
+     ]
+    ],
+    "closed": false,
+    "date": "2026-05-22 21:41",
+    "forwarded": false,
+    "id": 5662,
+    "key": "user4",
+    "name": "Person 4",
+    "question": "(text removed)",
+    "topic": 3,
+    "voters": 15
+   },
+   {
+    "answers": [
+     [
+      "(text removed)",
+      5
+     ],
+     [
+      "(text removed)",
+      4
+     ]
+    ],
+    "closed": false,
+    "date": "2026-06-22 22:08",
+    "forwarded": false,
+    "id": 6974,
+    "key": "user7",
+    "name": "Person 7",
+    "question": "(text removed)",
+    "topic": 3,
+    "voters": 9
+   },
+   {
+    "answers": [
+     [
+      "Friday & <early>",
+      0
+     ],
+     [
+      "(text removed)",
+      0
+     ]
+    ],
+    "closed": false,
+    "date": "2026-08-12 11:44",
+    "forwarded": false,
+    "id": 7100,
+    "key": "user7",
+    "name": "Person 7",
+    "question": "Friday <or> Saturday & when?",
+    "topic": 3,
+    "voters": 11
+   }
+  ],
+  "shown": 7,
+  "total": 7,
+  "votes": 91
+ },
+ "reactions": {
+  "custom": 0,
+  "kinds": [
+   [
+    "❤",
+    1001
+   ],
+   [
+    "⚡",
+    217
+   ],
+   [
+    "🔥",
+    140
+   ],
+   [
+    "😭",
+    39
+   ],
+   [
+    "🤣",
+    37
+   ],
+   [
+    "👍",
+    21
+   ],
+   [
+    "🥰",
+    16
+   ],
+   [
+    "💘",
+    13
+   ],
+   [
+    "🕊",
+    11
+   ],
+   [
+    "😢",
+    10
+   ],
+   [
+    "💔",
+    9
+   ],
+   [
+    "❤‍🔥",
+    9
+   ],
+   [
+    "☃",
+    7
+   ],
+   [
+    "🤯",
+    5
+   ],
+   [
+    "😁",
+    5
+   ],
+   [
+    "🍾",
+    5
+   ],
+   [
+    "chats/chat_562953540103937/topic_1/stickers/AnimatedSticker (3).tgs",
+    5
+   ],
+   [
+    "👎",
+    4
+   ],
+   [
+    "🦄",
+    4
+   ],
+   [
+    "😍",
+    4
+   ],
+   [
+    "🗿",
+    4
+   ],
+   [
+    "😨",
+    3
+   ],
+   [
+    "🏆",
+    3
+   ],
+   [
+    "👀",
+    2
+   ],
+   [
+    "😱",
+    2
+   ],
+   [
+    "🎉",
+    2
+   ],
+   [
+    "🫡",
+    2
+   ],
+   [
+    "chats/chat_562953540103937/topic_1/stickers/sticker (55).webp",
+    2
+   ],
+   [
+    "chats/chat_562953540103937/topic_1/stickers/AnimatedSticker (2).tgs",
+    2
+   ],
+   [
+    "chats/chat_562953540103937/topic_12/stickers/AnimatedSticker (1).tgs",
+    2
+   ],
+   [
+    "🙏",
+    1
+   ],
+   [
+    "🤓",
+    1
+   ],
+   [
+    "🥴",
+    1
+   ],
+   [
+    "💅",
+    1
+   ],
+   [
+    "🤪",
+    1
+   ],
+   [
+    "🐳",
+    1
+   ],
+   [
+    "chats/chat_562953540103937/topic_1/stickers/AnimatedSticker (1).tgs",
+    1
+   ],
+   [
+    "chats/chat_562953540103937/topic_12/stickers/AnimatedSticker.tgs",
+    1
+   ],
+   [
+    "chats/chat_562953540103937/topic_12/stickers/AnimatedSticker (2).tgs",
+    1
+   ],
+   [
+    "💯",
+    1
+   ],
+   [
+    "chats/chat_562953540103937/topic_1/stickers/AnimatedSticker (4).tgs",
+    1
+   ],
+   [
+    "chats/chat_562953540103937/topic_1/stickers/AnimatedSticker (5).tgs",
+    1
+   ],
+   [
+    "chats/chat_562953540103937/topic_1/stickers/AnimatedSticker (7).tgs",
+    1
+   ],
+   [
+    "🤡",
+    1
+   ]
+  ],
+  "messages": 6580,
+  "messages_per_month": [
+   524,
+   1369,
+   790,
+   757,
+   356,
+   1363,
+   531,
+   15,
+   875
+  ],
+  "months": [
+   "2025-12",
+   "2026-01",
+   "2026-02",
+   "2026-03",
+   "2026-04",
+   "2026-05",
+   "2026-06",
+   "2026-07",
+   "2026-08"
+  ],
+  "named": 1443,
+  "people": [
+   {
+    "given": 145,
+    "given_top": [
+     [
+      "⚡",
+      139
+     ],
+     [
+      "❤",
+      5
+     ],
+     [
+      "👎",
+      1
+     ]
+    ],
+    "key": "user1",
+    "messages": 897,
+    "name": "Bob & Co <the second>",
+    "received": 306,
+    "received_top": [
+     [
+      "❤",
+      178
+     ],
+     [
+      "🔥",
+      40
+     ],
+     [
+      "⚡",
+      16
+     ]
+    ]
+   },
+   {
+    "given": 53,
+    "given_top": [
+     [
+      "❤",
+      45
+     ],
+     [
+      "😢",
+      2
+     ],
+     [
+      "👍",
+      1
+     ]
+    ],
+    "key": "user2",
+    "messages": 642,
+    "name": "Person 2",
+    "received": 167,
+    "received_top": [
+     [
+      "❤",
+      99
+     ],
+     [
+      "⚡",
+      30
+     ],
+     [
+      "🔥",
+      23
+     ]
+    ]
+   },
+   {
+    "given": 82,
+    "given_top": [
+     [
+      "❤",
+      45
+     ],
+     [
+      "🔥",
+      14
+     ],
+     [
+      "⚡",
+      4
+     ]
+    ],
+    "key": "user5",
+    "messages": 462,
+    "name": "Person 5",
+    "received": 147,
+    "received_top": [
+     [
+      "❤",
+      112
+     ],
+     [
+      "⚡",
+      17
+     ],
+     [
+      "🔥",
+      6
+     ]
+    ]
+   },
+   {
+    "given": 151,
+    "given_top": [
+     [
+      "❤",
+      123
+     ],
+     [
+      "🔥",
+      7
+     ],
+     [
+      "😭",
+      5
+     ]
+    ],
+    "key": "user4",
+    "messages": 549,
+    "name": "Person 4",
+    "received": 142,
+    "received_top": [
+     [
+      "❤",
+      82
+     ],
+     [
+      "⚡",
+      28
+     ],
+     [
+      "🔥",
+      11
+     ]
+    ]
+   },
+   {
+    "given": 30,
+    "given_top": [
+     [
+      "❤",
+      29
+     ],
+     [
+      "😭",
+      1
+     ]
+    ],
+    "key": "user3",
+    "messages": 613,
+    "name": "Person 3",
+    "received": 109,
+    "received_top": [
+     [
+      "❤",
+      81
+     ],
+     [
+      "⚡",
+      9
+     ],
+     [
+      "🔥",
+      5
+     ]
+    ]
+   },
+   {
+    "given": 16,
+    "given_top": [
+     [
+      "❤",
+      8
+     ],
+     [
+      "🔥",
+      2
+     ],
+     [
+      "🥰",
+      2
+     ]
+    ],
+    "key": "user7",
+    "messages": 355,
+    "name": "Person 7",
+    "received": 102,
+    "received_top": [
+     [
+      "❤",
+      78
+     ],
+     [
+      "⚡",
+      9
+     ],
+     [
+      "🤯",
+      4
+     ]
+    ]
+   },
+   {
+    "given": 49,
+    "given_top": [
+     [
+      "❤",
+      49
+     ]
+    ],
+    "key": "user11",
+    "messages": 191,
+    "name": "Person 11",
+    "received": 82,
+    "received_top": [
+     [
+      "❤",
+      48
+     ],
+     [
+      "🔥",
+      11
+     ],
+     [
+      "⚡",
+      10
+     ]
+    ]
+   },
+   {
+    "given": 209,
+    "given_top": [
+     [
+      "❤",
+      119
+     ],
+     [
+      "🔥",
+      37
+     ],
+     [
+      "🤣",
+      12
+     ]
+    ],
+    "key": "user9",
+    "messages": 315,
+    "name": "Person 9",
+    "received": 72,
+    "received_top": [
+     [
+      "❤",
+      37
+     ],
+     [
+      "⚡",
+      22
+     ],
+     [
+      "🔥",
+      7
+     ]
+    ]
+   },
+   {
+    "given": 27,
+    "given_top": [
+     [
+      "❤",
+      17
+     ],
+     [
+      "👍",
+      4
+     ],
+     [
+      "🔥",
+      2
+     ]
+    ],
+    "key": "user8",
+    "messages": 352,
+    "name": "Person 8",
+    "received": 71,
+    "received_top": [
+     [
+      "❤",
+      47
+     ],
+     [
+      "🔥",
+      9
+     ],
+     [
+      "⚡",
+      5
+     ]
+    ]
+   },
+   {
+    "given": 245,
+    "given_top": [
+     [
+      "❤",
+      184
+     ],
+     [
+      "🔥",
+      15
+     ],
+     [
+      "⚡",
+      15
+     ]
+    ],
+    "key": "user6",
+    "messages": 451,
+    "name": "Person 6",
+    "received": 58,
+    "received_top": [
+     [
+      "❤",
+      31
+     ],
+     [
+      "🔥",
+      8
+     ],
+     [
+      "⚡",
+      7
+     ]
+    ]
+   },
+   {
+    "given": 6,
+    "given_top": [
+     [
+      "❤",
+      4
+     ],
+     [
+      "🤣",
+      1
+     ],
+     [
+      "🔥",
+      1
+     ]
+    ],
+    "key": "user12",
+    "messages": 156,
+    "name": "Person 12",
+    "received": 36,
+    "received_top": [
+     [
+      "❤",
+      22
+     ],
+     [
+      "⚡",
+      9
+     ],
+     [
+      "🏆",
+      3
+     ]
+    ]
+   },
+   {
+    "given": 20,
+    "given_top": [
+     [
+      "❤",
+      13
+     ],
+     [
+      "🔥",
+      4
+     ],
+     [
+      "⚡",
+      1
+     ]
+    ],
+    "key": "user21",
+    "messages": 64,
+    "name": "Person 20",
+    "received": 27,
+    "received_top": [
+     [
+      "❤",
+      23
+     ],
+     [
+      "⚡",
+      2
+     ],
+     [
+      "😭",
+      1
+     ]
+    ]
+   },
+   {
+    "given": 25,
+    "given_top": [
+     [
+      "❤",
+      20
+     ],
+     [
+      "👍",
+      3
+     ],
+     [
+      "😭",
+      1
+     ]
+    ],
+    "key": "user16",
+    "messages": 87,
+    "name": "Person 16",
+    "received": 24,
+    "received_top": [
+     [
+      "❤",
+      20
+     ],
+     [
+      "⚡",
+      4
+     ]
+    ]
+   },
+   {
+    "given": 81,
+    "given_top": [
+     [
+      "❤",
+      50
+     ],
+     [
+      "⚡",
+      7
+     ],
+     [
+      "🔥",
+      6
+     ]
+    ],
+    "key": "user19",
+    "messages": 69,
+    "name": "Person 18",
+    "received": 21,
+    "received_top": [
+     [
+      "❤",
+      9
+     ],
+     [
+      "🥰",
+      4
+     ],
+     [
+      "🔥",
+      2
+     ]
+    ]
+   },
+   {
+    "given": 48,
+    "given_top": [
+     [
+      "❤",
+      27
+     ],
+     [
+      "🔥",
+      7
+     ],
+     [
+      "⚡",
+      4
+     ]
+    ],
+    "key": "user25",
+    "messages": 50,
+    "name": "Person 24",
+    "received": 19,
+    "received_top": [
+     [
+      "❤",
+      12
+     ],
+     [
+      "⚡",
+      5
+     ],
+     [
+      "🤣",
+      1
+     ]
+    ]
+   },
+   {
+    "given": 18,
+    "given_top": [
+     [
+      "❤",
+      11
+     ],
+     [
+      "🔥",
+      5
+     ],
+     [
+      "👎",
+      1
+     ]
+    ],
+    "key": "user30",
+    "messages": 35,
+    "name": "Person 29",
+    "received": 17,
+    "received_top": [
+     [
+      "❤",
+      8
+     ],
+     [
+      "⚡",
+      7
+     ],
+     [
+      "🔥",
+      2
+     ]
+    ]
+   },
+   {
+    "given": 15,
+    "given_top": [
+     [
+      "❤",
+      14
+     ],
+     [
+      "🔥",
+      1
+     ]
+    ],
+    "key": "user13",
+    "messages": 118,
+    "name": "Person 13",
+    "received": 16,
+    "received_top": [
+     [
+      "❤",
+      10
+     ],
+     [
+      "⚡",
+      5
+     ],
+     [
+      "🔥",
+      1
+     ]
+    ]
+   },
+   {
+    "given": 20,
+    "given_top": [
+     [
+      "❤",
+      17
+     ],
+     [
+      "🔥",
+      3
+     ]
+    ],
+    "key": "user18",
+    "messages": 71,
+    "name": "Person 17",
+    "received": 16,
+    "received_top": [
+     [
+      "❤",
+      10
+     ],
+     [
+      "🥰",
+      2
+     ],
+     [
+      "⚡",
+      2
+     ]
+    ]
+   },
+   {
+    "given": 5,
+    "given_top": [
+     [
+      "❤",
+      4
+     ],
+     [
+      "👍",
+      1
+     ]
+    ],
+    "key": "user10",
+    "messages": 218,
+    "name": "Person 10",
+    "received": 15,
+    "received_top": [
+     [
+      "❤",
+      7
+     ],
+     [
+      "❤‍🔥",
+      4
+     ],
+     [
+      "⚡",
+      3
+     ]
+    ]
+   },
+   {
+    "given": 42,
+    "given_top": [
+     [
+      "❤",
+      31
+     ],
+     [
+      "⚡",
+      7
+     ],
+     [
+      "😭",
+      3
+     ]
+    ],
+    "key": "user24",
+    "messages": 51,
+    "name": "Person 23",
+    "received": 15,
+    "received_top": [
+     [
+      "❤",
+      10
+     ],
+     [
+      "chats/chat_562953540103937/topic_1/stickers/AnimatedSticker (2).tgs",
+      2
+     ],
+     [
+      "chats/chat_562953540103937/topic_12/stickers/AnimatedSticker (1).tgs",
+      2
+     ]
+    ]
+   },
+   {
+    "given": 2,
+    "given_top": [
+     [
+      "❤",
+      2
+     ]
+    ],
+    "key": "user28",
+    "messages": 45,
+    "name": "Person 27",
+    "received": 13,
+    "received_top": [
+     [
+      "⚡",
+      6
+     ],
+     [
+      "💘",
+      4
+     ],
+     [
+      "❤",
+      3
+     ]
+    ]
+   },
+   {
+    "given": 3,
+    "given_top": [
+     [
+      "⚡",
+      1
+     ],
+     [
+      "🔥",
+      1
+     ],
+     [
+      "chats/chat_562953540103937/topic_1/stickers/AnimatedSticker (3).tgs",
+      1
+     ]
+    ],
+    "key": "user37",
+    "messages": 11,
+    "name": "Person 36",
+    "received": 10,
+    "received_top": [
+     [
+      "❤",
+      4
+     ],
+     [
+      "😭",
+      3
+     ],
+     [
+      "❤‍🔥",
+      3
+     ]
+    ]
+   },
+   {
+    "given": 3,
+    "given_top": [
+     [
+      "❤",
+      2
+     ],
+     [
+      "❤‍🔥",
+      1
+     ]
+    ],
+    "key": "user15",
+    "messages": 90,
+    "name": "Person 15",
+    "received": 9,
+    "received_top": [
+     [
+      "❤",
+      8
+     ],
+     [
+      "🕊",
+      1
+     ]
+    ]
+   },
+   {
+    "given": 17,
+    "given_top": [
+     [
+      "❤",
+      13
+     ],
+     [
+      "☃",
+      1
+     ],
+     [
+      "🐳",
+      1
+     ]
+    ],
+    "key": "user22",
+    "messages": 63,
+    "name": "Person 21",
+    "received": 8,
+    "received_top": [
+     [
+      "❤",
+      6
+     ],
+     [
+      "🔥",
+      1
+     ],
+     [
+      "🤯",
+      1
+     ]
+    ]
+   },
+   {
+    "given": 12,
+    "given_top": [
+     [
+      "❤",
+      11
+     ],
+     [
+      "👍",
+      1
+     ]
+    ],
+    "key": "user32",
+    "messages": 28,
+    "name": "Person 31",
+    "received": 8,
+    "received_top": [
+     [
+      "❤",
+      4
+     ],
+     [
+      "⚡",
+      3
+     ],
+     [
+      "🔥",
+      1
+     ]
+    ]
+   },
+   {
+    "given": 18,
+    "given_top": [
+     [
+      "❤",
+      18
+     ]
+    ],
+    "key": "user17",
+    "messages": 72,
+    "name": "Person 10",
+    "received": 7,
+    "received_top": [
+     [
+      "❤",
+      7
+     ]
+    ]
+   },
+   {
+    "given": 16,
+    "given_top": [
+     [
+      "❤",
+      11
+     ],
+     [
+      "💔",
+      1
+     ],
+     [
+      "🤣",
+      1
+     ]
+    ],
+    "key": "user33",
+    "messages": 24,
+    "name": "Person 32",
+    "received": 7,
+    "received_top": [
+     [
+      "🔥",
+      4
+     ],
+     [
+      "⚡",
+      2
+     ],
+     [
+      "❤",
+      1
+     ]
+    ]
+   },
+   {
+    "given": 11,
+    "given_top": [
+     [
+      "❤",
+      5
+     ],
+     [
+      "🔥",
+      3
+     ],
+     [
+      "⚡",
+      2
+     ]
+    ],
+    "key": "user14",
+    "messages": 102,
+    "name": "Person 14",
+    "received": 5,
+    "received_top": [
+     [
+      "❤",
+      3
+     ],
+     [
+      "⚡",
+      2
+     ]
+    ]
+   },
+   {
+    "given": 13,
+    "given_top": [
+     [
+      "❤",
+      11
+     ],
+     [
+      "🔥",
+      2
+     ]
+    ],
+    "key": "user31",
+    "messages": 28,
+    "name": "Person 30",
+    "received": 2,
+    "received_top": [
+     [
+      "❤",
+      1
+     ],
+     [
+      "⚡",
+      1
+     ]
+    ]
+   },
+   {
+    "given": 12,
+    "given_top": [
+     [
+      "❤",
+      12
+     ]
+    ],
+    "key": "user42",
+    "messages": 8,
+    "name": "Person 41",
+    "received": 1,
+    "received_top": [
+     [
+      "🔥",
+      1
+     ]
+    ]
+   }
+  ],
+  "per_month": [
+   140,
+   396,
+   171,
+   138,
+   62,
+   309,
+   177,
+   6,
+   201
+  ],
+  "reacted": 963,
+  "reacted_per_month": [
+   91,
+   245,
+   117,
+   74,
+   33,
+   188,
+   94,
+   4,
+   117
+  ],
+  "total": 1600
+ },
  "renamed": [],
  "streak": {
   "days": 9,
@@ -13552,5 +15171,1783 @@
    "voices": 3,
    "words": 234
   }
- ]
+ ],
+ "trends": {
+  "latency_median": [
+   111,
+   549,
+   124,
+   76,
+   22,
+   27,
+   47,
+   null,
+   24
+  ],
+  "latency_minimum": 20,
+  "leaders": [
+   {
+    "key": "user2",
+    "messages": 105,
+    "name": "Person 2",
+    "share": 0.20038167938931298
+   },
+   {
+    "key": "user1",
+    "messages": 276,
+    "name": "Bob & Co <the second>",
+    "share": 0.20160701241782322
+   },
+   {
+    "key": "user1",
+    "messages": 188,
+    "name": "Bob & Co <the second>",
+    "share": 0.2379746835443038
+   },
+   {
+    "key": "user4",
+    "messages": 122,
+    "name": "Person 4",
+    "share": 0.16116248348745046
+   },
+   {
+    "key": "user14",
+    "messages": 53,
+    "name": "Person 14",
+    "share": 0.14887640449438203
+   },
+   {
+    "key": "user8",
+    "messages": 190,
+    "name": "Person 8",
+    "share": 0.13939838591342626
+   },
+   {
+    "key": "user2",
+    "messages": 84,
+    "name": "Person 2",
+    "share": 0.15819209039548024
+   },
+   {
+    "key": "user4",
+    "messages": 7,
+    "name": "Person 4",
+    "share": 0.4666666666666667
+   },
+   {
+    "key": "user3",
+    "messages": 330,
+    "name": "Person 3",
+    "share": 0.37714285714285717
+   }
+  ],
+  "mean_words": [
+   5.5,
+   5.9,
+   5.6,
+   7.4,
+   5.0,
+   6.0,
+   5.7,
+   8.8,
+   5.4
+  ],
+  "media_share": [
+   0.2538167938931298,
+   0.3564645726807889,
+   0.4291139240506329,
+   0.6684280052840158,
+   0.5842696629213483,
+   0.4086573734409391,
+   0.2919020715630885,
+   0.13333333333333333,
+   0.3382857142857143
+  ],
+  "messages": [
+   524,
+   1369,
+   790,
+   757,
+   356,
+   1363,
+   531,
+   15,
+   875
+  ],
+  "months": [
+   "2025-12",
+   "2026-01",
+   "2026-02",
+   "2026-03",
+   "2026-04",
+   "2026-05",
+   "2026-06",
+   "2026-07",
+   "2026-08"
+  ],
+  "people": [
+   {
+    "key": "user1",
+    "name": "Bob & Co <the second>",
+    "per_month": [
+     101,
+     276,
+     188,
+     76,
+     27,
+     49,
+     77,
+     0,
+     103
+    ]
+   },
+   {
+    "key": "user2",
+    "name": "Person 2",
+    "per_month": [
+     105,
+     165,
+     119,
+     67,
+     10,
+     89,
+     84,
+     0,
+     3
+    ]
+   },
+   {
+    "key": "user3",
+    "name": "Person 3",
+    "per_month": [
+     35,
+     44,
+     43,
+     48,
+     27,
+     65,
+     21,
+     0,
+     330
+    ]
+   },
+   {
+    "key": "user4",
+    "name": "Person 4",
+    "per_month": [
+     0,
+     17,
+     90,
+     122,
+     50,
+     168,
+     35,
+     7,
+     60
+    ]
+   },
+   {
+    "key": "user5",
+    "name": "Person 5",
+    "per_month": [
+     38,
+     103,
+     26,
+     104,
+     32,
+     107,
+     40,
+     4,
+     8
+    ]
+   },
+   {
+    "key": "user6",
+    "name": "Person 6",
+    "per_month": [
+     0,
+     91,
+     62,
+     55,
+     44,
+     121,
+     62,
+     0,
+     16
+    ]
+   },
+   {
+    "key": "user7",
+    "name": "Person 7",
+    "per_month": [
+     15,
+     17,
+     55,
+     35,
+     16,
+     25,
+     37,
+     0,
+     155
+    ]
+   },
+   {
+    "key": "user8",
+    "name": "Person 8",
+    "per_month": [
+     0,
+     115,
+     15,
+     1,
+     15,
+     190,
+     16,
+     0,
+     0
+    ]
+   },
+   {
+    "key": "user9",
+    "name": "Person 9",
+    "per_month": [
+     66,
+     161,
+     0,
+     8,
+     11,
+     69,
+     0,
+     0,
+     0
+    ]
+   },
+   {
+    "key": "user10",
+    "name": "Person 10",
+    "per_month": [
+     0,
+     51,
+     39,
+     63,
+     13,
+     18,
+     12,
+     0,
+     22
+    ]
+   },
+   {
+    "key": "user11",
+    "name": "Person 11",
+    "per_month": [
+     57,
+     20,
+     10,
+     3,
+     9,
+     32,
+     20,
+     0,
+     40
+    ]
+   },
+   {
+    "key": "user12",
+    "name": "Person 12",
+    "per_month": [
+     6,
+     3,
+     4,
+     73,
+     1,
+     57,
+     11,
+     0,
+     1
+    ]
+   }
+  ],
+  "reactions_per_message": [
+   0.26717557251908397,
+   0.2892622352081812,
+   0.21645569620253163,
+   0.18229854689564068,
+   0.17415730337078653,
+   0.22670579603815114,
+   0.3333333333333333,
+   0.4,
+   0.2297142857142857
+  ],
+  "reply_share": [
+   0.3549618320610687,
+   0.4368151935719503,
+   0.5329113924050632,
+   0.7595772787318362,
+   0.8230337078651685,
+   0.5370506236243581,
+   0.4708097928436911,
+   0.2,
+   0.5257142857142857
+  ],
+  "top3_share": [
+   0.5190839694656488,
+   0.4397370343316289,
+   0.5025316455696203,
+   0.3989431968295905,
+   0.41292134831460675,
+   0.35143066764490094,
+   0.4199623352165725,
+   0.9333333333333333,
+   0.672
+  ],
+  "voices": [
+   14,
+   28,
+   26,
+   27,
+   20,
+   28,
+   25,
+   4,
+   22
+  ]
+ },
+ "voice": {
+  "longest": {
+   "date": "2026-01-11 22:54",
+   "id": 1757,
+   "kind": "voice_message",
+   "name": "Person 2",
+   "seconds": 52,
+   "topic": 3
+  },
+  "median_seconds": 18,
+  "people": [
+   {
+    "key": "user2",
+    "name": "Person 2",
+    "seconds": 86,
+    "share": 0.003115264797507788,
+    "video_notes": 0,
+    "voice_notes": 2
+   },
+   {
+    "key": "user8",
+    "name": "Person 8",
+    "seconds": 31,
+    "share": 0.005681818181818182,
+    "video_notes": 0,
+    "voice_notes": 2
+   },
+   {
+    "key": "user23",
+    "name": "Person 22",
+    "seconds": 16,
+    "share": 0.018867924528301886,
+    "video_notes": 0,
+    "voice_notes": 1
+   }
+  ],
+  "per_month": [
+   [
+    "2025-12",
+    0
+   ],
+   [
+    "2026-01",
+    86
+   ],
+   [
+    "2026-02",
+    0
+   ],
+   [
+    "2026-03",
+    0
+   ],
+   [
+    "2026-04",
+    0
+   ],
+   [
+    "2026-05",
+    47
+   ],
+   [
+    "2026-06",
+    0
+   ],
+   [
+    "2026-07",
+    0
+   ],
+   [
+    "2026-08",
+    0
+   ]
+  ],
+  "undated": 0,
+  "video_notes": 0,
+  "video_seconds": 0,
+  "voice_notes": 5,
+  "voice_seconds": 133
+ },
+ "words": {
+  "months": [
+   {
+    "key": "2025-12",
+    "name": "2025-12",
+    "tokens": 1448,
+    "words": [
+     [
+      "word 1",
+      4
+     ],
+     [
+      "word 2",
+      4
+     ],
+     [
+      "word 3",
+      4
+     ],
+     [
+      "word 4",
+      4
+     ],
+     [
+      "word 5",
+      6
+     ],
+     [
+      "word 6",
+      6
+     ],
+     [
+      "word 7",
+      4
+     ],
+     [
+      "word 8",
+      4
+     ],
+     [
+      "word 9",
+      8
+     ],
+     [
+      "word 10",
+      4
+     ],
+     [
+      "word 11",
+      5
+     ],
+     [
+      "word 12",
+      4
+     ]
+    ]
+   },
+   {
+    "key": "2026-01",
+    "name": "2026-01",
+    "tokens": 3136,
+    "words": [
+     [
+      "word 13",
+      14
+     ],
+     [
+      "word 14",
+      8
+     ],
+     [
+      "word 15",
+      7
+     ],
+     [
+      "word 16",
+      13
+     ],
+     [
+      "word 17",
+      4
+     ],
+     [
+      "word 18",
+      4
+     ],
+     [
+      "word 19",
+      5
+     ],
+     [
+      "word 20",
+      5
+     ],
+     [
+      "word 21",
+      5
+     ],
+     [
+      "word 22",
+      5
+     ],
+     [
+      "word 23",
+      8
+     ],
+     [
+      "word 24",
+      8
+     ]
+    ]
+   },
+   {
+    "key": "2026-02",
+    "name": "2026-02",
+    "tokens": 1727,
+    "words": [
+     [
+      "word 25",
+      5
+     ],
+     [
+      "word 26",
+      5
+     ],
+     [
+      "word 27",
+      7
+     ],
+     [
+      "word 28",
+      5
+     ],
+     [
+      "word 29",
+      4
+     ],
+     [
+      "word 30",
+      5
+     ],
+     [
+      "word 31",
+      4
+     ],
+     [
+      "word 32",
+      7
+     ],
+     [
+      "word 33",
+      5
+     ],
+     [
+      "word 34",
+      10
+     ],
+     [
+      "word 35",
+      6
+     ],
+     [
+      "word 36",
+      4
+     ]
+    ]
+   },
+   {
+    "key": "2026-03",
+    "name": "2026-03",
+    "tokens": 1028,
+    "words": [
+     [
+      "word 37",
+      7
+     ],
+     [
+      "word 38",
+      5
+     ],
+     [
+      "word 39",
+      4
+     ],
+     [
+      "word 40",
+      4
+     ],
+     [
+      "word 41",
+      6
+     ],
+     [
+      "word 42",
+      4
+     ],
+     [
+      "word 43",
+      6
+     ],
+     [
+      "word 44",
+      4
+     ],
+     [
+      "word 45",
+      4
+     ],
+     [
+      "word 46",
+      4
+     ],
+     [
+      "word 47",
+      12
+     ],
+     [
+      "word 48",
+      4
+     ]
+    ]
+   },
+   {
+    "key": "2026-04",
+    "name": "2026-04",
+    "tokens": 500,
+    "words": [
+     [
+      "word 49",
+      4
+     ],
+     [
+      "word 50",
+      4
+     ],
+     [
+      "word 51",
+      5
+     ],
+     [
+      "word 52",
+      8
+     ],
+     [
+      "word 53",
+      10
+     ],
+     [
+      "word 54",
+      4
+     ],
+     [
+      "word 55",
+      11
+     ],
+     [
+      "word 56",
+      5
+     ],
+     [
+      "word 57",
+      7
+     ],
+     [
+      "word 58",
+      5
+     ],
+     [
+      "word 59",
+      5
+     ],
+     [
+      "word 60",
+      4
+     ]
+    ]
+   },
+   {
+    "key": "2026-05",
+    "name": "2026-05",
+    "tokens": 3145,
+    "words": [
+     [
+      "word 61",
+      12
+     ],
+     [
+      "word 62",
+      7
+     ],
+     [
+      "word 63",
+      5
+     ],
+     [
+      "word 64",
+      6
+     ],
+     [
+      "word 65",
+      6
+     ],
+     [
+      "word 66",
+      4
+     ],
+     [
+      "word 67",
+      4
+     ],
+     [
+      "word 68",
+      4
+     ],
+     [
+      "word 69",
+      4
+     ],
+     [
+      "word 70",
+      7
+     ],
+     [
+      "word 71",
+      8
+     ],
+     [
+      "word 72",
+      5
+     ]
+    ]
+   },
+   {
+    "key": "2026-06",
+    "name": "2026-06",
+    "tokens": 1386,
+    "words": [
+     [
+      "word 73",
+      5
+     ],
+     [
+      "word 74",
+      6
+     ],
+     [
+      "word 75",
+      4
+     ],
+     [
+      "word 76",
+      6
+     ],
+     [
+      "word 77",
+      6
+     ],
+     [
+      "word 78",
+      5
+     ],
+     [
+      "word 79",
+      4
+     ],
+     [
+      "word 80",
+      4
+     ],
+     [
+      "word 81",
+      4
+     ],
+     [
+      "word 82",
+      4
+     ],
+     [
+      "word 83",
+      6
+     ],
+     [
+      "word 84",
+      4
+     ]
+    ]
+   },
+   {
+    "key": "2026-07",
+    "name": "2026-07",
+    "tokens": 78,
+    "words": []
+   },
+   {
+    "key": "2026-08",
+    "name": "2026-08",
+    "tokens": 1970,
+    "words": [
+     [
+      "word 85",
+      10
+     ],
+     [
+      "word 86",
+      8
+     ],
+     [
+      "word 87",
+      9
+     ],
+     [
+      "word 88",
+      12
+     ],
+     [
+      "word 89",
+      6
+     ],
+     [
+      "word 90",
+      6
+     ],
+     [
+      "word 91",
+      6
+     ],
+     [
+      "word 92",
+      8
+     ],
+     [
+      "word 93",
+      5
+     ],
+     [
+      "word 94",
+      5
+     ],
+     [
+      "word 95",
+      5
+     ],
+     [
+      "word 96",
+      14
+     ]
+    ]
+   }
+  ],
+  "people": [
+   {
+    "key": "user1",
+    "name": "Bob & Co <the second>",
+    "tokens": 1824,
+    "words": [
+     [
+      "word 97",
+      7
+     ],
+     [
+      "word 98",
+      8
+     ],
+     [
+      "word 99",
+      4
+     ],
+     [
+      "word 100",
+      6
+     ],
+     [
+      "word 101",
+      4
+     ],
+     [
+      "word 102",
+      10
+     ],
+     [
+      "word 103",
+      9
+     ],
+     [
+      "word 104",
+      5
+     ],
+     [
+      "word 105",
+      5
+     ],
+     [
+      "word 106",
+      4
+     ],
+     [
+      "word 107",
+      4
+     ],
+     [
+      "word 108",
+      4
+     ]
+    ]
+   },
+   {
+    "key": "user4",
+    "name": "Person 4",
+    "tokens": 1630,
+    "words": [
+     [
+      "word 81",
+      8
+     ],
+     [
+      "word 80",
+      7
+     ],
+     [
+      "word 61",
+      8
+     ],
+     [
+      "word 35",
+      9
+     ],
+     [
+      "word 109",
+      4
+     ],
+     [
+      "word 110",
+      7
+     ],
+     [
+      "word 111",
+      4
+     ],
+     [
+      "word 91",
+      4
+     ],
+     [
+      "word 32",
+      8
+     ],
+     [
+      "word 58",
+      21
+     ],
+     [
+      "word 112",
+      9
+     ],
+     [
+      "word 113",
+      8
+     ]
+    ]
+   },
+   {
+    "key": "user2",
+    "name": "Person 2",
+    "tokens": 1451,
+    "words": [
+     [
+      "word 114",
+      5
+     ],
+     [
+      "word 73",
+      4
+     ],
+     [
+      "word 115",
+      5
+     ],
+     [
+      "word 116",
+      5
+     ],
+     [
+      "word 117",
+      4
+     ],
+     [
+      "word 34",
+      11
+     ],
+     [
+      "word 118",
+      4
+     ],
+     [
+      "word 82",
+      5
+     ],
+     [
+      "word 119",
+      5
+     ],
+     [
+      "word 8",
+      4
+     ],
+     [
+      "word 120",
+      4
+     ],
+     [
+      "word 121",
+      4
+     ]
+    ]
+   },
+   {
+    "key": "user6",
+    "name": "Person 6",
+    "tokens": 1280,
+    "words": [
+     [
+      "word 122",
+      4
+     ],
+     [
+      "word 123",
+      4
+     ],
+     [
+      "word 124",
+      4
+     ],
+     [
+      "word 70",
+      5
+     ],
+     [
+      "word 125",
+      4
+     ],
+     [
+      "word 119",
+      5
+     ],
+     [
+      "word 126",
+      5
+     ],
+     [
+      "word 127",
+      8
+     ],
+     [
+      "word 54",
+      6
+     ],
+     [
+      "word 128",
+      8
+     ],
+     [
+      "word 46",
+      5
+     ],
+     [
+      "word 129",
+      6
+     ]
+    ]
+   },
+   {
+    "key": "user5",
+    "name": "Person 5",
+    "tokens": 1203,
+    "words": [
+     [
+      "word 63",
+      5
+     ],
+     [
+      "word 130",
+      4
+     ],
+     [
+      "word 131",
+      4
+     ],
+     [
+      "word 132",
+      14
+     ],
+     [
+      "word 133",
+      10
+     ],
+     [
+      "word 134",
+      4
+     ],
+     [
+      "word 135",
+      4
+     ],
+     [
+      "word 136",
+      4
+     ],
+     [
+      "word 137",
+      7
+     ],
+     [
+      "word 138",
+      5
+     ],
+     [
+      "word 139",
+      4
+     ],
+     [
+      "word 140",
+      4
+     ]
+    ]
+   },
+   {
+    "key": "user3",
+    "name": "Person 3",
+    "tokens": 1182,
+    "words": [
+     [
+      "word 96",
+      15
+     ],
+     [
+      "word 88",
+      10
+     ],
+     [
+      "word 89",
+      5
+     ],
+     [
+      "word 141",
+      10
+     ],
+     [
+      "word 142",
+      4
+     ],
+     [
+      "word 93",
+      4
+     ],
+     [
+      "word 85",
+      6
+     ],
+     [
+      "word 21",
+      4
+     ],
+     [
+      "word 143",
+      4
+     ],
+     [
+      "word 144",
+      5
+     ],
+     [
+      "word 145",
+      7
+     ],
+     [
+      "word 146",
+      4
+     ]
+    ]
+   },
+   {
+    "key": "user9",
+    "name": "Person 9",
+    "tokens": 1001,
+    "words": [
+     [
+      "word 147",
+      6
+     ],
+     [
+      "word 1",
+      4
+     ],
+     [
+      "word 148",
+      5
+     ],
+     [
+      "word 149",
+      6
+     ],
+     [
+      "word 150",
+      9
+     ],
+     [
+      "word 151",
+      5
+     ],
+     [
+      "word 47",
+      16
+     ],
+     [
+      "word 13",
+      5
+     ],
+     [
+      "word 10",
+      4
+     ],
+     [
+      "word 152",
+      4
+     ],
+     [
+      "word 153",
+      4
+     ],
+     [
+      "word 154",
+      5
+     ]
+    ]
+   },
+   {
+    "key": "user7",
+    "name": "Person 7",
+    "tokens": 584,
+    "words": [
+     [
+      "word 25",
+      4
+     ],
+     [
+      "word 155",
+      4
+     ],
+     [
+      "word 128",
+      5
+     ],
+     [
+      "word 156",
+      5
+     ],
+     [
+      "word 157",
+      4
+     ],
+     [
+      "word 53",
+      7
+     ],
+     [
+      "word 158",
+      5
+     ],
+     [
+      "word 159",
+      9
+     ],
+     [
+      "word 47",
+      6
+     ],
+     [
+      "word 160",
+      5
+     ],
+     [
+      "word 161",
+      5
+     ],
+     [
+      "word 162",
+      4
+     ]
+    ]
+   },
+   {
+    "key": "user8",
+    "name": "Person 8",
+    "tokens": 584,
+    "words": [
+     [
+      "word 62",
+      4
+     ],
+     [
+      "word 163",
+      4
+     ],
+     [
+      "word 164",
+      8
+     ],
+     [
+      "word 162",
+      5
+     ],
+     [
+      "word 165",
+      6
+     ],
+     [
+      "word 55",
+      10
+     ],
+     [
+      "word 159",
+      8
+     ],
+     [
+      "word 56",
+      4
+     ]
+    ]
+   },
+   {
+    "key": "user11",
+    "name": "Person 11",
+    "tokens": 443,
+    "words": [
+     [
+      "word 166",
+      9
+     ],
+     [
+      "word 58",
+      8
+     ],
+     [
+      "word 167",
+      6
+     ],
+     [
+      "word 168",
+      5
+     ],
+     [
+      "word 169",
+      4
+     ],
+     [
+      "word 170",
+      4
+     ],
+     [
+      "word 161",
+      4
+     ],
+     [
+      "word 60",
+      4
+     ],
+     [
+      "word 59",
+      4
+     ]
+    ]
+   }
+  ],
+  "script": {
+   "cyrillic": 524,
+   "latin": 86238,
+   "messages_cyrillic": 29,
+   "messages_latin": 3626,
+   "messages_mixed": 0,
+   "month_cyrillic": [
+    0.0,
+    0.0,
+    0.003850596842510589,
+    0.0,
+    0.002117148906139732,
+    0.0,
+    0.040145985401459854,
+    0.0,
+    0.01207966046359778
+   ],
+   "months": [
+    "2025-12",
+    "2026-01",
+    "2026-02",
+    "2026-03",
+    "2026-04",
+    "2026-05",
+    "2026-06",
+    "2026-07",
+    "2026-08"
+   ],
+   "people": [
+    {
+     "cyrillic": 0,
+     "key": "user1",
+     "latin": 11241,
+     "name": "Bob & Co <the second>",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user4",
+     "latin": 9839,
+     "name": "Person 4",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 3,
+     "key": "user2",
+     "latin": 8774,
+     "name": "Person 2",
+     "share": 0.0003418024381907258
+    },
+    {
+     "cyrillic": 0,
+     "key": "user6",
+     "latin": 7534,
+     "name": "Person 6",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user3",
+     "latin": 7284,
+     "name": "Person 3",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user5",
+     "latin": 7075,
+     "name": "Person 5",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user9",
+     "latin": 5896,
+     "name": "Person 9",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user8",
+     "latin": 3579,
+     "name": "Person 8",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user7",
+     "latin": 3498,
+     "name": "Person 7",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user11",
+     "latin": 2789,
+     "name": "Person 11",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user13",
+     "latin": 1472,
+     "name": "Person 13",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user25",
+     "latin": 1472,
+     "name": "Person 24",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user12",
+     "latin": 1373,
+     "name": "Person 12",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user21",
+     "latin": 1211,
+     "name": "Person 20",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user16",
+     "latin": 1075,
+     "name": "Person 16",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user22",
+     "latin": 971,
+     "name": "Person 21",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user23",
+     "latin": 955,
+     "name": "Person 22",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user18",
+     "latin": 953,
+     "name": "Person 17",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user17",
+     "latin": 912,
+     "name": "Person 10",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user27",
+     "latin": 907,
+     "name": "Person 26",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user15",
+     "latin": 659,
+     "name": "Person 15",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 4,
+     "key": "user31",
+     "latin": 557,
+     "name": "Person 30",
+     "share": 0.0071301247771836
+    },
+    {
+     "cyrillic": 0,
+     "key": "user30",
+     "latin": 528,
+     "name": "Person 29",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 116,
+     "key": "user24",
+     "latin": 367,
+     "name": "Person 23",
+     "share": 0.2401656314699793
+    },
+    {
+     "cyrillic": 0,
+     "key": "user32",
+     "latin": 463,
+     "name": "Person 31",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user37",
+     "latin": 448,
+     "name": "Person 36",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user19",
+     "latin": 418,
+     "name": "Person 18",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user10",
+     "latin": 414,
+     "name": "Person 10",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user29",
+     "latin": 399,
+     "name": "Person 28",
+     "share": 0.0
+    },
+    {
+     "cyrillic": 0,
+     "key": "user39",
+     "latin": 392,
+     "name": "Person 38",
+     "share": 0.0
+    }
+   ]
+  },
+  "tokens": 14418,
+  "topics": [
+   {
+    "key": "0",
+    "name": "bitno pročitaj",
+    "tokens": 149,
+    "words": []
+   },
+   {
+    "key": "1",
+    "name": "editorijal",
+    "tokens": 248,
+    "words": [
+     [
+      "word 97",
+      5
+     ],
+     [
+      "word 171",
+      5
+     ],
+     [
+      "word 47",
+      4
+     ],
+     [
+      "word 55",
+      5
+     ]
+    ]
+   },
+   {
+    "key": "2",
+    "name": "foto video",
+    "tokens": 1108,
+    "words": [
+     [
+      "word 172",
+      15
+     ],
+     [
+      "word 37",
+      6
+     ],
+     [
+      "word 173",
+      6
+     ],
+     [
+      "word 47",
+      18
+     ],
+     [
+      "word 52",
+      11
+     ],
+     [
+      "word 174",
+      4
+     ],
+     [
+      "word 175",
+      7
+     ],
+     [
+      "word 5",
+      4
+     ],
+     [
+      "word 176",
+      4
+     ],
+     [
+      "word 51",
+      5
+     ],
+     [
+      "word 177",
+      4
+     ],
+     [
+      "word 57",
+      17
+     ]
+    ]
+   },
+   {
+    "key": "3",
+    "name": "ćaskanje",
+    "tokens": 12913,
+    "words": [
+     [
+      "word 178",
+      63
+     ],
+     [
+      "word 158",
+      63
+     ],
+     [
+      "word 179",
+      34
+     ],
+     [
+      "word 180",
+      31
+     ],
+     [
+      "word 181",
+      30
+     ],
+     [
+      "word 169",
+      40
+     ],
+     [
+      "word 141",
+      23
+     ],
+     [
+      "word 182",
+      22
+     ],
+     [
+      "word 88",
+      21
+     ],
+     [
+      "word 183",
+      20
+     ],
+     [
+      "word 154",
+      20
+     ],
+     [
+      "word 138",
+      17
+     ]
+    ]
+   }
+  ],
+  "vocabulary": 5223
+ }
 }

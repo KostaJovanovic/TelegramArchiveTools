@@ -113,6 +113,68 @@ pub fn stamp_minutes(when: &NaiveDateTime) -> String {
     when.format("%Y-%m-%d %H:%M").to_string()
 }
 
+/// `2026-08` for a message's wall-clock month.
+pub fn month_of(when: &NaiveDateTime) -> String {
+    when.format("%Y-%m").to_string()
+}
+
+/// Every month from the first message's to the last's, silent ones included.
+///
+/// The same axis `retention` draws on, and for the same reason: taking only
+/// the months that appear closes a six-month gap into one step. `msgs` must be
+/// in time order, which is the order the reader hands them over in.
+pub fn month_axis(msgs: &[&tga_read::Msg]) -> Vec<String> {
+    use chrono::Datelike;
+    let (Some(first), Some(last)) = (msgs.first(), msgs.last()) else {
+        return Vec::new();
+    };
+    let (first, last) = (first.when.date(), last.when.date());
+    let mut months = Vec::new();
+    let (mut year, mut month) = (first.year(), first.month());
+    while (year, month) <= (last.year(), last.month()) {
+        months.push(format!("{year:04}-{month:02}"));
+        if month == 12 {
+            year += 1;
+            month = 1;
+        } else {
+            month += 1;
+        }
+    }
+    months
+}
+
+/// A message's slot on [`month_axis`], by arithmetic.
+///
+/// The figures that walk every message once a month used to format a
+/// `2026-08` string per message and look it up, which on half a million
+/// messages was most of what they cost.
+pub struct MonthIndex {
+    first: i32,
+    len: usize,
+}
+
+impl MonthIndex {
+    pub fn new(axis: &[String]) -> Self {
+        let first = axis
+            .first()
+            .and_then(|m| {
+                let (year, month) = m.split_once('-')?;
+                Some(year.parse::<i32>().ok()? * 12 + month.parse::<i32>().ok()? - 1)
+            })
+            .unwrap_or(0);
+        MonthIndex {
+            first,
+            len: axis.len(),
+        }
+    }
+
+    pub fn of(&self, when: &NaiveDateTime) -> Option<usize> {
+        use chrono::Datelike;
+        let at = when.year() * 12 + when.month() as i32 - 1 - self.first;
+        usize::try_from(at).ok().filter(|at| *at < self.len)
+    }
+}
+
 /// `str(Path(...))` — the separator the platform uses, not the one that was
 /// typed.
 ///
@@ -132,6 +194,22 @@ pub fn path_string(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_month_is_found_on_the_axis_by_arithmetic() {
+        let axis: Vec<String> = ["2024-11", "2024-12", "2025-01"].map(String::from).to_vec();
+        let index = MonthIndex::new(&axis);
+        let at = |y, m| {
+            chrono::NaiveDate::from_ymd_opt(y, m, 15)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap()
+        };
+        assert_eq!(index.of(&at(2024, 11)), Some(0));
+        assert_eq!(index.of(&at(2025, 1)), Some(2), "across the year");
+        assert_eq!(index.of(&at(2024, 10)), None);
+        assert_eq!(index.of(&at(2025, 2)), None);
+    }
 
     #[test]
     fn rounding_follows_python_not_the_schoolbook_rule() {

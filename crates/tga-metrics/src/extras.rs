@@ -18,19 +18,19 @@ use crate::identity::People;
 use crate::util::{round1, stamp_minutes, Counter};
 
 /// Actions that add or remove somebody, as Desktop names them.
-const JOIN_ACTIONS: &[&str] = &[
+pub(crate) const JOIN_ACTIONS: &[&str] = &[
     "join_group_by_link",
     "invite_members",
     "invite_to_group_call",
 ];
-const LEAVE_ACTIONS: &[&str] = &["remove_members"];
+pub(crate) const LEAVE_ACTIONS: &[&str] = &["remove_members"];
 
 /// The small hours, for the night-owl figure. Stated in the report so the
 /// reader can disagree with the boundary rather than guess at it.
 const NIGHT: std::ops::Range<usize> = 0..5;
 const MORNING: std::ops::Range<usize> = 5..9;
 
-fn snippet(msg: &Msg) -> String {
+pub(crate) fn snippet(msg: &Msg) -> String {
     const LIMIT: usize = 140;
     let text = msg.text.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.is_empty() {

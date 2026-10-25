@@ -10,9 +10,15 @@ pub mod conversation;
 pub mod dynamics;
 pub mod extras;
 pub mod graph;
+pub mod history;
 pub mod identity;
 pub mod people;
+pub mod polls;
+pub mod reactions;
+pub mod trends;
 pub mod util;
+pub mod voice;
+pub mod words;
 
 #[cfg(test)]
 mod testing;
@@ -70,6 +76,12 @@ pub fn analyse(export: &Export) -> (Stats, People) {
         streak: extras::streaks(export, &who),
         churn: extras::churn(export, &who, &activity),
         dynamics: Some(dynamics::compute(export, &who, &index)),
+        polls: Some(polls::compute(export, &who)),
+        voice: Some(voice::compute(export, &who)),
+        history: Some(history::compute(export, &who, &index)),
+        trends: Some(trends::compute(export, &who, &index)),
+        reactions: Some(reactions::compute(export, &who)),
+        words: Some(words::compute(export, &who)),
         renamed: renamed
             .iter()
             .map(|p| tga_stats::Renamed {

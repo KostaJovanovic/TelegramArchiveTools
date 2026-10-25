@@ -157,14 +157,19 @@ pub fn render(stats: &Stats, names: &Names, notes: &Notes, options: &Options) ->
     } else {
         "People"
     };
-    let parts: [(&str, &str, String); 10] = [
+    let parts: [(&str, &str, String); 15] = [
         ("whole", "Timeline", sections::timeline(stats, notes, names)),
         ("rhythm", "Rhythm", sections::rhythm(stats)),
+        ("trend", "Over time", sections::trend(stats)),
         ("people", people_title, sections::people(stats)),
         ("talk", "Conversation", sections::conversation(stats, names)),
         ("between", "Between people", sections::between(stats)),
         ("said", "What was said", sections::said(stats)),
+        ("words", "Words", sections::words(stats)),
+        ("reactions", "Reactions", sections::reactions(stats)),
+        ("polls", "Polls", sections::polls(stats)),
         ("churn", "Coming and going", churn),
+        ("history", "Group history", sections::history(stats)),
         ("topics", "Topics", sections::topics(stats)),
         ("records", "Records", sections::records(stats)),
         (
@@ -602,6 +607,240 @@ mod tests {
         assert!(!html.contains("id=\"between\""));
         assert!(!html.contains("#between"));
         assert!(html.ends_with("</body></html>\n"));
+    }
+
+    /// All six newer branches, populated, with a hostile string in every
+    /// place one can come from the export.
+    fn filled() -> Stats {
+        use tga_stats::*;
+        let hostile = "<b>x</b> & co";
+        let months = vec!["2025-01".to_string(), "2025-02".to_string()];
+        Stats {
+            activity: dated(),
+            polls: Some(Polls {
+                rows: vec![PollRow {
+                    id: 7,
+                    date: "2025-01-02 10:00".into(),
+                    key: "user1".into(),
+                    name: "Ana".into(),
+                    question: format!("{hostile}?"),
+                    voters: 9,
+                    answers: vec![Count::new("petak", 6), Count::new(hostile, 3)],
+                    ..Default::default()
+                }],
+                total: 1,
+                shown: 1,
+                votes: 9,
+                median_voters: 9,
+                per_month: vec![Count::new("2025-01", 1), Count::new("2025-02", 0)],
+                ..Default::default()
+            }),
+            voice: Some(Voice {
+                voice_notes: 3,
+                voice_seconds: 200,
+                median_seconds: 60,
+                per_month: vec![Count::new("2025-01", 200), Count::new("2025-02", 0)],
+                people: vec![VoiceRow {
+                    key: "user1".into(),
+                    name: "Ana".into(),
+                    voice_notes: 3,
+                    seconds: 200,
+                    share: 0.5,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            history: Some(History {
+                events: vec![
+                    HistoryEvent {
+                        date: "2025-01-03 12:00".into(),
+                        action: "edit_group_title".into(),
+                        name: "Ana".into(),
+                        title: hostile.into(),
+                        ..Default::default()
+                    },
+                    HistoryEvent {
+                        date: "2025-01-04 12:00".into(),
+                        action: "pin_message".into(),
+                        name: "Bob".into(),
+                        pinned: Some(3),
+                        pinned_who: "Ana".into(),
+                        pinned_text: hostile.into(),
+                        ..Default::default()
+                    },
+                ],
+                total: 2,
+                shown: 2,
+                kinds: vec![
+                    Count::new("edit_group_title", 1),
+                    Count::new("pin_message", 1),
+                ],
+            }),
+            // Three months, so the latency panel has two readings to draw and
+            // one month it could not read between them.
+            trends: Some(Trends {
+                months: vec!["2025-01".into(), "2025-02".into(), "2025-03".into()],
+                messages: vec![4, 2, 3],
+                voices: vec![2, 1, 2],
+                top3_share: vec![1.0, 1.0, 1.0],
+                reply_share: vec![0.25, 0.5, 0.0],
+                latency_median: vec![Some(120), None, Some(60)],
+                latency_minimum: 20,
+                mean_words: vec![3.5, 2.0, 1.0],
+                media_share: vec![0.0, 0.5, 0.0],
+                reactions_per_message: vec![0.5, 0.0, 0.0],
+                leaders: vec![
+                    Some(Leader {
+                        key: "user1".into(),
+                        name: hostile.into(),
+                        messages: 3,
+                        share: 0.75,
+                    }),
+                    None,
+                    None,
+                ],
+                ..Default::default()
+            }),
+            reactions: Some(Reactions {
+                total: 5,
+                named: 3,
+                reacted: 2,
+                messages: 6,
+                kinds: vec![Count::new("\u{1F44D}", 4), Count::new("custom emoji", 1)],
+                custom: 1,
+                months: months.clone(),
+                per_month: vec![5, 0],
+                reacted_per_month: vec![2, 0],
+                messages_per_month: vec![4, 2],
+                people: vec![ReactionRow {
+                    key: "user1".into(),
+                    name: "Ana".into(),
+                    messages: 4,
+                    received: 5,
+                    received_top: vec![Count::new("\u{1F44D}", 4)],
+                    ..Default::default()
+                }],
+            }),
+            words: Some(Words {
+                tokens: 40,
+                vocabulary: 12,
+                people: vec![WordSet {
+                    key: "user1".into(),
+                    name: "Ana".into(),
+                    tokens: 20,
+                    words: vec![Count::new(hostile, 5)],
+                }],
+                script: Script {
+                    cyrillic: 2,
+                    latin: 998,
+                    messages_latin: 6,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..bare()
+        }
+    }
+
+    #[test]
+    fn every_newer_section_renders_and_is_in_the_nav() {
+        let html = render(&filled(), &Names::new(), &Notes::default(), &options());
+        for anchor in ["trend", "words", "reactions", "polls", "history"] {
+            assert!(
+                html.contains(&format!("<section id=\"{anchor}\">")),
+                "{anchor}"
+            );
+            assert!(
+                html.contains(&format!("href=\"#{anchor}\"")),
+                "{anchor} in the nav"
+            );
+        }
+        assert!(html.contains("<h3>Voice and video notes</h3>"));
+        assert!(html.contains("<h3>How concentrated the talk was</h3>"));
+        assert!(html.contains("<h3>Who led each month</h3>"));
+        assert!(html.contains("renamed the group to <b>"));
+        assert!(html.contains("pinned a message by Ana:"));
+        // The winning answer is the bold one.
+        assert!(html.contains("<b>petak</b><span class=\"num muted\"> 6</span>"));
+        // An unread month is a tooltip, not a zero.
+        assert!(html.contains("02 · no reading"));
+        // Under the script floor, one sentence and no charts.
+        assert!(
+            html.contains("Written almost entirely in Latin: 0.2% of the letters are Cyrillic.")
+        );
+        assert!(!html.contains("<h3>Who writes in Cyrillic</h3>"));
+        assert!(html.contains("of the 5 reactions here"));
+    }
+
+    #[test]
+    fn nothing_from_the_export_escapes_into_the_newer_sections() {
+        let html = render(&filled(), &Names::new(), &Notes::default(), &options());
+        assert!(
+            !html.contains("<b>x</b> & co"),
+            "a raw string reached the page"
+        );
+        assert!(html.contains("&lt;b&gt;x&lt;/b&gt; &amp; co"));
+    }
+
+    #[test]
+    fn a_chat_written_in_both_scripts_gets_both_charts() {
+        // The golden's archive is 0.6% Cyrillic, under the floor, so it only
+        // ever renders the one-sentence form.
+        let mut stats = filled();
+        if let Some(words) = stats.words.as_mut() {
+            words.script = tga_stats::Script {
+                cyrillic: 300,
+                latin: 700,
+                months: vec!["2025-01".into(), "2025-02".into()],
+                month_cyrillic: vec![0.1, 0.5],
+                people: vec![tga_stats::ScriptRow {
+                    key: "user1".into(),
+                    name: "Ana".into(),
+                    cyrillic: 300,
+                    latin: 100,
+                    share: 0.75,
+                }],
+                ..Default::default()
+            };
+        }
+        let html = render(&stats, &Names::new(), &Notes::default(), &options());
+        assert!(html.contains("<h3>Who writes in Cyrillic</h3>"));
+        assert!(html.contains("<b>30.0%</b> of all the letters are Cyrillic"));
+        assert!(html.contains("75.0% Cyrillic"));
+        assert!(html.contains("<h3>Cyrillic, month by month</h3>"));
+        assert!(!html.contains("Written almost entirely in"));
+    }
+
+    #[test]
+    fn a_private_chat_has_no_ranking_of_two_over_time() {
+        let mut stats = filled();
+        let person = |key: &str| tga_stats::Person {
+            key: key.into(),
+            name: key.into(),
+            messages: 3,
+            ..Default::default()
+        };
+        stats.people.rows = vec![person("a"), person("b")];
+        let html = render(&stats, &Names::new(), &Notes::default(), &options());
+        assert!(html.contains("<section id=\"trend\">"));
+        assert!(!html.contains("How concentrated the talk was"));
+        assert!(!html.contains("Who led each month"));
+    }
+
+    #[test]
+    fn a_chat_without_polls_notes_or_changes_gets_none_of_those_sections() {
+        let mut stats = filled();
+        stats.polls = Some(tga_stats::Polls::default());
+        stats.voice = Some(tga_stats::Voice::default());
+        if let Some(history) = stats.history.as_mut() {
+            // Joins only: Coming and going already charts those.
+            history.events.clear();
+            history.kinds = vec![tga_stats::Count::new("join_group_by_link", 40)];
+        }
+        let html = render(&stats, &Names::new(), &Notes::default(), &options());
+        assert!(!html.contains("id=\"polls\"") && !html.contains("#polls"));
+        assert!(!html.contains("id=\"history\"") && !html.contains("#history"));
+        assert!(!html.contains("Voice and video notes"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! The eleven sections of the report, and the small helpers they share.
+//! The sections of the report, and the small helpers they share.
 //!
 //! **The structure is one shared time axis.** The archive's whole life is drawn
 //! once, full width, at the top; every topic and every person below is drawn as
@@ -35,27 +35,39 @@ mod between;
 mod churn;
 mod conversation;
 mod glance;
+mod history;
 mod masthead;
 mod notes;
 mod people;
+mod polls;
+mod reactions;
 mod records;
 mod rhythm;
 mod said;
 mod timeline;
 mod topics;
+mod trend;
+mod voice;
+mod words;
 
 pub use between::between;
 pub use churn::churn;
 pub use conversation::conversation;
 pub use glance::glance;
+pub use history::history;
 pub use masthead::masthead;
 pub use notes::notes;
 pub use people::people;
+pub use polls::polls;
+pub use reactions::reactions;
 pub use records::records;
 pub use rhythm::rhythm;
 pub use said::said;
 pub use timeline::timeline;
 pub use topics::topics;
+pub use trend::trend;
+pub use voice::voice;
+pub use words::words;
 
 // ---------------------------------------------------------------------------
 // small helpers

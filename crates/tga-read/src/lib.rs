@@ -59,6 +59,25 @@ pub struct Reaction {
     pub named: Vec<String>,
 }
 
+/// Desktop's `poll` object: the question, and each answer with its tally.
+///
+/// **Tallies, never voters.** Desktop records how many chose each answer and
+/// whether the exporting account was one of them, and nothing about who the
+/// others were — so nothing downstream can say who voted for what.
+#[derive(Debug, Clone, Default)]
+pub struct Poll {
+    pub question: String,
+    pub closed: bool,
+    pub total_voters: i64,
+    pub answers: Vec<PollAnswer>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PollAnswer {
+    pub text: String,
+    pub voters: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct Msg {
     pub id: i64,
@@ -108,6 +127,18 @@ pub struct Msg {
     pub edited: bool,
     pub members: Vec<String>,
     pub grouped: Option<i64>,
+    /// The poll this message carries, if it is one.
+    pub poll: Option<Poll>,
+    /// `duration_seconds`: how long a voice note, a round video, a video or
+    /// a piece of audio runs, and 0 where Desktop wrote none.
+    pub duration: i64,
+    /// The name a service message gives something: the group's new title
+    /// (`edit_group_title`), the old group's (`migrate_from_group`), a new
+    /// topic's (`topic_created`) or a renamed one's (`topic_edit`). Empty
+    /// otherwise.
+    pub title: String,
+    /// The message a `pin_message` pinned, when the export says which.
+    pub pinned: Option<i64>,
 }
 
 impl Msg {
@@ -588,6 +619,19 @@ pub fn one(raw: &Value, topic: usize, root: Option<i64>) -> Option<Msg> {
         edited: matches!(raw.get("edited"), Some(v) if !v.is_null() && v != &Value::Bool(false)),
         members: Vec::new(),
         grouped: as_i64(raw.get("grouped_id")),
+        poll: raw.get("poll").and_then(poll),
+        duration: as_int(raw.get("duration_seconds")),
+        // Service messages only: an audio file carries a `title` of its own,
+        // beside its `performer`. `topic_edit` names the new title
+        // `new_title`; the other three call it `title`.
+        title: match service {
+            false => String::new(),
+            true => match as_text(raw.get("title")) {
+                title if title.is_empty() => as_text(raw.get("new_title")),
+                title => title,
+            },
+        },
+        pinned: service.then(|| as_i64(raw.get("message_id"))).flatten(),
     };
 
     entities(raw, &mut out);
@@ -654,6 +698,34 @@ pub fn one(raw: &Value, topic: usize, root: Option<i64>) -> Option<Msg> {
     }
 
     Some(out)
+}
+
+/// A `poll` object, or `None` if it is not one.
+///
+/// The question and answers go through [`plain`] rather than being read as
+/// strings, so a later Desktop that writes them with entities, the way it
+/// writes `text`, still reads.
+fn poll(raw: &Value) -> Option<Poll> {
+    if !raw.is_object() {
+        return None;
+    }
+    let answers = match raw.get("answers") {
+        Some(Value::Array(list)) => list
+            .iter()
+            .filter(|a| a.is_object())
+            .map(|a| PollAnswer {
+                text: plain(a.get("text")),
+                voters: as_int(a.get("voters")),
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    Some(Poll {
+        question: plain(raw.get("question")),
+        closed: matches!(raw.get("closed"), Some(Value::Bool(true))),
+        total_voters: as_int(raw.get("total_voters")),
+        answers,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1349,6 +1421,46 @@ mod tests {
         assert!(out.service);
         assert_eq!(out.sender, "user2");
         assert_eq!(out.name, "Someone Else");
+    }
+
+    #[test]
+    fn a_poll_keeps_its_question_and_every_tally() {
+        // The shape the exporter writes and the reference's seven carry.
+        let raw = msg(json!({"poll": {
+            "question": "Kada?", "closed": true, "total_voters": 9,
+            "answers": [
+                {"text": "petak", "voters": 6, "chosen": true},
+                {"text": "subota", "voters": 3, "chosen": false},
+                "not an answer"
+            ]
+        }}));
+        let poll = one(&raw, 0, None).unwrap().poll.expect("a poll");
+        assert_eq!(poll.question, "Kada?");
+        assert!(poll.closed);
+        assert_eq!(poll.total_voters, 9);
+        assert_eq!(poll.answers.len(), 2, "a malformed answer is dropped");
+        assert_eq!(poll.answers[0].text, "petak");
+        assert_eq!(poll.answers[1].voters, 3);
+        assert!(one(&msg(json!({})), 0, None).unwrap().poll.is_none());
+    }
+
+    #[test]
+    fn a_title_and_a_pin_are_read_off_service_messages_only() {
+        let renamed = msg(json!({"type": "service", "action": "topic_edit",
+                                 "new_title": "foto video", "new_icon_emoji_id": 0}));
+        assert_eq!(one(&renamed, 0, None).unwrap().title, "foto video");
+        let pin = msg(json!({"type": "service", "action": "pin_message", "message_id": 41}));
+        assert_eq!(one(&pin, 0, None).unwrap().pinned, Some(41));
+        // An audio file carries a `title` of its own, which is a song's.
+        let song = one(
+            &msg(json!({"title": "a song", "duration_seconds": 214})),
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(song.title, "");
+        assert_eq!(song.duration, 214);
+        assert_eq!(song.pinned, None);
     }
 
     #[test]

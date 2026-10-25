@@ -199,6 +199,17 @@ impl People {
         }
     }
 
+    /// [`key_of`](Self::key_of), borrowed whenever the message has a sender,
+    /// which is nearly always: for the figures that look at every message,
+    /// a clone per message was a measurable part of the run.
+    pub fn key_ref<'a>(&self, msg: &'a Msg) -> std::borrow::Cow<'a, str> {
+        if msg.sender.is_empty() {
+            std::borrow::Cow::Owned(self.key_of(msg))
+        } else {
+            std::borrow::Cow::Borrowed(msg.sender.as_str())
+        }
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &Person> {
         self.order.iter()
     }

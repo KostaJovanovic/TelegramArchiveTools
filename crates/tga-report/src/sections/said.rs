@@ -232,12 +232,13 @@ pub fn said(stats: &Stats) -> String {
     ]);
 
     format!(
-        "{}{stat_line}<div class=\"cols2\">{length}{attachments}</div>{symbols}\
+        "{}{stat_line}<div class=\"cols2\">{length}{attachments}</div>{}{symbols}\
          {links}{tags}{forwards}</section>",
         head(
             "What was said",
             &format!("{} messages", thousands(messages)),
             "said"
         ),
+        super::voice(stats),
     )
 }

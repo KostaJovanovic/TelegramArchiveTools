@@ -335,6 +335,28 @@ fn the_golden_exercises_the_cases_it_was_built_for() {
             "dormancy measured against the archive",
             "26 Aug 2026, the last day in this archive",
         ),
+        // -- the six grafted branches ---------------------------------------
+        //
+        // Grafted from a scrubbed dump of `reference\` by `make_fixture.py
+        // --graft`, so their stand-in names come from a scrub of their own.
+        ("the month-by-month section", "<section id=\"trend\">"),
+        ("a month-by-month chart", "<h3>How long an answer took</h3>"),
+        ("who led each month", "<h3>Who led each month</h3>"),
+        ("the words section", "<section id=\"words\">"),
+        ("a scrubbed distinctive word", ">word 1<"),
+        ("a topic's own words", "<h3>Each topic\u{2019}s own words</h3>"),
+        ("the script line under its floor", "Written almost entirely in Latin"),
+        ("the reactions section", "<section id=\"reactions\">"),
+        ("a person's reactions", "<h3>Each person\u{2019}s reactions</h3>"),
+        ("the polls section", "<section id=\"polls\">"),
+        (
+            "an escaped poll question",
+            "Friday &lt;or&gt; Saturday &amp; when?",
+        ),
+        ("the voice notes", "<h3>Voice and video notes</h3>"),
+        ("the group history", "<section id=\"history\">"),
+        ("an escaped group title", "renamed the group to <b>A name &amp; &lt;a tag&gt;</b>"),
+        ("a topic opened", "opened the topic <b>(title removed)</b>"),
     ] {
         if !html.contains(needle) {
             missing.push(format!("  {what}: {needle:?}"));

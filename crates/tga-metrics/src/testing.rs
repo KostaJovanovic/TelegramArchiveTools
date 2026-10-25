@@ -55,6 +55,10 @@ pub fn msg(id: i64, who: &str, when: NaiveDateTime, reply_to: Option<i64>) -> Ms
         edited: false,
         members: Vec::new(),
         grouped: None,
+        poll: None,
+        duration: 0,
+        title: String::new(),
+        pinned: None,
     }
 }
 

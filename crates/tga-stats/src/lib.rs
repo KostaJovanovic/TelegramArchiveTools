@@ -148,6 +148,17 @@ pub struct Stats {
     /// no section at all and the second renders one that says so. Always
     /// written by a live run.
     pub dynamics: Option<Dynamics>,
+    /// The six branches below are `None` in a dump recorded before they
+    /// existed, for the reason `dynamics` is: that renders no section, where
+    /// an archive with nothing in the branch renders one that says so — or,
+    /// for the three that are about things a chat may simply not have
+    /// (polls, voice notes, service events), renders none either.
+    pub polls: Option<Polls>,
+    pub voice: Option<Voice>,
+    pub history: Option<History>,
+    pub trends: Option<Trends>,
+    pub reactions: Option<Reactions>,
+    pub words: Option<Words>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -780,6 +791,301 @@ pub struct Deepest {
 }
 
 // ---------------------------------------------------------------------------
+// polls
+// ---------------------------------------------------------------------------
+
+/// Every poll the chat ran, and how many took part.
+///
+/// **Tallies only.** Desktop's export records how many chose each answer and
+/// nothing about who the others were, so no figure here can say who voted for
+/// what — and a reader looking for that should be told it is not in the file,
+/// not shown a guess.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Polls {
+    /// Oldest first, at most `shown` of them: the newest, when there are more.
+    pub rows: Vec<PollRow>,
+    pub total: usize,
+    pub shown: usize,
+    /// The sum of every poll's voters. A person who voted in ten polls is ten
+    /// here, so this is participation, not people.
+    pub votes: i64,
+    pub median_voters: i64,
+    pub closed: usize,
+    /// Polls forwarded in from elsewhere, whose tallies are somebody else's.
+    pub forwarded: usize,
+    /// Every month of the archive, silent ones at zero.
+    pub per_month: Vec<Count>,
+    /// Who put polls to the group, most first.
+    pub askers: Vec<Starter>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PollRow {
+    pub id: i64,
+    pub topic: usize,
+    pub date: String,
+    pub key: String,
+    pub name: String,
+    pub question: String,
+    pub closed: bool,
+    pub forwarded: bool,
+    pub voters: i64,
+    /// Each answer and its voters, in the order the poll listed them.
+    pub answers: Vec<Count>,
+}
+
+// ---------------------------------------------------------------------------
+// voice and video notes
+// ---------------------------------------------------------------------------
+
+/// Voice notes and round video notes: who talks instead of typing, and for
+/// how long.
+///
+/// Durations are Telegram's own `duration_seconds`. A note without one is
+/// counted and adds no time, and `undated` says how many those were.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Voice {
+    pub voice_notes: i64,
+    pub voice_seconds: i64,
+    pub video_notes: i64,
+    pub video_seconds: i64,
+    pub undated: i64,
+    pub median_seconds: i64,
+    /// Seconds of both kinds per month, every month of the archive.
+    pub per_month: Vec<Count>,
+    /// Ranked by seconds recorded.
+    pub people: Vec<VoiceRow>,
+    pub longest: Option<VoiceLongest>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceRow {
+    pub key: String,
+    pub name: String,
+    pub voice_notes: i64,
+    pub video_notes: i64,
+    pub seconds: i64,
+    /// What share of everything they sent was a note.
+    pub share: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceLongest {
+    pub id: i64,
+    pub topic: usize,
+    pub date: String,
+    pub name: String,
+    pub seconds: i64,
+    /// `voice_message` or `video_message`.
+    pub kind: String,
+}
+
+// ---------------------------------------------------------------------------
+// the group's own history
+// ---------------------------------------------------------------------------
+
+/// What the group did to itself: renames, pins, topics opened and edited,
+/// calls, migrations — the service messages, read as a log.
+///
+/// **Joins and removals are counted in `kinds` and left out of `events`.**
+/// Coming and going already charts them, and a group that grew by link has
+/// hundreds, which would bury the dozen entries this log exists for.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct History {
+    /// Oldest first, at most `shown`: the newest, when there are more.
+    pub events: Vec<HistoryEvent>,
+    pub total: usize,
+    pub shown: usize,
+    /// Every service message by its action, joins and removals included.
+    pub kinds: Vec<Count>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HistoryEvent {
+    pub id: i64,
+    pub topic: usize,
+    pub date: String,
+    /// Desktop's action name: `pin_message`, `edit_group_title`, ...
+    pub action: String,
+    pub key: String,
+    pub name: String,
+    /// The new title, for the four actions that carry one.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    /// The message a pin pinned, its author and the start of its text, when
+    /// the export holds it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<i64>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub pinned_who: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub pinned_text: String,
+}
+
+// ---------------------------------------------------------------------------
+// change over time
+// ---------------------------------------------------------------------------
+
+/// The figures the rest of the report gives once for the whole archive, given
+/// again for every month — so a group that changed shows that it changed.
+///
+/// Every vector is indexed by `months`, which is every month from the first
+/// message to the last, silent ones included. A ratio of a silent month is 0
+/// and a median of one is `None`; the report tells the two apart.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Trends {
+    pub months: Vec<String>,
+    pub messages: Vec<i64>,
+    pub voices: Vec<i64>,
+    /// The loudest three's share of that month's messages.
+    pub top3_share: Vec<f64>,
+    pub reply_share: Vec<f64>,
+    /// Median reply latency, epoch seconds, under the same cap as the rest.
+    /// `None` for a month with fewer than `latency_minimum` timed replies.
+    pub latency_median: Vec<Option<i64>>,
+    pub latency_minimum: i64,
+    pub mean_words: Vec<f64>,
+    pub media_share: Vec<f64>,
+    pub reactions_per_message: Vec<f64>,
+    /// Who sent most that month.
+    pub leaders: Vec<Option<Leader>>,
+    /// Messages per month for the loudest people overall, loudest first.
+    pub people: Vec<TrendRow>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Leader {
+    pub key: String,
+    pub name: String,
+    pub messages: i64,
+    pub share: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrendRow {
+    pub key: String,
+    pub name: String,
+    pub per_month: Vec<i64>,
+}
+
+// ---------------------------------------------------------------------------
+// reactions
+// ---------------------------------------------------------------------------
+
+/// Which reactions the group uses, how that changes, and each person's.
+///
+/// **Two counts that do not add up, on purpose.** `total` is every reaction
+/// Telegram counted. What a person *gave* can only come from the reactors it
+/// named, which is at most three a message unless the exporter fetched the
+/// full list, and never an anonymous one — so `given` is a floor, and
+/// `named` says how much of `total` it can see.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Reactions {
+    pub total: i64,
+    pub named: i64,
+    /// Messages with at least one reaction, of `messages` said.
+    pub reacted: i64,
+    pub messages: i64,
+    /// Every emoji, most used first. Custom emoji are one entry, because their
+    /// ids mean nothing to a reader.
+    pub kinds: Vec<Count>,
+    pub custom: i64,
+    pub months: Vec<String>,
+    pub per_month: Vec<i64>,
+    pub reacted_per_month: Vec<i64>,
+    pub messages_per_month: Vec<i64>,
+    /// Ranked by reactions received.
+    pub people: Vec<ReactionRow>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReactionRow {
+    pub key: String,
+    pub name: String,
+    pub messages: i64,
+    pub received: i64,
+    pub received_top: Vec<Count>,
+    pub given: i64,
+    pub given_top: Vec<Count>,
+}
+
+// ---------------------------------------------------------------------------
+// words and script
+// ---------------------------------------------------------------------------
+
+/// The words each person, topic and month uses more than everyone else does,
+/// and which alphabet they write in.
+///
+/// **Distinctive, not frequent.** The commonest words of every group are the
+/// same words — *i*, *da*, *je*, *the* — so ranking on frequency says nothing
+/// about anybody. Each word is scored on how much more often the group uses it
+/// than the archive as a whole (a log-odds ratio with an informative prior,
+/// as a z-score), which needs no stopword list and works in any language.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Words {
+    pub tokens: i64,
+    pub vocabulary: usize,
+    pub people: Vec<WordSet>,
+    pub topics: Vec<WordSet>,
+    pub months: Vec<WordSet>,
+    pub script: Script,
+}
+
+/// One group's distinctive words. Each `Count` is the word as the group most
+/// often wrote it, and how many times they used it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WordSet {
+    pub key: String,
+    pub name: String,
+    pub tokens: i64,
+    pub words: Vec<Count>,
+}
+
+/// Cyrillic against Latin, counted in letters.
+///
+/// Letters rather than messages, so a one-word reply and a page of minutes do
+/// not count the same; `messages_*` gives the per-message view beside it, a
+/// message being *mixed* when neither script has nine letters in ten.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Script {
+    pub cyrillic: i64,
+    pub latin: i64,
+    pub messages_cyrillic: i64,
+    pub messages_latin: i64,
+    pub messages_mixed: i64,
+    pub months: Vec<String>,
+    /// The Cyrillic share of each month's letters, 0 for a month with none.
+    pub month_cyrillic: Vec<f64>,
+    /// Ranked by letters written.
+    pub people: Vec<ScriptRow>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScriptRow {
+    pub key: String,
+    pub name: String,
+    pub cyrillic: i64,
+    pub latin: i64,
+    pub share: f64,
+}
+
+// ---------------------------------------------------------------------------
 // the dump
 // ---------------------------------------------------------------------------
 
@@ -902,7 +1208,7 @@ mod tests {
         in_order.sort();
         assert_eq!(top, in_order, "the top level came out unsorted");
         assert_eq!(top.first(), Some(&"activity"));
-        assert_eq!(top.last(), Some(&"topics"));
+        assert_eq!(top.last(), Some(&"words"));
     }
 
     #[test]
@@ -965,6 +1271,23 @@ mod tests {
             .retention
             .came_back
             .is_empty());
+    }
+
+    #[test]
+    fn a_dump_from_before_the_six_newer_branches_has_none_of_them() {
+        // `None` renders no section, which is what a recording made before
+        // these existed must keep doing: a re-render may not invent a section
+        // it has no data for.
+        let stats: Stats = serde_json::from_str("{}").expect("an empty dump loads");
+        assert!(stats.polls.is_none() && stats.voice.is_none() && stats.history.is_none());
+        assert!(stats.trends.is_none() && stats.reactions.is_none() && stats.words.is_none());
+        // And a live run's empty branch survives the round trip as present.
+        let live = Stats {
+            polls: Some(Polls::default()),
+            ..Default::default()
+        };
+        let back: Stats = serde_json::from_str(&write(&live).unwrap()).unwrap();
+        assert!(back.polls.is_some());
     }
 
     #[test]

@@ -292,6 +292,82 @@ unanswerable:
 - **It costs 0.16 s and 27 KB** on a 333,582-message archive: one extra pass
   over the replies.
 
+## Six more (2026-10-25)
+
+The account holder asked for more of the archive to be analysed, and chose
+six: three things the reader used to drop, three new readings of what it
+already had. Each is an `Option` branch of `Stats` (`polls`, `voice`,
+`history`, `trends`, `reactions`, `words`), `None` in a dump recorded before
+it, which renders no section, for the reason `dynamics` is one.
+
+| branch | section | what it answers |
+|---|---|---|
+| `polls` | Polls | every poll: question, each answer's tally, who asked, per month |
+| `voice` | a panel in What was said | voice notes and round videos: who, how long, per month |
+| `history` | Group history | renames, pins (with what was pinned), topics, photos, calls |
+| `trends` | Over time | top-3 share, reply share, median reply, words, attachments, reactions, month by month; who led each month |
+| `reactions` | Reactions | which reactions, the share of messages reacted to per month, each person's received and given |
+| `words` | Words | each person's, topic's and month's distinctive words; Cyrillic against Latin |
+
+The reader carries four new `Msg` fields for them: `poll`, `duration`
+(`duration_seconds`), and, on service messages only, `title` and `pinned` — an
+audio file has a `title` of its own.
+
+The rules that change what they say:
+
+- **A poll is tallies, never voters.** Desktop records how many chose each
+  answer and nothing about who; the method says so rather than leaving it to
+  be guessed. A forwarded poll is listed and is not counted as its
+  forwarder asking. The newest 300 are listed.
+- **The history leaves joins and removals to Coming and going**, which charts
+  them; a group that grew by link has hundreds and they would bury the dozen
+  entries the log is for. They are still counted in `kinds`. The newest 400
+  are listed.
+- **Every month-by-month ratio is the archive figure computed on one month**,
+  same definition, same cap: words per message is over messages with text, a
+  reply's latency is epoch seconds under `LATENCY_CAP`, and a month with
+  fewer than 20 timed replies has no median (`None`, drawn as an empty slot
+  whose tooltip says *no reading*), for the reason an hour does in `answer`.
+  A private chat gets no top-three share and no table of who led.
+- **What a person gave in reactions is a floor.** Only reactors Telegram
+  named are countable; the method states how many of the total that is.
+  Custom emoji are pooled as one entry, their ids meaning nothing to a reader.
+- **Distinctive, not frequent.** Words are scored with the log-odds ratio
+  with an informative Dirichlet prior (Monroe, Colaresi and Quinn 2008),
+  the archive itself as the prior at a weight of 10,000 pseudo-uses, as a
+  z-score; a word needs 4 uses in the group and 3 letters. That needs no
+  stopword list, which matters in a chat that switches language. A word
+  counts once per message, so one pasted page cannot make its vocabulary its
+  poster's; forwarded messages are nobody's words; links, @handles and #tags
+  are not words. People need 300 word-uses for a list (30 at most), and
+  topics and months get lists only when there are two or more to compare.
+- **Serbian Cyrillic is counted as Latin** (`latin_of`, the Serbian alphabet
+  only — a Russian letter is left as it is), so *да* and *da* are one word.
+  A word is shown in Cyrillic where most of the group's messages using it
+  wrote it so, spelled the way it was first met.
+- **Script is counted in letters, not messages**, links left out, so a URL
+  does not make a Cyrillic writer Latin. Under 1% of the minority script the
+  section says so in a sentence instead of drawing two empty charts.
+
+**Measured** on the 528,346-message, 33-topic database on `L:` (profiled
+inside `analyse`): polls 0.01 s, voice 0.07 s, history 0.01 s, trends 0.09 s,
+reactions 0.14 s, words 0.75–0.86 s — about a second between them, most of it
+tokenising. Words began at 2.06 s; one pass instead of two (the spelling is
+decided from a per-group Cyrillic tally rather than a second walk), one reused
+buffer per word instead of two strings, months found by arithmetic
+(`util::MonthIndex`) and keys borrowed (`People::key_ref`) took it there. A
+faster hasher saved another 0.1 s and was not kept. Every existing figure was
+byte-identical before and after on that archive, on the UA KOLAB database and
+on `reference\`. The report grew from 1,305 KB to 1,565 KB there: trends 15 KB,
+words 61, reactions 18, polls 88, history 68, voice 7. The two lists are most
+of it; their caps are the lever.
+
+The golden carries all six: `tools/make_fixture.py --graft` replaces just
+these branches with a scrubbed dump of `reference\` (questions, answers,
+pinned text, history titles and every word replaced; names and keys from a
+scrub of their own), leaving every number the golden already pinned
+untouched.
+
 ## The database export
 
 TelegramExporter grew a third output format beside HTML and JSON: one
