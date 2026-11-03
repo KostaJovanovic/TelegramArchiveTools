@@ -1,0 +1,40 @@
+[package]
+name = "tgx-viewer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The Viewer: a chat's database read for the screen, and the screen. Shared by TelegramTools and TelegramViewer.exe. No Telegram client."
+
+# **No `tgx-tg`, no `grammers-*`** — `layering.rs` holds it. This crate is
+# all of TelegramViewer.exe but its window, and that exe is small, and safe
+# to leave in a folder of exports, because nothing in it can talk to Telegram.
+[dependencies]
+tgx-archive = { path = "../tgx-archive" }
+tgx-format = { path = "../tgx-format" }
+tgx-html = { path = "../tgx-html" }
+tgx-media = { path = "../tgx-media" }
+tgx-ui = { path = "../tgx-ui" }
+
+# See `tgx-ui/Cargo.toml` for why glow and no default fonts; every crate that
+# names eframe must agree.
+eframe = { version = "0.33", default-features = false, features = ["glow"] }
+
+# The pictures in the chat: photos, stickers, the frames of videos and GIFs.
+# The formats Telegram actually stores, and no others.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+
+# Save as's file dialog.
+rfd = "0.16"
+
+# The store's methods are async because libsql's API is, and block
+# underneath; `jobs` runs them on a runtime's blocking pool. The runtime is
+# the caller's.
+tokio = { version = "1", features = ["rt"] }
+
+serde_json = { workspace = true }
+chrono = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

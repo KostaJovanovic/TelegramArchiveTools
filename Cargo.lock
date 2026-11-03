@@ -4180,6 +4180,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tgx-viewer"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "eframe",
+ "image",
+ "log",
+ "rfd",
+ "serde_json",
+ "tgx-archive",
+ "tgx-format",
+ "tgx-html",
+ "tgx-media",
+ "tgx-ui",
+ "tokio",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4392,7 +4410,6 @@ dependencies = [
  "chrono",
  "eframe",
  "egui_extras",
- "image",
  "log",
  "os_info",
  "raw-window-handle",
@@ -4401,8 +4418,21 @@ dependencies = [
  "tga-run",
  "tgx-tg",
  "tgx-ui",
+ "tgx-viewer",
  "tokio",
  "windows-sys 0.61.2",
+ "winresource",
+]
+
+[[package]]
+name = "tt-viewer"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "rfd",
+ "tgx-ui",
+ "tgx-viewer",
+ "tokio",
  "winresource",
 ]
 

@@ -36,6 +36,10 @@ use serde_json::Value;
 use tga_read::{Export, Progress};
 use tgx_archive::Store;
 
+/// The fold every search box compares through, re-exported so `tga-run`'s
+/// filter matches the way the Viewer's message search does.
+pub use tgx_archive::fold;
+
 /// What the exporter named the file while it kept every chat in one. It now
 /// writes `<title>/<title>.sqlite` per chat; see [`find`].
 pub const FILE_NAME: &str = "telegram.sqlite";

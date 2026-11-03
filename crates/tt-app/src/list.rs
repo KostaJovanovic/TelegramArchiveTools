@@ -128,21 +128,9 @@ impl Presence {
     }
 }
 
-/// A byte count the way the row prints it.
-pub fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
-    let mut value = bytes as f64 / 1024.0;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if value < 10.0 {
-        format!("{value:.1} {}", UNITS[unit])
-    } else {
-        format!("{value:.0} {}", UNITS[unit])
-    }
-}
+/// A byte count the way the row prints it. In the design system, because the
+/// Viewer prints file sizes too and ships without this crate.
+pub use tgx_ui::components::human_bytes;
 
 /// The eight sort modes, in the order the menu lists them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -356,9 +344,10 @@ fn directed(ordering: Ordering, descending: bool) -> Ordering {
 
 /// The form of a title that sorting and filtering compare.
 ///
-/// Exists so that a title's capitalisation never decides its place in the list.
+/// Exists so that a title's capitalisation, or its alphabet, never decides its
+/// place in the list or whether a filter finds it.
 fn folded_title(title: &str) -> String {
-    title.to_lowercase()
+    crate::fold::fold(title)
 }
 
 /// Order two chats under one sort mode, on real values rather than on the text
@@ -433,7 +422,7 @@ fn matches(chat: &ChatInfo, needle: &str) -> bool {
 /// [`Category::ALL`] order, when grouped. **A category with nothing in it is
 /// not returned at all**, so no caller can paint an empty heading.
 fn buckets<'a>(chats: &'a [ChatInfo], view: &View) -> Vec<(Option<Category>, Vec<&'a ChatInfo>)> {
-    let needle = view.filter.trim().to_lowercase();
+    let needle = folded_title(view.filter.trim());
     let kept = || {
         chats
             .iter()
@@ -488,7 +477,7 @@ pub fn reopen_matched(chats: &[ChatInfo], view: &mut View) {
     if view.filter.trim().is_empty() || view.folded.is_empty() {
         return;
     }
-    let needle = view.filter.trim().to_lowercase();
+    let needle = folded_title(view.filter.trim());
     for chat in chats.iter().filter(|c| matches(c, &needle)) {
         view.folded.remove(&Category::of(chat.kind));
     }

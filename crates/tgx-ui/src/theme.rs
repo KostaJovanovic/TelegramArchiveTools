@@ -189,6 +189,36 @@ fn radius() -> CornerRadius {
     CornerRadius::same(metrics::RADIUS as u8)
 }
 
+/// The largest PNG-encoded image in an `.ico`, decoded for the window.
+///
+/// **eframe stamps its own logo on a window given no icon**, and the taskbar
+/// draws the window's icon, not the exe's. `tools/make_icon.py` writes the
+/// 256px size as PNG — the others are BMP — and eframe already links a PNG
+/// decoder for its own logo, so reading the directory is all this adds.
+/// `None` leaves eframe's default: a missing icon is cosmetic and never worth
+/// failing a launch over. Both programs' windows wear theirs through this.
+pub fn window_icon(ico: &[u8]) -> Option<egui::IconData> {
+    let u16_at = |at: usize| Some(u16::from_le_bytes(ico.get(at..at + 2)?.try_into().ok()?));
+    let u32_at = |at: usize| Some(u32::from_le_bytes(ico.get(at..at + 4)?.try_into().ok()?));
+    let count = usize::from(u16_at(4)?);
+    let png = (0..count)
+        .filter_map(|i| {
+            let entry = 6 + 16 * i;
+            // A width byte of 0 means 256.
+            let width = match *ico.get(entry)? {
+                0 => 256,
+                w => u32::from(w),
+            };
+            let size = u32_at(entry + 8)? as usize;
+            let offset = u32_at(entry + 12)? as usize;
+            let bytes = ico.get(offset..offset.checked_add(size)?)?;
+            bytes.starts_with(b"\x89PNG").then_some((width, bytes))
+        })
+        .max_by_key(|(width, _)| *width)?
+        .1;
+    eframe::icon_data::from_png_bytes(png).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,6 +1,6 @@
 //! **Search every database in a folder** for a piece of text.
 //!
-//! Offline: it reads the `.sqlite` files [`crate::engine::archived_chats`]
+//! Offline: it reads the `.sqlite` files [`tgx_archive::archived_chats`]
 //! finds, read-only, and nothing else. The matching itself is
 //! [`tgx_archive::Store::search`] — current text, earlier versions and deleted
 //! messages, with the case folded in Rust because SQLite folds ASCII only.
@@ -11,7 +11,7 @@
 //! that gets attached to a bug report.
 
 use std::path::{Path, PathBuf};
-/// Re-exported because `tgx-app` may not depend on `tgx-archive`: the window
+/// Re-exported because `tt-app` may not depend on `tgx-archive`: the window
 /// reaches the store's types through this crate or not at all.
 pub use tgx_archive::Hit;
 
@@ -59,7 +59,7 @@ pub async fn chat(
 /// chat**, so one chat full of the word cannot crowd every other out of the
 /// answer.
 pub async fn across(dir: &Path, needle: &str, limit: usize) -> std::io::Result<Found> {
-    let archived = crate::engine::archived_chats(dir).await?;
+    let archived = tgx_archive::archived_chats(dir).await?;
     let mut found = Found {
         unreadable: archived.unreadable,
         ..Default::default()

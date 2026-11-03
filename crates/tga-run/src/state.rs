@@ -375,14 +375,11 @@ impl State {
 
     /// The rows the list shows, in order: indices into [`State::entries`].
     pub fn visible(&self) -> Vec<usize> {
-        let needle = self.filter.trim().to_lowercase();
+        let matches = |s: &str| tga_db::fold::matches(s, &self.filter);
         let mut rows: Vec<usize> = (0..self.entries.len())
             .filter(|&i| {
                 let e = &self.entries[i];
-                self.show.admits(e)
-                    && (needle.is_empty()
-                        || e.title.to_lowercase().contains(&needle)
-                        || e.target.name().to_lowercase().contains(&needle))
+                self.show.admits(e) && (matches(&e.title) || matches(&e.target.name()))
             })
             .collect();
         let e = |i: &usize| &self.entries[*i];

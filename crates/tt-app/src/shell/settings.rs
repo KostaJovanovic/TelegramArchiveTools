@@ -215,12 +215,25 @@ impl Shell {
                 "sync_every",
                 "Sync every (hours)",
                 "Updates every database in the export folder on a timer while the window is \
-                 open. 0 is off.",
+                 open or in the tray. 0 is off.",
                 true,
                 |f| &mut f.sync_every,
             ) {
                 self.commit_settings();
                 self.arm_schedule(std::time::Instant::now());
+            }
+            if switch(
+                ui,
+                "viewer_beside_databases",
+                "Viewer beside the databases",
+                self.settings.viewer_beside_databases,
+                true,
+                "Keeps a copy of TelegramViewer.exe in the export folder, so the databases \
+                 can be read wherever the folder is copied, with nothing else installed.",
+                &p,
+            ) {
+                self.toggle_setting(|s| s.viewer_beside_databases = !s.viewer_beside_databases);
+                self.place_viewer();
             }
             // Here and not under Media: only a database keeps them, so the
             // choice is on screen only when there is one.
@@ -748,6 +761,19 @@ impl Shell {
         );
         if let Some(step) = step {
             ui.ctx().set_zoom_factor(next_zoom(zoom, step));
+        }
+        // `Shell::keep_tray` adds or takes away the icon on the next frame.
+        if switch(
+            ui,
+            "close_to_tray",
+            "Close to the tray",
+            self.settings.close_to_tray,
+            true,
+            "The X puts the window in the notification area instead of quitting. Exports \
+             and the scheduled sync carry on; quit from the icon's right-click menu.",
+            &p,
+        ) {
+            self.toggle_setting(|s| s.close_to_tray = !s.close_to_tray);
         }
     }
 

@@ -98,36 +98,7 @@ impl Shell {
                 self.scan_destination();
             }
 
-            Event::ViewerDatabases { output_dir, found } => {
-                self.viewer_databases(output_dir, found)
-            }
-            Event::ViewerLoaded {
-                path,
-                chat_id,
-                rows,
-            } => self.viewer_loaded(path, chat_id, rows),
-            Event::ViewerDetail {
-                chat_id,
-                id,
-                detail,
-            } => self.viewer_detail(chat_id, id, detail),
-            Event::ViewerPicture {
-                path,
-                chat_id,
-                id,
-                image,
-                has_file,
-            } => self.viewer_picture(&path, chat_id, id, image, has_file),
-            Event::ViewerUserpics {
-                path,
-                chat_id,
-                pics,
-            } => self.viewer_userpics(&path, chat_id, pics),
-            Event::SearchHits {
-                needle,
-                scope,
-                found,
-            } => self.viewer_hits(needle, scope, found),
+            Event::Viewer(reply) => self.viewer_apply(reply),
 
             Event::Archived(found) => self.update_found(found),
             Event::Checked(found) => self.folder_checked(found),
@@ -308,6 +279,9 @@ impl Shell {
                 }
                 // The run has just written what the marks describe.
                 self.scan_destination();
+                // And the folder it wrote into may be the first time there is
+                // one, or the viewer there may be older than this build.
+                self.place_viewer();
                 // A long run is something people walk away from; the taskbar
                 // is where they look when they come back. Asked for here, sent
                 // from `update`, which is the one place holding the context.

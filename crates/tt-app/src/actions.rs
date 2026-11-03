@@ -648,22 +648,12 @@ pub fn open_folder(dir: &std::path::Path) -> Result<(), String> {
 /// Hand a folder or a file to the system: a folder opens in the file manager,
 /// a file in whatever is registered for it — which is how the Viewer's Open
 /// media shows a photo without this app drawing one.
+///
+/// The Viewer's, so the two programs open files the one way: by
+/// `explorer.exe`'s absolute path, never a bare name a planted copy beside
+/// either exe could answer to.
 pub fn open_path(path: &std::path::Path) -> Result<(), String> {
-    // Absolute, for the same reason icacls is: CreateProcess searches the
-    // calling process's own directory before PATH, and this app is built to be
-    // copied into arbitrary folders. A planted explorer.exe beside it would run
-    // with the user's rights.
-    #[cfg(windows)]
-    let spawned = std::process::Command::new(tgx_tg::config::system_root("explorer.exe"))
-        .arg(path)
-        .spawn();
-    #[cfg(target_os = "macos")]
-    let spawned = std::process::Command::new("open").arg(path).spawn();
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let spawned = std::process::Command::new("xdg-open").arg(path).spawn();
-    spawned
-        .map(|_| ())
-        .map_err(|e| format!("opening {}: {e}", path.display()))
+    tgx_viewer::open::path(path)
 }
 
 /// Open the destination folder.

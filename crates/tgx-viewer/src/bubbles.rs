@@ -15,12 +15,12 @@
 //!
 //! The text is other people's conversation, for the screen only.
 
+use crate::data::{Attachment, Row, Visual};
 use eframe::egui::{
     self, pos2, vec2, Align2, Color32, CornerRadius, FontId, Galley, Pos2, Rect, Sense, Stroke, Ui,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tgx_tg::viewer::{Attachment, Row, Visual};
 // Every piece of text in a bubble goes through these, so an emoji anywhere —
 // the message, a name, a reply's quote, a reaction, a poll — is in colour.
 use tgx_ui::emoji::EmojiText;
@@ -57,7 +57,7 @@ const SMALL: f32 = 12.0;
 /// One thing in the list: a day separator, or a message and its place in a
 /// run.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Item {
+pub enum Item {
     Day(String),
     Msg {
         /// Index into the viewer's rows.
@@ -71,7 +71,7 @@ pub(super) enum Item {
 
 /// The list's items for the rows `shown` keeps, and for each entry of
 /// `shown`, which item it became.
-pub(super) fn build(rows: &[Row], shown: &[usize]) -> (Vec<Item>, Vec<usize>) {
+pub fn build(rows: &[Row], shown: &[usize]) -> (Vec<Item>, Vec<usize>) {
     let mut items = Vec::with_capacity(shown.len() + shown.len() / 20);
     let mut item_of = Vec::with_capacity(shown.len());
     let mut day = "";
@@ -111,7 +111,7 @@ fn minutes(hhmm: &str) -> i32 {
 /// The chat pane's colours: Telegram's own night and day themes, close
 /// enough to be recognised, chosen by the window's appearance.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct Ink {
+pub struct Ink {
     pub bg: Color32,
     bubble: Color32,
     bubble_selected: Color32,
@@ -124,7 +124,7 @@ pub(super) struct Ink {
     hit: Color32,
 }
 
-pub(super) fn ink(p: &Palette) -> Ink {
+pub fn ink(p: &Palette) -> Ink {
     use tgx_ui::tokens::hex;
     if p.is_light() {
         Ink {
@@ -157,7 +157,7 @@ pub(super) fn ink(p: &Palette) -> Ink {
 
 /// Desktop's eight userpic colours, `userpic1` to `userpic8` in its
 /// stylesheet. A name is drawn in its userpic's colour, as Telegram does.
-pub(super) fn name_colour(c: u8) -> Color32 {
+pub fn name_colour(c: u8) -> Color32 {
     use tgx_ui::tokens::hex;
     match c {
         1 => hex(0xff5555),
@@ -173,7 +173,7 @@ pub(super) fn name_colour(c: u8) -> Color32 {
 
 /// What a click on an item asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Click {
+pub enum Click {
     Select(i64),
     /// The reply block: go to the message it answers.
     Jump(i64),
@@ -184,7 +184,7 @@ pub(super) enum Click {
 }
 
 /// One message's picture, as far as the window has got with it.
-pub(super) enum Pic {
+pub enum Pic {
     /// Asked for; the bubble shows a placeholder of the right shape.
     Loading,
     /// Decoded off the UI thread, waiting for the frame that uploads it.
@@ -198,7 +198,7 @@ pub(super) enum Pic {
 }
 
 /// What [`draw`] needs besides the item.
-pub(super) struct Scene<'a> {
+pub struct Scene<'a> {
     pub rows: &'a [Row],
     /// Message id to its index in `rows`, for a reply's quote.
     pub index: &'a HashMap<i64, usize>,
@@ -222,7 +222,7 @@ pub(super) struct Scene<'a> {
 ///
 /// The same code measures and paints, so the space the list reserves is the
 /// space the item takes.
-pub(super) fn draw(
+pub fn draw(
     ui: &Ui,
     item: &Item,
     scene: &Scene,
@@ -246,7 +246,7 @@ pub(super) fn draw(
 /// A cheap guess at an item's height, for the items not yet drawn — so the
 /// scroll bar is roughly the right length before every message has been
 /// measured. Drawn items replace their guess with the truth.
-pub(super) fn estimate(item: &Item, rows: &[Row], width: f32) -> f32 {
+pub fn estimate(item: &Item, rows: &[Row], width: f32) -> f32 {
     const LINE: f32 = 19.0;
     let inner = (width - LEFT - AVATAR - GAP - 48.0).clamp(120.0, BUBBLE_MAX) - 2.0 * PAD_X;
     let per_line = (inner / 7.6).max(10.0);
@@ -1225,7 +1225,7 @@ fn attachment(ui: &Ui, r: &Row, a: &Attachment, scene: &Scene, inner: f32) -> (P
             let label =
                 painter.layout_no_wrap_e(ext.clone(), semibold(SMALL - 1.0), Color32::WHITE);
             let mut sub = size
-                .map(|s| crate::list::human_bytes(s.max(0) as u64))
+                .map(|s| tgx_ui::components::human_bytes(s.max(0) as u64))
                 .unwrap_or_default();
             if r.file_skipped {
                 sub = "not included in the export".into();

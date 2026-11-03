@@ -1,4 +1,6 @@
-//! A chat title's search and sort form: lower case, one alphabet.
+//! The form every search box compares, and titles sort on: lower case, one
+//! alphabet. Here rather than in the window because [`crate::Store::search`]
+//! folds message text the same way, and every front end reaches this crate.
 //!
 //! **These chats are Serbian, and Serbian is written in two alphabets.** A
 //! group named `Ђорђе` is looked for as `djordje`, and one named `Đorđe` as

@@ -245,8 +245,13 @@ fn tt_app_does_not_depend_on_grammers() {
     );
 }
 
-/// CLAUDE.md says "tt-app: the window. Depends only on tgx-ui, tgx-tg and
-/// tga-run", and this is what makes that a rule rather than a sentence.
+/// CLAUDE.md says "tt-app: the window. Depends only on tgx-ui, tgx-tg,
+/// tga-run and tgx-viewer", and this is what makes that a rule rather than a
+/// sentence.
+///
+/// `tgx-viewer` is the fourth since TelegramViewer.exe: the Viewer had to
+/// leave `tgx-tg` to be built without a Telegram client, and re-exporting it
+/// back through `tgx-tg` would have put a window toolkit in the engine.
 ///
 /// It is worth a check of its own because the pressure to break it is real and
 /// looks harmless every time: the window needs one constant or one type from a
@@ -257,18 +262,67 @@ fn tt_app_does_not_depend_on_grammers() {
 /// hole in it. Whatever the window needs, one of the three re-exports or does
 /// on its behalf.
 #[test]
-fn tt_app_depends_only_on_tgx_ui_tgx_tg_and_tga_run() {
+fn tt_app_depends_only_on_tgx_ui_tgx_tg_tga_run_and_tgx_viewer() {
     let names = dependency_names(&manifest("tt-app"));
     let strays: Vec<&String> = names
         .iter()
         .filter(|n| n.starts_with("tgx-") || n.starts_with("tga-") || n.starts_with("tt-"))
-        .filter(|n| !["tgx-ui", "tgx-tg", "tga-run"].contains(&n.as_str()))
+        .filter(|n| !["tgx-ui", "tgx-tg", "tga-run", "tgx-viewer"].contains(&n.as_str()))
         .collect();
     assert!(
         strays.is_empty(),
-        "tt-app/Cargo.toml depends on {strays:?} — the window may name only tgx-ui, tgx-tg \
-         and tga-run. Anything it needs from a lower crate comes through one of them. \
+        "tt-app/Cargo.toml depends on {strays:?} — the window may name only tgx-ui, tgx-tg, \
+         tga-run and tgx-viewer. Anything it needs from a lower crate comes through one of \
+         them. See CLAUDE.md's Architecture section."
+    );
+}
+
+/// **The Viewer links no Telegram client.** That is what makes
+/// TelegramViewer.exe a fraction of TelegramTools' size, and what makes it
+/// safe to leave in a folder of exports that gets copied and handed on:
+/// nothing in it can sign in, hold a session or reach Telegram. A `tgx-tg`
+/// or `grammers-*` here would quietly pull the whole client into that exe.
+/// Nor does it reach the analyser, as no `tgx-*` crate may.
+#[test]
+fn the_viewer_reaches_neither_telegram_nor_the_analyser() {
+    let offenders: Vec<String> = dependency_names(&manifest("tgx-viewer"))
+        .into_iter()
+        .filter(|n| {
+            n.starts_with("grammers")
+                || n.starts_with("tga-")
+                || n.starts_with("tt-")
+                || n == "tgx-tg"
+                || n == "tgx-parity"
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "tgx-viewer/Cargo.toml depends on {offenders:?} — the Viewer reads databases already \
+         on disk and nothing else, so TelegramViewer.exe stays small and holds no client. \
          See CLAUDE.md's Architecture section."
+    );
+}
+
+/// **TelegramViewer.exe is the Viewer and a window**: `tgx-viewer`, the design
+/// system, and nothing else of ours. Anything more would grow the one file
+/// meant to sit beside the databases.
+#[test]
+fn tt_viewer_is_the_viewer_and_a_window() {
+    let names = dependency_names(&manifest("tt-viewer"));
+    let strays: Vec<&String> = names
+        .iter()
+        .filter(|n| {
+            n.starts_with("grammers")
+                || n.starts_with("tgx-")
+                || n.starts_with("tga-")
+                || n.starts_with("tt-")
+        })
+        .filter(|n| !["tgx-viewer", "tgx-ui"].contains(&n.as_str()))
+        .collect();
+    assert!(
+        strays.is_empty(),
+        "tt-viewer/Cargo.toml depends on {strays:?} — TelegramViewer.exe may name only \
+         tgx-viewer and tgx-ui. See CLAUDE.md's Architecture section."
     );
 }
 

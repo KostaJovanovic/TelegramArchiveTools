@@ -76,6 +76,7 @@ impl Shell {
         match s {
             Shortcut::Go(view) => self.show(view),
             Shortcut::Find => match self.body {
+                // The Viewer's panel hands it to the Viewer's search box.
                 View::Chats | View::Viewer => self.focus_filter = true,
                 View::Analysis => self.analysis.focus_filter = true,
                 View::Summaries => self.summaries.focus_filter = true,

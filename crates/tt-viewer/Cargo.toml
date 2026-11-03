@@ -1,0 +1,32 @@
+[package]
+name = "tt-viewer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "TelegramViewer: read the databases TelegramTools wrote, with nothing else installed and no account anywhere near it."
+
+# **TelegramViewer.exe** — what Settings › What an export contains › "Viewer
+# beside the databases" copies into the export folder. Its whole job is the Viewer, so
+# it is `tgx-viewer` and a window; `layering.rs` keeps it to that.
+[[bin]]
+name = "TelegramViewer"
+path = "src/main.rs"
+
+[dependencies]
+tgx-viewer = { path = "../tgx-viewer" }
+tgx-ui = { path = "../tgx-ui" }
+
+# The same toolkit, the same features: see `tgx-ui/Cargo.toml`.
+eframe = { version = "0.33", default-features = false, features = ["glow"] }
+
+# Open folder…, for a viewer started somewhere with no databases in it.
+rfd = "0.16"
+
+# The Viewer's reads run on a runtime's blocking pool; this is the runtime.
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+# Pinned exactly, as in `tt-app`: pre-1.0, and what it breaks is a build
+# script. Bump the two together.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "=0.1.31"

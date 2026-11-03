@@ -25,7 +25,7 @@ pub fn run_finished(frame: &eframe::Frame, body: &str) {
 }
 
 #[cfg(windows)]
-fn hwnd(frame: &eframe::Frame) -> Option<isize> {
+pub(crate) fn hwnd(frame: &eframe::Frame) -> Option<isize> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     match frame.window_handle().ok()?.as_raw() {
         RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
@@ -34,7 +34,7 @@ fn hwnd(frame: &eframe::Frame) -> Option<isize> {
 }
 
 #[cfg(windows)]
-mod imp {
+pub(crate) mod imp {
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Shell::{
         Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_TIP, NIIF_INFO, NIIF_LARGE_ICON, NIM_ADD,
@@ -51,7 +51,8 @@ mod imp {
     const SHOWN_FOR: std::time::Duration = std::time::Duration::from_secs(12);
 
     /// Copy `s` into a fixed UTF-16 field, cut to fit and NUL-terminated.
-    fn put(dst: &mut [u16], s: &str) {
+    /// The tray's icon (`crate::tray`) fills its fields with it too.
+    pub(crate) fn put(dst: &mut [u16], s: &str) {
         let room = dst.len() - 1;
         let mut n = 0;
         for unit in s.encode_utf16().take(room) {

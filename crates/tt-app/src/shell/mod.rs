@@ -16,7 +16,6 @@
 //! event by any route that does not wake the context.**
 
 mod analysis;
-mod bubbles;
 mod catchup;
 mod chats;
 mod chrome;
@@ -309,7 +308,7 @@ pub struct Shell {
     /// loading; [`shot`] counts its settling frames from here.
     shot_busy_until: u32,
     /// The Viewer's state: which database is open, its rows, the selection,
-    /// the search. See [`viewer::ViewerState`].
+    /// the search, and where its way back goes. See [`viewer`].
     viewer: viewer::ViewerState,
     /// The Analysis view's state: its folder, its rows, and the analyser run.
     /// See [`analysis::Analysis`].
@@ -317,6 +316,15 @@ pub struct Shell {
     /// The Summaries view's state, and the model server it started, if it
     /// did. See [`summaries`].
     summaries: summaries::SummariesState,
+    /// The notification-area icon, while Close to the tray is on. Made on a
+    /// frame, because it needs the window's handle. See [`crate::tray`].
+    tray: Option<crate::tray::Tray>,
+    /// The icon could not be added, so the X closes as it always did. Not
+    /// tried again every frame; cleared when the setting goes off.
+    tray_failed: bool,
+    /// Quit was chosen from the icon's menu: the close that follows is a real
+    /// one, not a trip to the tray.
+    quitting: bool,
 }
 
 impl Shell {
@@ -425,13 +433,25 @@ impl Shell {
             theme_stale: true,
             frame_no: 0,
             shot_busy_until: 0,
-            viewer: Default::default(),
+            viewer: viewer::ViewerState {
+                // What a photograph of the Viewer is of. Nothing, unless
+                // `TGX_SHOT` is set.
+                inner: tgx_viewer::Viewer {
+                    want_title: shot::database(),
+                    want_media: shot::find(),
+                    ..Default::default()
+                },
+                back: None,
+            },
             analysis: Default::default(),
             account: None,
             sign_out_armed: false,
             signing_out: false,
             reset_armed: false,
             zoom_stale: false,
+            tray: None,
+            tray_failed: false,
+            quitting: false,
         }
     }
 
@@ -467,6 +487,8 @@ impl Shell {
                 tgx_tg::logging::log_file().display()
             )));
         });
+        // A new build's viewer over the last one's, before anything is read.
+        self.place_viewer();
 
         // **Chats on launch, when there is a session to load them with.**
         // Nothing used to connect until the user pressed 01, so a saved
@@ -608,7 +630,7 @@ impl Shell {
     /// Pinned like a rail click, because it is one — the user asked to be in
     /// the Viewer, and a run starting must not take them out of it.
     pub(super) fn read(&mut self, read: analysis::Read) {
-        let db = tgx_tg::viewer::Database::from(read);
+        let db = tgx_viewer::data::Database::from(read);
         if !self.viewer.is_open(&db.path, db.chat_id) {
             self.viewer_open(db, None);
         }
@@ -656,9 +678,13 @@ impl Shell {
             (v.outer_rect, v.inner_rect, v.maximized, v.minimized)
         });
         // Maximised or minimised is not a size to come back to: the restored
-        // one stays as it was last seen.
+        // one stays as it was last seen. Nor is minimised a reason to forget
+        // maximised — a window quit from the tray is always minimised.
+        if minimized == Some(true) {
+            return;
+        }
         self.settings.window_maximized = maximized.unwrap_or(false);
-        if maximized == Some(true) || minimized == Some(true) {
+        if maximized == Some(true) {
             return;
         }
         if let (Some(outer), Some(inner)) = (outer, inner) {
@@ -669,6 +695,77 @@ impl Shell {
                 inner.height() * zoom,
             ];
         }
+    }
+
+    /// Close to the tray, once a frame: the icon there while the setting is
+    /// on and gone when it is off, a window raised some other way given its
+    /// taskbar button back, and the menu's Quit turned into a real close.
+    ///
+    /// Never for a photograph, which touches nothing and closes itself.
+    fn keep_tray(&mut self, ctx: &Context, frame: &eframe::Frame) {
+        if !self.settings.close_to_tray || shot::path().is_some() {
+            self.tray = None;
+            self.tray_failed = false;
+            return;
+        }
+        if self.tray.is_none() && !self.tray_failed {
+            self.tray = crate::tray::Tray::new(frame, ctx);
+            self.tray_failed = self.tray.is_none();
+            if self.tray_failed {
+                self.journal
+                    .warn("Could not add the tray icon, so the X still quits.");
+            }
+        }
+        let Some(tray) = &mut self.tray else {
+            return;
+        };
+        tray.follow();
+        if tray.quit_asked() {
+            log::info!("quit from the tray");
+            self.quitting = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        tray.tip(if self.exporting {
+            "TelegramTools — exporting"
+        } else {
+            crate::TITLE
+        });
+    }
+
+    /// Settings › Viewer beside the databases: put TelegramViewer.exe in the
+    /// destination, if the copy there is missing or older. Off the window's
+    /// thread; says something only when it copied or could not.
+    pub(super) fn place_viewer(&mut self) {
+        if !self.settings.viewer_beside_databases
+            || !self.settings.export_db
+            || shot::path().is_some()
+        {
+            return;
+        }
+        let (tx, dir) = (self.bridge.sender(), self.settings.output_dir.clone());
+        self.bridge
+            .spawn(async move { crate::actions::viewer::place_in(dir, tx).await });
+    }
+
+    /// The X with Close to the tray on: minimised into the notification area,
+    /// still running. `true` if that is where it went; `false` means close.
+    fn close_to_tray(&mut self) -> bool {
+        if self.quitting {
+            return false;
+        }
+        let Some(tray) = &mut self.tray else {
+            return false;
+        };
+        log::info!("closed to the tray");
+        tray.hide();
+        // What `on_exit` would save. A sign-out or shutdown ends a process in
+        // the tray without reaching it.
+        if shot::path().is_none() {
+            if let Err(e) = self.settings.save() {
+                log::warn!("could not save the window's place: {e}");
+            }
+        }
+        true
     }
 
     fn list_state(&self) -> tgx_ui::components::ListState {
@@ -856,8 +953,13 @@ impl eframe::App for Shell {
         // **Before anything is drained.** Senders handed out before this cannot
         // repaint, and the startup jobs below are handed one immediately.
         self.bridge.wake_with(ctx);
+        self.keep_tray(ctx, frame);
         if ctx.input(|i| i.viewport().close_requested()) {
-            log::info!("close asked for");
+            if self.close_to_tray() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            } else {
+                log::info!("close asked for");
+            }
         }
         if !self.started {
             self.started = true;
@@ -930,7 +1032,10 @@ impl eframe::App for Shell {
             // Not to a window someone is looking at, and never from a
             // photograph of the window.
             if !ctx.input(|i| i.focused) && shot::path().is_none() {
-                crate::notify::run_finished(frame, &body);
+                match &self.tray {
+                    Some(tray) => tray.balloon("Export finished", &body),
+                    None => crate::notify::run_finished(frame, &body),
+                }
             }
         }
         // The elapsed clock moves every second whether or not an event
@@ -1012,18 +1117,7 @@ impl eframe::App for Shell {
         if let Some(to) = shot::path() {
             // The viewer reads its database on a worker; a frame taken while
             // it still says "Reading…" is a photograph of nothing.
-            let pictures_pending = self
-                .viewer
-                .pictures
-                .values()
-                .chain(self.viewer.userpics.values())
-                .any(|p| matches!(p, bubbles::Pic::Loading | bubbles::Pic::Decoded(_)));
-            if self.viewer.listing
-                || self.viewer.loading
-                || pictures_pending
-                || self.analysis.busy()
-                || self.summaries.busy()
-            {
+            if self.viewer.busy() || self.analysis.busy() || self.summaries.busy() {
                 self.shot_busy_until = self.frame_no;
             }
             shot::tick(ctx, self.frame_no.saturating_sub(self.shot_busy_until), &to);
@@ -1043,6 +1137,9 @@ impl eframe::App for Shell {
         };
         let mut since = t;
         log::info!("closing: {} job(s) in flight", self.bridge.in_flight());
+        // The icon first, so it is not left in the tray for the length of
+        // the drain below.
+        self.tray = None;
         // The window's place and zoom, kept for the next launch. Saved here
         // and not as they change: a drag is a hundred frames of positions,
         // and only the last one is wanted. A photograph keeps nothing.
@@ -1067,10 +1164,10 @@ impl eframe::App for Shell {
         self.bridge.shutdown(std::time::Duration::from_secs(10));
         lap("workers", &mut since);
         // After the drain, so an Open media still writing is not raced. See
-        // `tgx_tg::viewer::temp_dir` for why the copies do not outlive the
+        // `tgx_viewer::data::temp_dir` for why the copies do not outlive the
         // window; `main` clears it on the way in as well, for the run that
         // ended without reaching here.
-        tgx_tg::viewer::clear_temp();
+        tgx_viewer::data::clear_temp();
         lap("temp", &mut since);
         log::info!(
             "closed in {:.2}s: {}",

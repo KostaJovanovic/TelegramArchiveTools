@@ -14,13 +14,16 @@ description = "TelegramTools: export Telegram chats, and report on what was expo
 name = "TelegramTools"
 path = "src/main.rs"
 
-# Three crates and no further down: the design system, the Telegram side, and
-# the analyser's runner. `layering.rs` holds it there — a window that reached
-# `tga-db` or `grammers-*` directly would be doing a library's work.
+# Four crates and no further down: the design system, the Telegram side, the
+# analyser's runner, and the Viewer — which is its own crate because
+# TelegramViewer.exe is the Viewer with no Telegram side at all. `layering.rs`
+# holds it there — a window that reached `tga-db` or `grammers-*` directly
+# would be doing a library's work.
 [dependencies]
 tgx-ui = { path = "../tgx-ui" }
 tgx-tg = { path = "../tgx-tg" }
 tga-run = { path = "../tga-run" }
+tgx-viewer = { path = "../tgx-viewer" }
 
 # The window toolkit. See `tgx-ui/Cargo.toml` for why glow and why no default
 # fonts; the two must agree, because this crate hands `tgx-ui` the context it
@@ -42,12 +45,6 @@ egui_extras = { version = "0.33", default-features = false }
 # getting a worse version of a dialog people already know.
 rfd = "0.16"
 
-# The Viewer's pictures: photos, stickers, and the frames of videos and GIFs,
-# decoded out of the database. eframe already links this crate for its window
-# icon, with PNG only; the formats Telegram actually stores are added here —
-# and here rather than in `tgx-tg`, so the engine carries no decoders.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
-
 # `signal` is for the command line's Ctrl-C: the JSON is streamed, so tearing
 # the process down mid-write leaves a zero-byte file rather than a partial
 # export.
@@ -61,16 +58,20 @@ serde_json = { workspace = true }
 # crate to name the device a session signs in from, so it adds nothing.
 os_info = { version = "3", default-features = false }
 
-# Four small pieces of Win32: the run-finished notification (`notify.rs`),
+# Five small pieces of Win32: the run-finished notification (`notify.rs`),
 # one window per data folder (`instance.rs`), the destination's free space
-# and file system (`volume.rs`), and which process holds the model server's
-# port (`holder.rs`, the IP helper's TCP table). Both crates are already in
-# the build — eframe links this `windows-sys` and this `raw-window-handle`
-# itself — so naming them here compiles nothing new.
+# and file system (`volume.rs`), which process holds the model server's
+# port (`holder.rs`, the IP helper's TCP table), and closing to the tray
+# (`tray.rs`, which needs COM for the taskbar button, and GDI only because
+# a window class names a brush). Both crates are
+# already in the build — eframe links this `windows-sys` and this
+# `raw-window-handle` itself — so naming them here compiles nothing new.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_NetworkManagement_IpHelper",
+    "Win32_System_Com",
     "Win32_Storage_FileSystem",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",

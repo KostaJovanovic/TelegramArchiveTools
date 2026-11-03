@@ -1762,7 +1762,7 @@ impl Shell {
     /// A citation clicked: the Viewer, on that message, with its way back
     /// here.
     pub(super) fn summaries_cite(&mut self, read: super::analysis::Read, id: i64) {
-        let db = tgx_tg::viewer::Database::from(read);
+        let db = tgx_viewer::data::Database::from(read);
         if self.viewer.is_open(&db.path, db.chat_id) {
             self.viewer_select(id, true);
         } else {

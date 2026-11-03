@@ -23,7 +23,7 @@ mod actions;
 mod bridge;
 mod cli;
 mod diagnostics;
-mod fold;
+use tgx_viewer::fold;
 mod holder;
 mod instance;
 mod journal;
@@ -35,6 +35,7 @@ mod pending;
 mod queue;
 mod settings_form;
 mod shell;
+mod tray;
 mod volume;
 
 /// What the window and its failures call themselves.
@@ -225,7 +226,7 @@ fn main() {
 
     // What the Viewer's Open media copied out last time, if that run ended
     // without reaching `on_exit` — a crash, or a kill from Task Manager.
-    tgx_tg::viewer::clear_temp();
+    tgx_viewer::data::clear_temp();
 
     std::panic::set_hook(Box::new(|info| {
         use std::sync::atomic::Ordering;
@@ -334,33 +335,9 @@ fn on_screen(_x: f32, _y: f32) -> bool {
     true
 }
 
-/// The largest PNG-encoded image in an `.ico`, decoded for the window.
-///
-/// `tools/make_icon.py` writes the 256px size as PNG — the others are BMP —
-/// and eframe already links a PNG decoder for its own logo, so reading the
-/// directory is all this adds. `None` leaves eframe's default: a missing icon
-/// is cosmetic and never worth failing a launch over.
-fn window_icon(ico: &[u8]) -> Option<eframe::egui::IconData> {
-    let u16_at = |at: usize| Some(u16::from_le_bytes(ico.get(at..at + 2)?.try_into().ok()?));
-    let u32_at = |at: usize| Some(u32::from_le_bytes(ico.get(at..at + 4)?.try_into().ok()?));
-    let count = usize::from(u16_at(4)?);
-    let png = (0..count)
-        .filter_map(|i| {
-            let entry = 6 + 16 * i;
-            // A width byte of 0 means 256.
-            let width = match *ico.get(entry)? {
-                0 => 256,
-                w => u32::from(w),
-            };
-            let size = u32_at(entry + 8)? as usize;
-            let offset = u32_at(entry + 12)? as usize;
-            let bytes = ico.get(offset..offset.checked_add(size)?)?;
-            bytes.starts_with(b"\x89PNG").then_some((width, bytes))
-        })
-        .max_by_key(|(width, _)| *width)?
-        .1;
-    eframe::icon_data::from_png_bytes(png).ok()
-}
+// The window's icon, out of the same `.ico`. In the design system, because
+// TelegramViewer's window wears it too.
+use tgx_ui::theme::window_icon;
 
 #[cfg(test)]
 mod tests {

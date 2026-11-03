@@ -91,9 +91,9 @@ pub struct Read {
 }
 
 /// What the Viewer opens for a Read — a row's, or a summary's citation.
-impl From<Read> for tgx_tg::viewer::Database {
+impl From<Read> for tgx_viewer::data::Database {
     fn from(read: Read) -> Self {
-        tgx_tg::viewer::Database {
+        tgx_viewer::data::Database {
             chat_id: read.chat_id,
             title: read.title,
             path: read.path,

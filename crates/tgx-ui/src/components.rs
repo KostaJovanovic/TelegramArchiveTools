@@ -1009,6 +1009,22 @@ pub fn thousands(n: i64) -> String {
     }
 }
 
+/// A byte count: `3.4 MB`, `120 KB`. One decimal under ten, none above.
+pub fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if value < 10.0 {
+        format!("{value:.1} {}", UNITS[unit])
+    } else {
+        format!("{value:.0} {}", UNITS[unit])
+    }
+}
+
 /// The selection footer's wording.
 ///
 /// **Says *at least* N when any selected chat is uncounted**, because a blank

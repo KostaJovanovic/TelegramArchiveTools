@@ -21,6 +21,12 @@ plan and its log, and says which phase is done. They ship as one binary,
 analyser's command line, and anything else is one of the exporter's commands
 (`login`, `chats`, `export`, …) — what used to be `tgx.exe`.
 
+Beside it ships **`TelegramViewer.exe`** (`crates/tt-viewer`, 7.2 MB against
+24.4): the Viewer on its own, with no Telegram client, exporter or analyser in
+it. Settings › Viewer beside the databases copies it into the export folder,
+where it opens on the databases around it. Both programs' Viewer is one
+component, `tgx-viewer`.
+
 `ROADMAP.md` holds the exporter's design record and what is still open.
 `docs/analyser/PLAN.md` is the analyser's: why each figure is computed the way
 it is. `docs/analyser/REFACTOR.md` is the log of the rewrite that gave the
@@ -36,7 +42,7 @@ the relevant part before changing the area it covers.
 ```powershell
 save.bat                    # menu; also takes an action as an argument
 save.bat test               # fmt + clippy + every suite, same as CI
-save.bat build              # release build -> dist\TelegramTools.exe
+save.bat build              # release build -> dist\TelegramTools.exe + TelegramViewer.exe
 save.bat parity             # all four replay legs against corpus or drive
 save.bat corpus             # cut reference\ out of the reference export
 save.bat wire <export dir>  # diff a live export against the reference run
@@ -64,6 +70,7 @@ cargo test -p tgx-html --test preview_parity    # one integration suite
 cargo test -p tgx-tg the_last_target_wins       # one test by name substring
 cargo clippy --all-targets --all-features -- -D warnings
 cargo run -p tt-app                              # the window
+cargo run -p tt-viewer -- [folder|file.sqlite]   # TelegramViewer on its own
 cargo run -p tt-app -- login|chats|export "<title>"
 cargo run -p tt-app -- export --db "<title>"     # sync the database
 cargo run -p tgx-parity -- archive reference     # one leg on its own
@@ -92,7 +99,8 @@ without it a suite that compared nothing reports as coverage. `save.bat` and CI
 both pass it.
 
 CI (`windows-latest`) runs fmt, clippy with `-D warnings`, `cargo test --all`,
-a release build, and fails if the binary exceeds 30 MB. Every resolving step
+a release build of both exes, and fails if TelegramTools.exe exceeds 30 MB or
+TelegramViewer.exe 12 MB. Every resolving step
 passes `--locked`, so a dependency change must ship with its `Cargo.lock`.
 
 `save.bat clean` exists because `target\` is a cache cargo never collects; it
@@ -172,8 +180,16 @@ tga-run      running an analysis: the `analyse` and `summarise` command lines,
              the library of exports, the workers. No toolkit. The only crate
              that reaches tga-docs and tga-db.
 
+tgx-viewer   the Viewer: a database read for the screen (data, search), that
+             work off the window's thread (jobs: Job in, Reply out), and the
+             screen as a component a window hosts (Viewer + Host). Was
+             tgx_tg::viewer, tgx_tg::search and tt-app's shell/viewer.rs.
+             MUST NOT depend on tgx-tg, grammers-* or any tga-*.
+
 tt-app       TelegramTools.exe: the window, and both command lines behind its
-             argv. Depends only on tgx-ui + tgx-tg + tga-run.
+             argv. Depends only on tgx-ui + tgx-tg + tga-run + tgx-viewer.
+tt-viewer    TelegramViewer.exe: tgx-viewer beside a list of the folder's
+             databases. Depends only on tgx-viewer + tgx-ui.
 ```
 
 The analyser's rules sit in the same `layering.rs`: no `tga-*` crate reaches
@@ -279,6 +295,24 @@ had to be *awaitable*, `Bridge::drain` was `#[cfg(test)]` so a poll could not
 come back, and `shell/mod.rs` awaited on the foreground executor. Polling from a
 frame is now the only way to read a channel, and `Events` is what makes it
 correct. **Do not add a send path that bypasses it.**
+
+**One Viewer, two windows.** TelegramTools and TelegramViewer host the same
+`tgx_viewer::Viewer`. Each hands it a `Host` — where a `Job` runs, where the
+status line and warnings go — and gives every `Reply` back to
+`Viewer::apply`; in TelegramTools a reply travels as `Event::Viewer` through
+`bridge::Events`, so it wakes the window like every other event. What is only
+TelegramTools' (the way back, Export as folder, which needs the exporter)
+stays in `tt-app/src/shell/viewer.rs`. Change the screen in `tgx-viewer`, not
+by copying it.
+
+**Close to the tray minimises; it never hides.** Settings › Appearance ›
+Close to the tray (`close_to_tray`, off by default) makes the X put the window
+in the notification area, so a run and the scheduled sync carry on
+(`tt-app/src/tray.rs`). eframe calls `update` only on a `WM_PAINT`, and Windows
+sends none to a hidden window, so `ViewportCommand::Visible(false)` would stop
+the bridge draining and the timer firing. The window is minimised and its
+taskbar button removed (`ITaskbarList::DeleteTab`); Quit on the icon's menu
+goes through the ordinary close, so `on_exit` still cancels and drains.
 
 **One connection for the whole process.** `Session::connect` hands out a handle
 on a shared `Connection` (`tgx-tg/src/client.rs`); it does not open one.

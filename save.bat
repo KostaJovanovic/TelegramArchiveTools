@@ -14,6 +14,9 @@ rem `analyse` behind its argv. The two it replaced are listed so `build` can
 rem stop a copy of either still running out of dist\ and take it out of there.
 set EXENAME=TelegramTools.exe
 set "OLDEXES=TelegramExporter.exe TelegramAnalyser.exe"
+rem And the Viewer on its own, which ships beside it: Settings copies it from
+rem there into the export folder, so dist\ must always carry both.
+set VIEWEREXE=TelegramViewer.exe
 
 rem The one check that cannot be faked: a real Telegram Desktop export of the
 rem same chat, replayed through our writers and diffed line for line. It lives
@@ -395,14 +398,14 @@ rem A running instance holds both the linker output and its dist\ copy open,
 rem so the build fails and then the copy does. Killing it first is not optional.
 rem taskkill exits non-zero when nothing was running, which is the normal case.
 echo [exe]  stop any running instance
-for %%e in (%EXENAME% %OLDEXES%) do (
+for %%e in (%EXENAME% %VIEWEREXE% %OLDEXES%) do (
   taskkill /F /IM %%e >nul 2>&1
   if errorlevel 1 (echo        %%e none running) else (echo        %%e stopped)
 )
 
 echo [exe]  cargo build --release
 call :clock TS
-cargo build --release -p tt-app
+cargo build --release -p tt-app -p tt-viewer
 if errorlevel 1 (
   echo.
   echo [err]  build failed
@@ -427,6 +430,17 @@ if errorlevel 1 (
   set SAVE_ERROR=1
   goto end
 )
+if not exist "target\release\%VIEWEREXE%" (
+  echo [err]  build reported success but target\release\%VIEWEREXE% is missing
+  set SAVE_ERROR=1
+  goto end
+)
+copy /y "target\release\%VIEWEREXE%" "dist\%VIEWEREXE%" >nul
+if errorlevel 1 (
+  echo [err]  could not copy %VIEWEREXE% into dist\ - is it still running?
+  set SAVE_ERROR=1
+  goto end
+)
 rem The exes it replaced. Left beside it they would still start -- and the old
 rem exporter would make a fresh TelegramExporterData\ and ask to sign in again,
 rem since TelegramTools renames that folder on first launch.
@@ -438,6 +452,7 @@ for %%e in (%OLDEXES%) do (
 
 echo.
 for /f %%s in ('powershell -NoProfile -Command "'{0:N1}' -f ((Get-Item 'dist\%EXENAME%').Length/1MB)"') do echo [ok]   dist\%EXENAME%  %%s MB
+for /f %%s in ('powershell -NoProfile -Command "'{0:N1}' -f ((Get-Item 'dist\%VIEWEREXE%').Length/1MB)"') do echo [ok]   dist\%VIEWEREXE%  %%s MB
 
 rem The cache, reported where somebody will actually read it. target\ reached
 rem 45 GB without a single line of this script ever mentioning it, and cargo

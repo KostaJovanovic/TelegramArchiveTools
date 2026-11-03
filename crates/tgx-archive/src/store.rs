@@ -1877,8 +1877,9 @@ impl Store {
         Ok(out)
     }
 
-    /// The messages of a chat whose text contains `needle`, **ignoring case**,
-    /// oldest first and at most `limit` of them.
+    /// The messages of a chat whose text contains `needle`, **ignoring case,
+    /// alphabet and marks** ([`crate::fold`]: `djordje` finds `Ђорђе` and
+    /// `Đorđe`), oldest first and at most `limit` of them.
     ///
     /// **Earlier versions and deleted messages are searched too**, because
     /// those are what an archive is for: text edited away is found through the
@@ -1898,7 +1899,7 @@ impl Store {
         needle: &str,
         limit: usize,
     ) -> Result<Vec<Hit>, Error> {
-        let needle = needle.trim().to_lowercase();
+        let needle = crate::fold::fold(needle.trim());
         if needle.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
@@ -1920,7 +1921,7 @@ impl Store {
                 continue;
             }
             let text = payload_text(&row.get::<String>(1)?);
-            if text.to_lowercase().contains(&needle) {
+            if crate::fold::fold(&text).contains(&needle) {
                 earlier.insert(id, text);
             }
         }
@@ -1939,7 +1940,7 @@ impl Store {
         while let Some(row) = rows.next().await? {
             let id = row.get::<i64>(0)?;
             let text = payload_text(&row.get::<String>(4)?);
-            let now = text.to_lowercase().contains(&needle);
+            let now = crate::fold::fold(&text).contains(&needle);
             let excerpt = match (now, earlier.remove(&id)) {
                 (true, _) => text,
                 (false, Some(old)) => old,
@@ -2991,12 +2992,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_folds_cyrillic_case_which_sqlite_cannot() {
+    async fn search_folds_cyrillic_case_and_alphabet_which_sqlite_cannot() {
         let s = store("search-cyrillic").await;
         s.merge(1, 10, Some(1), &msg(10, "Ђорђе стиже у 5"), 100)
             .await
             .unwrap();
-        for needle in ["ђорђе", "ЂОРЂЕ", "Ђорђе"] {
+        // And the alphabet: Latin, with or without marks, finds Cyrillic.
+        for needle in ["ђорђе", "ЂОРЂЕ", "Ђорђе", "Đorđe", "djordje", "STIZE"] {
             let hits = s.search(1, needle, 50).await.unwrap();
             assert_eq!(hits.len(), 1, "{needle}");
         }

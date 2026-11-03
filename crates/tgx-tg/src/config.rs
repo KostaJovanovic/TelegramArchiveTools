@@ -167,6 +167,14 @@ pub struct Settings {
     /// beginning, which is not something to start unasked.
     pub sync_every_hours: u32,
 
+    /// Keep a copy of TelegramViewer.exe in the export folder, beside the
+    /// databases, so the folder carries its own reader wherever it is copied.
+    /// Put there when this is turned on, when the window opens and after each
+    /// run. Database mode only: a Classic folder holds nothing it can open.
+    /// Off by default — a program appearing in a folder of exports is not
+    /// something to do unasked.
+    pub viewer_beside_databases: bool,
+
     /// A folder export of only the messages from this day on, `YYYY-MM-DD` in
     /// local time. Empty is the beginning of the chat.
     ///
@@ -347,6 +355,12 @@ pub struct Settings {
     pub window: Vec<f32>,
     pub window_maximized: bool,
 
+    /// The X puts the window in the notification area instead of quitting,
+    /// so a run and the scheduled sync carry on; Quit is on the icon's menu.
+    /// Off by default: a close button that does not close is a surprise
+    /// nobody should get unasked. See `tt-app/src/tray.rs`.
+    pub close_to_tray: bool,
+
     /// Named sets of chats, so a selection built up over six hundred rows is
     /// made once and recalled with a click. By chat id, like the ticks, so a
     /// renamed chat stays in its set; an id the account no longer has is
@@ -424,6 +438,7 @@ impl Default for Settings {
             reread_window: 500,
             reread_all: false,
             sync_every_hours: 0,
+            viewer_beside_databases: false,
             date_from: String::new(),
             date_until: String::new(),
             media_kinds: MEDIA_KINDS.iter().map(|s| s.to_string()).collect(),
@@ -468,6 +483,7 @@ impl Default for Settings {
             zoom: 1.0,
             window: Vec::new(),
             window_maximized: false,
+            close_to_tray: false,
             saved_selections: Vec::new(),
         }
     }

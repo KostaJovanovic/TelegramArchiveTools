@@ -386,7 +386,7 @@ async fn doctor(dir: &std::path::Path, fix: bool) -> Result<()> {
 /// what was asked for — to this terminal only. Nothing of it goes to
 /// `log::`, which writes `tgx.log` beside the executable.
 async fn search(dir: &std::path::Path, needle: &str, limit: usize) -> Result<()> {
-    let found = tgx_tg::search::across(dir, needle, limit).await?;
+    let found = tgx_viewer::search::across(dir, needle, limit).await?;
     for c in &found.chats {
         println!();
         println!("{} (id {}) — {} hit(s)", c.title, c.chat_id, c.hits.len());
@@ -435,15 +435,23 @@ fn excerpt(text: &str, needle: &str) -> String {
         .chars()
         .map(|c| if c.is_whitespace() { ' ' } else { c })
         .collect();
-    let lower: Vec<char> = flat.iter().flat_map(|c| c.to_lowercase()).collect();
-    let want: Vec<char> = needle.trim().to_lowercase().chars().collect();
-    // Located in the folded text, which is the same length as the original
-    // for every script these chats are in; where folding changes the length
-    // the window is merely a few characters off.
-    let at = lower
+    // Each character folded on its own, remembering which one it came from,
+    // so a match in the folded text (`dj` for `ђ`) maps back to the original.
+    let (folded, from_char): (Vec<char>, Vec<usize>) = flat
+        .iter()
+        .enumerate()
+        .flat_map(|(i, c)| {
+            crate::fold::fold(&c.to_string())
+                .chars()
+                .map(move |f| (f, i))
+                .collect::<Vec<_>>()
+        })
+        .unzip();
+    let want: Vec<char> = crate::fold::fold(needle.trim()).chars().collect();
+    let at = folded
         .windows(want.len().max(1))
         .position(|w| w == want.as_slice())
-        .unwrap_or(0)
+        .map_or(0, |i| from_char[i])
         .min(flat.len());
     let from = at.saturating_sub(SIDE);
     let to = (at + want.len() + SIDE).min(flat.len());
@@ -1629,6 +1637,13 @@ mod tests {
             message_count: None,
             migration: None,
         }
+    }
+
+    #[test]
+    fn an_excerpt_centres_on_a_hit_in_the_other_alphabet() {
+        let text = format!("{} Ђорђе стиже", "x".repeat(100));
+        assert!(excerpt(&text, "djordje").starts_with("…xxx"));
+        assert!(excerpt(&text, "djordje").contains("Ђорђе стиже"));
     }
 
     #[test]

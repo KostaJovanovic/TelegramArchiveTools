@@ -36,8 +36,11 @@
 //! through [`Store::open_read`], and a schema change made here is one the
 //! analyser either compiles against or fails to.
 
+pub mod fold;
+pub mod found;
 pub mod store;
 
+pub use found::{archived_chats, database_files, Archived};
 pub use store::{
     merge_volatile, plain_text, Absorbed, ChatEntry, ChatSummary, Error, Hit, MediaEntry, MediaRow,
     Merge, Store, StoredMessage, StoredTopic, StoredVersion, Userpic, FILE_EXT, SCHEMA_VERSION,

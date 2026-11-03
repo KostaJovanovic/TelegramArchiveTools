@@ -1,300 +1,138 @@
-//! What the Viewer's controls do. **No connection** — every one of these reads
-//! a database in the destination, read-only, and nothing else.
+//! **TelegramViewer.exe beside the databases** — Settings › What an export
+//! contains › Viewer beside the databases.
 //!
-//! The answers carry message text, for the window. **None of them is written
-//! to the log**, and the failures they report name files and errors, never a
-//! message.
+//! The export folder is the thing that gets copied to a drive or handed to
+//! somebody, and a database alone is a file nothing on their machine opens.
+//! With the setting on, the folder carries its own reader: the small exe that
+//! is the Viewer and nothing else (`crates/tt-viewer`), which opens on the
+//! databases beside it.
+//!
+//! **Copied from beside this exe, never built or downloaded.** `save.bat
+//! build` and the release put the two side by side; a TelegramTools.exe
+//! copied somewhere on its own has nothing to copy, and says so.
 
 use crate::bridge::{Event, Events};
-use std::path::PathBuf;
-use tgx_tg::viewer::{self, Media};
+use std::path::{Path, PathBuf};
 
-/// How many hits a search keeps per chat. Enough to page through on screen;
-/// past it the answer is "search for something narrower".
-pub const SEARCH_LIMIT: usize = 500;
+/// The viewer's file name, here and in the export folder.
+pub const VIEWER_EXE: &str = "TelegramViewer.exe";
 
-/// The databases in the destination, for the picker.
-pub async fn databases(output_dir: String, tx: Events) {
-    let found = viewer::databases(std::path::Path::new(&output_dir))
-        .await
-        .map(|(dbs, _unreadable)| dbs)
-        .map_err(|e| format!("could not read {output_dir}: {e}"));
-    let _ = tx.send(Event::ViewerDatabases { output_dir, found });
+/// What [`place`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Placed {
+    /// Copied in, new or replacing an older one.
+    Copied(PathBuf),
+    /// The file there is already this one, byte for byte.
+    Current,
 }
 
-/// Every message of one chat, flattened.
-pub async fn load(path: PathBuf, chat_id: i64, tx: Events) {
-    let rows = viewer::load(&path, chat_id)
-        .await
-        .map_err(|e| format!("could not read {}: {e}", path.display()));
-    let _ = tx.send(Event::ViewerLoaded {
-        path,
-        chat_id,
-        rows,
-    });
-}
-
-/// One message in full.
-pub async fn detail(path: PathBuf, chat_id: i64, id: i64, tx: Events) {
-    let detail = viewer::detail(&path, chat_id, id)
-        .await
-        .map(|d| d.map(Box::new))
-        .map_err(|e| e.to_string());
-    let _ = tx.send(Event::ViewerDetail {
-        chat_id,
-        id,
-        detail,
-    });
-}
-
-/// Search one chat — `scope` is its database, its id and its title — or,
-/// with no scope, every database in `output_dir`.
-pub async fn search(
-    output_dir: String,
-    scope: Option<(PathBuf, i64, String)>,
-    needle: String,
-    tx: Events,
-) {
-    let found = match &scope {
-        Some((path, chat_id, title)) => tgx_tg::search::chat(path, *chat_id, &needle, SEARCH_LIMIT)
-            .await
-            .map(|hits| {
-                let mut found = tgx_tg::search::Found::default();
-                if !hits.is_empty() {
-                    found.chats.push(tgx_tg::search::ChatHits {
-                        chat_id: *chat_id,
-                        title: title.clone(),
-                        path: path.clone(),
-                        hits,
-                    });
-                }
-                Box::new(found)
-            })
-            .map_err(|e| e.to_string()),
-        None => tgx_tg::search::across(std::path::Path::new(&output_dir), &needle, SEARCH_LIMIT)
-            .await
-            .map(Box::new)
-            .map_err(|e| format!("could not read {output_dir}: {e}")),
-    };
-    let _ = tx.send(Event::SearchHits {
-        needle,
-        scope: scope.map(|(_, id, _)| id),
-        found,
-    });
-}
-
-/// The longest side a picture is kept at. Bubbles are at most a few hundred
-/// points wide; a 4000px photo decoded at full size would be 64 MB of texture
-/// for a thumbnail's worth of screen.
-pub const PICTURE_SIDE: u32 = 720;
-
-/// Decode the pictures of `ids`, one event each, as they are ready.
-///
-/// Decoding is CPU work, so it runs on the blocking pool; the reads are one
-/// read-only open of the database for the whole batch.
-pub async fn pictures(path: PathBuf, chat_id: i64, ids: Vec<i64>, tx: Events) {
-    let found = viewer::picture_bytes(&path, chat_id, ids.clone()).await;
-    let found = match found {
-        Ok(found) => found,
-        // Nothing could be read: every bubble falls back to its card rather
-        // than waiting on a picture that is not coming. The reason goes to the
-        // log — a file name and a database error, never a message — or a
-        // Viewer with no pictures at all leaves nothing to go on.
-        Err(e) => {
-            log::warn!("viewer pictures: {}: {e}", path.display());
-            ids.into_iter()
-                .map(|id| viewer::Pictured {
-                    id,
-                    candidates: Vec::new(),
-                    has_file: false,
-                })
-                .collect()
-        }
-    };
-    for found in found {
-        let viewer::Pictured {
-            id,
-            candidates,
-            has_file,
-        } = found;
-        let image = tokio::task::spawn_blocking(move || decode_first(&candidates))
-            .await
-            .ok()
-            .flatten()
-            .map(std::sync::Arc::new);
-        let _ = tx.send(Event::ViewerPicture {
-            path: path.clone(),
-            chat_id,
-            id,
-            image,
-            has_file,
-        });
+/// Put `source` into `dir` as [`VIEWER_EXE`], unless the same bytes are
+/// already there. The folder is made if it is not there yet: an export
+/// folder that has never been written to is still where the databases go.
+pub fn place(source: &Path, dir: &Path) -> Result<Placed, String> {
+    if !source.is_file() {
+        return Err(format!(
+            "{VIEWER_EXE} is not beside TelegramTools.exe, so there is none to put in the \
+             export folder. It ships in the same folder; copy it next to TelegramTools.exe."
+        ));
     }
+    let target = dir.join(VIEWER_EXE);
+    if same_file_contents(source, &target) {
+        return Ok(Placed::Current);
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
+    // A copy still running from the folder holds its file open, and Windows
+    // will not overwrite it; that is the likely cause, so it is named.
+    std::fs::copy(source, &target).map_err(|e| {
+        format!(
+            "could not put {VIEWER_EXE} in {}: {e} — if it is open, close it and the next \
+             sync will try again",
+            dir.display()
+        )
+    })?;
+    Ok(Placed::Copied(target))
 }
 
-/// The side a profile picture is kept at: a few times the userpic circle, so
-/// it stays sharp on a high-density screen without holding Telegram's 640.
-pub const USERPIC_SIDE: u32 = 96;
-
-/// The open chat's profile pictures, one per person, decoded together on the
-/// blocking pool. A database that cannot be read, or holds none, sends none —
-/// the bubbles keep their initials.
-pub async fn userpics(path: PathBuf, chat_id: i64, tx: Events) {
-    let found = match viewer::userpics(&path, chat_id).await {
-        Ok(found) => found,
-        // Logged for the same reason as the pictures above.
-        Err(e) => {
-            log::warn!("viewer userpics: {}: {e}", path.display());
-            return;
-        }
+/// Whether `b` exists and holds exactly `a`'s bytes. Sizes first, so a
+/// different version is told apart without reading either.
+fn same_file_contents(a: &Path, b: &Path) -> bool {
+    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
     };
-    if found.is_empty() {
+    if ma.len() != mb.len() {
+        return false;
+    }
+    matches!((std::fs::read(a), std::fs::read(b)), (Ok(x), Ok(y)) if x == y)
+}
+
+/// Where the viewer this program ships with is: beside it.
+pub fn shipped() -> Option<PathBuf> {
+    Some(std::env::current_exe().ok()?.with_file_name(VIEWER_EXE))
+}
+
+/// [`place`] off the window's thread. A copy is logged; a file already
+/// current says nothing; a failure is a warning.
+pub async fn place_in(output_dir: String, tx: Events) {
+    let Some(source) = shipped() else {
+        let _ = tx.send(Event::Warn(format!(
+            "Could not tell where TelegramTools.exe is, so {VIEWER_EXE} was not copied"
+        )));
         return;
-    }
-    let pics = tokio::task::spawn_blocking(move || {
-        found
-            .into_iter()
-            .filter_map(|(peer, bytes)| {
-                let img = decode_scaled(&[bytes], USERPIC_SIDE)?;
-                Some((peer, std::sync::Arc::new(img)))
-            })
-            .collect::<Vec<_>>()
-    })
-    .await
-    .unwrap_or_default();
-    let _ = tx.send(Event::ViewerUserpics {
-        path,
-        chat_id,
-        pics,
-    });
-}
-
-/// The first of `candidates` that decodes, scaled down to [`PICTURE_SIDE`].
-pub fn decode_first(candidates: &[Vec<u8>]) -> Option<eframe::egui::ColorImage> {
-    decode_scaled(candidates, PICTURE_SIDE)
-}
-
-/// The first of `candidates` that decodes, its longer side at most `side`.
-fn decode_scaled(candidates: &[Vec<u8>], side: u32) -> Option<eframe::egui::ColorImage> {
-    candidates.iter().find_map(|bytes| {
-        let img = image::load_from_memory(bytes).ok()?;
-        let img = if img.width().max(img.height()) > side {
-            img.thumbnail(side, side)
-        } else {
-            img
-        };
-        let rgba = img.to_rgba8();
-        let size = [rgba.width() as usize, rgba.height() as usize];
-        Some(eframe::egui::ColorImage::from_rgba_unmultiplied(
-            size,
-            rgba.as_raw(),
-        ))
-    })
-}
-
-/// A click on a message's media: open the file it carries.
-pub async fn open_message_media(path: PathBuf, chat_id: i64, id: i64, tx: Events) {
-    match viewer::main_file(&path, chat_id, id).await {
-        Ok(Some(media)) => open_media(path, media, tx).await,
-        Ok(None) => {
-            let _ = tx.send(Event::Status(
-                "The database holds no file for this message — the export did not save it".into(),
-            ));
-        }
-        Err(e) => {
-            let _ = tx.send(Event::Warn(format!("Could not read the file: {e}")));
-        }
-    }
-}
-
-/// What Open hands to Windows to open: pictures, video, sound, PDFs, text
-/// and Office's macro-free documents. Anything else — an `.exe`, a script, a
-/// shortcut, a macro document somebody posted — would run with this
-/// account's rights on one click, so its folder opens instead.
-const OPENABLE: [&str; 27] = [
-    "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "heic", "mp4", "mov", "m4v", "webm",
-    "mkv", "avi", "mp3", "m4a", "ogg", "oga", "opus", "wav", "flac", "pdf", "txt", "docx", "xlsx",
-    "pptx",
-];
-
-/// Whether a file of this name is opened, rather than shown in its folder.
-fn openable(name: &str) -> bool {
-    std::path::Path::new(name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| OPENABLE.iter().any(|o| o.eq_ignore_ascii_case(e)))
-}
-
-/// Copy one stored file out to `%TEMP%\tgx-view` and hand it to the system
-/// — or, for a type that could run ([`OPENABLE`]), open its folder.
-///
-/// The status line says which file opened; a failure is a warning, naming
-/// the file and the reason — a file name is not message text.
-pub async fn open_media(path: PathBuf, media: Media, tx: Events) {
-    let opens = openable(&media.name);
-    let opened = match viewer::extract(&path, &media).await {
-        Ok(file) if opens => super::open_path(&file),
-        Ok(file) => super::open_path(file.parent().unwrap_or(&file)),
-        Err(e) => Err(e),
     };
-    let _ = tx.send(match opened {
-        Ok(()) if opens => Event::Status(format!("Opened {}", media.name)),
-        Ok(()) => Event::Status(format!(
-            "Showed {} in its folder: a file of that type could be a program, so it is \
-             not opened from here",
-            media.name
-        )),
-        Err(e) => Event::Warn(format!("Could not open {}: {e}", media.name)),
+    let dir = PathBuf::from(&output_dir);
+    let placed = tokio::task::spawn_blocking(move || place(&source, &dir))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+    let _ = tx.send(match placed {
+        Ok(Placed::Copied(to)) => Event::Log(format!("Put {VIEWER_EXE} in {}", parent_of(&to))),
+        Ok(Placed::Current) => return,
+        Err(e) => Event::Warn(e),
     });
 }
 
-/// Save one stored file where the user chose. A file name in the status
-/// line, never its contents.
-pub async fn save_media(path: PathBuf, media: Media, to: PathBuf, tx: Events) {
-    let _ = tx.send(match viewer::save(&path, &media, &to).await {
-        Ok(()) => Event::Status(format!("Saved {}", to.display())),
-        Err(e) => Event::Warn(format!("Could not save {}: {e}", media.name)),
-    });
+fn parent_of(path: &Path) -> String {
+    path.parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn png(w: u32, h: u32) -> Vec<u8> {
-        let img = image::RgbaImage::from_pixel(w, h, image::Rgba([200, 30, 30, 255]));
-        let mut out = std::io::Cursor::new(Vec::new());
-        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
-        out.into_inner()
+    fn tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tt-place-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]
-    fn the_first_candidate_that_decodes_is_the_picture_and_a_large_one_is_scaled() {
-        // An animated sticker's own bytes do not decode; its thumbnail does.
-        let pic = decode_first(&[b"not an image".to_vec(), png(40, 20)]).unwrap();
-        assert_eq!(pic.size, [40, 20]);
-        let big = decode_first(&[png(2000, 1000)]).unwrap();
-        assert_eq!(big.size, [PICTURE_SIDE as usize, PICTURE_SIDE as usize / 2]);
-        assert!(decode_first(&[]).is_none());
+    fn the_viewer_is_copied_once_and_replaced_when_it_changes() {
+        let root = tmp("copy");
+        let source = root.join("ship").join(VIEWER_EXE);
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"viewer v1").unwrap();
+        // Into a folder that does not exist yet.
+        let exports = root.join("Exports");
+        let target = exports.join(VIEWER_EXE);
+        assert_eq!(place(&source, &exports), Ok(Placed::Copied(target.clone())));
+        assert_eq!(std::fs::read(&target).unwrap(), b"viewer v1");
+        assert_eq!(place(&source, &exports), Ok(Placed::Current));
+        // The same size, different bytes: still a new version.
+        std::fs::write(&source, b"viewer v2").unwrap();
+        assert_eq!(place(&source, &exports), Ok(Placed::Copied(target.clone())));
+        assert_eq!(std::fs::read(&target).unwrap(), b"viewer v2");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn only_a_type_that_cannot_run_is_opened() {
-        for name in ["photo.JPG", "clip.mp4", "Zapisnik 01.12.docx", "scan.pdf"] {
-            assert!(openable(name), "{name}");
-        }
-        for name in [
-            "invoice.exe",
-            "x.js",
-            "x.hta",
-            "report.pdf.lnk",
-            "run.bat",
-            "macro.docm",
-            "old.doc",
-            "page.html",
-            "README",
-        ] {
-            assert!(!openable(name), "{name}");
-        }
+    fn no_viewer_beside_the_exe_is_said_and_nothing_is_made() {
+        let root = tmp("missing");
+        let exports = root.join("Exports");
+        let e = place(&root.join(VIEWER_EXE), &exports).unwrap_err();
+        assert!(e.contains("not beside TelegramTools.exe"), "{e}");
+        assert!(!exports.exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

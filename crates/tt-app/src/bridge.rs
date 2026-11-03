@@ -153,53 +153,9 @@ pub enum Event {
     Dupes(Result<Vec<String>, String>),
 
     // -- the viewer -------------------------------------------------------
-    /// The databases the Viewer can open. Carries the folder it describes, like
-    /// [`Event::OnDisk`], so a list of a destination since changed is dropped.
-    ViewerDatabases {
-        output_dir: String,
-        found: Result<Vec<tgx_tg::viewer::Database>, String>,
-    },
-    /// One chat's rows. Carries which chat, so a slow load of a database the
-    /// user has since moved away from cannot replace the one on screen.
-    ViewerLoaded {
-        path: std::path::PathBuf,
-        chat_id: i64,
-        rows: Result<tgx_tg::viewer::Loaded, String>,
-    },
-    /// One message in full, for the detail pane. Dropped unless it is still
-    /// the selected one.
-    ViewerDetail {
-        chat_id: i64,
-        id: i64,
-        detail: Result<Option<Box<tgx_tg::viewer::Detail>>, String>,
-    },
-    /// One message's picture, decoded and scaled for the screen — or `None`
-    /// when the database holds nothing that decodes, so the bubble falls back
-    /// to a card. Carries the database, so a picture for a chat since closed is
-    /// dropped.
-    ViewerPicture {
-        path: std::path::PathBuf,
-        chat_id: i64,
-        id: i64,
-        image: Option<std::sync::Arc<eframe::egui::ColorImage>>,
-        /// The file itself is in the database, picture or not.
-        has_file: bool,
-    },
-    /// The open chat's profile pictures, decoded, by sender (`"user1234"`).
-    /// Carries the database, so pictures for a chat since closed are dropped.
-    ViewerUserpics {
-        path: std::path::PathBuf,
-        chat_id: i64,
-        pics: Vec<(String, std::sync::Arc<eframe::egui::ColorImage>)>,
-    },
-    /// What a search found. `scope` is the chat searched, or `None` for every
-    /// database in the destination; with `needle`, it is how an answer to a
-    /// question nobody is asking any more is recognised and dropped.
-    SearchHits {
-        needle: String,
-        scope: Option<i64>,
-        found: Result<Box<tgx_tg::search::Found>, String>,
-    },
+    /// An answer to one of the Viewer's jobs. What each carries, and why, is
+    /// on [`tgx_viewer::Reply`]: the same answers reach TelegramViewer.exe.
+    Viewer(tgx_viewer::Reply),
 
     // -- counting ---------------------------------------------------------
     /// One chat's total. **`None` is not zero**: it means Telegram would not

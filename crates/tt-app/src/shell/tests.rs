@@ -844,8 +844,8 @@ fn recalling_a_selection_replaces_the_ticks_and_names_what_is_gone() {
 /// A database the viewer can "open". The path does not exist, so the detail
 /// request a selection sends fails offline and harmlessly; these tests are
 /// about what the shell does with the answers it is handed.
-fn db(chat_id: i64, title: &str) -> tgx_tg::viewer::Database {
-    tgx_tg::viewer::Database {
+fn db(chat_id: i64, title: &str) -> tgx_viewer::data::Database {
+    tgx_viewer::data::Database {
         chat_id,
         title: title.into(),
         path: std::env::temp_dir()
@@ -854,8 +854,8 @@ fn db(chat_id: i64, title: &str) -> tgx_tg::viewer::Database {
     }
 }
 
-fn message(id: i64, deleted: bool, version: i64) -> tgx_tg::viewer::Row {
-    tgx_tg::viewer::Row {
+fn message(id: i64, deleted: bool, version: i64) -> tgx_viewer::data::Row {
+    tgx_viewer::data::Row {
         id,
         topic_id: 1,
         date: format!("2025-12-18 16:{id:02}"),
@@ -884,10 +884,10 @@ fn message(id: i64, deleted: bool, version: i64) -> tgx_tg::viewer::Row {
 
 /// Rows as a load answers them, all in the one topic of a chat that is not
 /// a forum.
-fn loaded(rows: Vec<tgx_tg::viewer::Row>) -> tgx_tg::viewer::Loaded {
-    tgx_tg::viewer::Loaded {
+fn loaded(rows: Vec<tgx_viewer::data::Row>) -> tgx_viewer::data::Loaded {
+    tgx_viewer::data::Loaded {
         rows,
-        topics: vec![tgx_tg::viewer::Topic {
+        topics: vec![tgx_viewer::data::Topic {
             id: 1,
             title: "General".into(),
         }],
@@ -895,21 +895,21 @@ fn loaded(rows: Vec<tgx_tg::viewer::Row>) -> tgx_tg::viewer::Loaded {
 }
 
 /// A shell with `db` open and its rows applied.
-fn viewing(database: &tgx_tg::viewer::Database, rows: Vec<tgx_tg::viewer::Row>) -> Shell {
+fn viewing(database: &tgx_viewer::data::Database, rows: Vec<tgx_viewer::data::Row>) -> Shell {
     let mut s = Shell::headless();
     s.show(View::Viewer);
     s.viewer_open(database.clone(), None);
     assert!(s.viewer.loading);
-    s.apply(Event::ViewerLoaded {
+    s.apply(Event::Viewer(tgx_viewer::Reply::Loaded {
         path: database.path.clone(),
         chat_id: database.chat_id,
         rows: Ok(loaded(rows)),
-    });
+    }));
     s
 }
 
-fn hit(id: i64) -> tgx_tg::search::Hit {
-    tgx_tg::search::Hit {
+fn hit(id: i64) -> tgx_viewer::search::Hit {
+    tgx_viewer::search::Hit {
         id,
         topic_id: 1,
         date: "2025-12-18T16:00:00".into(),
@@ -996,9 +996,9 @@ fn a_loaded_chat_counts_its_markers_and_the_filter_narrows_it() {
     assert!(!s.viewer.loading);
     assert_eq!(s.viewer.shown, vec![0, 1, 2]);
     assert_eq!(s.viewer.counts, (1, 1, 0));
-    s.viewer_set_filter(viewer::Filter::Deleted);
+    s.viewer_set_filter(tgx_viewer::Filter::Deleted);
     assert_eq!(s.viewer.shown, vec![1]);
-    s.viewer_set_filter(viewer::Filter::Edited);
+    s.viewer_set_filter(tgx_viewer::Filter::Edited);
     assert_eq!(s.viewer.shown, vec![2]);
 }
 
@@ -1012,23 +1012,23 @@ fn a_forums_topics_can_be_picked_and_a_message_elsewhere_switches_to_its_topic()
     for r in rows.iter_mut().filter(|r| r.id % 2 == 0) {
         r.topic_id = 5;
     }
-    s.apply(Event::ViewerLoaded {
+    s.apply(Event::Viewer(tgx_viewer::Reply::Loaded {
         path: d.path.clone(),
         chat_id: 7,
-        rows: Ok(tgx_tg::viewer::Loaded {
+        rows: Ok(tgx_viewer::data::Loaded {
             rows,
             topics: vec![
-                tgx_tg::viewer::Topic {
+                tgx_viewer::data::Topic {
                     id: 1,
                     title: "General".into(),
                 },
-                tgx_tg::viewer::Topic {
+                tgx_viewer::data::Topic {
                     id: 5,
                     title: "Foto".into(),
                 },
             ],
         }),
-    });
+    }));
     assert_eq!(s.viewer.shown.len(), 6, "every topic at first");
     s.viewer_set_topic(Some(5));
     assert_eq!(s.viewer.shown, vec![1, 3, 5], "only Foto's messages");
@@ -1054,11 +1054,11 @@ fn rows_for_a_chat_no_longer_open_are_dropped() {
     let (a, b) = (db(1, "A"), db(2, "B"));
     let mut s = viewing(&a, vec![message(1, false, 1)]);
     s.viewer_open(b.clone(), None);
-    s.apply(Event::ViewerLoaded {
+    s.apply(Event::Viewer(tgx_viewer::Reply::Loaded {
         path: a.path.clone(),
         chat_id: 1,
         rows: Ok(loaded(vec![message(1, false, 1), message(2, false, 1)])),
-    });
+    }));
     assert!(s.viewer.loading, "still waiting for B");
     assert!(s.viewer.rows.is_empty());
 }
@@ -1070,11 +1070,11 @@ fn search_hits_in_this_chat_select_the_first_and_step_through_the_rest() {
     let mut s = viewing(&d, rows);
     // Filtered to Deleted, which none of the hits are: selecting one must put
     // the filter back rather than select a row nobody can see.
-    s.viewer_set_filter(viewer::Filter::Deleted);
+    s.viewer_set_filter(tgx_viewer::Filter::Deleted);
     s.viewer.query = "sastanak".into();
     s.viewer_search();
-    let found = tgx_tg::search::Found {
-        chats: vec![tgx_tg::search::ChatHits {
+    let found = tgx_viewer::search::Found {
+        chats: vec![tgx_viewer::search::ChatHits {
             chat_id: 7,
             title: "Dev".into(),
             path: d.path.clone(),
@@ -1082,15 +1082,15 @@ fn search_hits_in_this_chat_select_the_first_and_step_through_the_rest() {
         }],
         unreadable: vec![],
     };
-    s.apply(Event::SearchHits {
+    s.apply(Event::Viewer(tgx_viewer::Reply::Hits {
         needle: "sastanak".into(),
         scope: Some(7),
         found: Ok(Box::new(found)),
-    });
+    }));
     assert_eq!(s.viewer.hits, vec![4, 9]);
     assert_eq!(s.viewer.selected, Some(4));
     assert_eq!(s.viewer.hit_at, Some(0));
-    assert_eq!(s.viewer.filter, viewer::Filter::All);
+    assert_eq!(s.viewer.filter, tgx_viewer::Filter::All);
     assert_eq!(s.viewer.scroll_to, Some(3), "the list jumps to row 4");
 
     s.viewer_step_hit(1);
@@ -1107,11 +1107,11 @@ fn an_answer_to_a_search_nobody_is_asking_any_more_is_dropped() {
     let mut s = viewing(&d, vec![message(1, false, 1)]);
     s.viewer.query = "new".into();
     s.viewer_search();
-    s.apply(Event::SearchHits {
+    s.apply(Event::Viewer(tgx_viewer::Reply::Hits {
         needle: "old".into(),
         scope: Some(7),
         found: Ok(Box::default()),
-    });
+    }));
     assert!(
         s.viewer.asked.is_some(),
         "still waiting for the right answer"
@@ -1125,8 +1125,8 @@ fn a_hit_in_another_database_opens_that_chat_at_that_message() {
     s.viewer.everywhere = true;
     s.viewer.query = "ђорђе".into();
     s.viewer_search();
-    let found = tgx_tg::search::Found {
-        chats: vec![tgx_tg::search::ChatHits {
+    let found = tgx_viewer::search::Found {
+        chats: vec![tgx_viewer::search::ChatHits {
             chat_id: 2,
             title: "B".into(),
             path: b.path.clone(),
@@ -1134,11 +1134,11 @@ fn a_hit_in_another_database_opens_that_chat_at_that_message() {
         }],
         unreadable: vec![],
     };
-    s.apply(Event::SearchHits {
+    s.apply(Event::Viewer(tgx_viewer::Reply::Hits {
         needle: "ђорђе".into(),
         scope: None,
         found: Ok(Box::new(found)),
-    });
+    }));
     assert!(s.viewer.showing_found);
     assert_eq!(s.viewer.found_rows, vec![(0, 0), (0, 1)]);
 
@@ -1146,11 +1146,11 @@ fn a_hit_in_another_database_opens_that_chat_at_that_message() {
     assert!(!s.viewer.showing_found);
     assert_eq!(s.viewer.open.as_ref().map(|d| d.chat_id), Some(2));
     assert!(s.viewer.loading);
-    s.apply(Event::ViewerLoaded {
+    s.apply(Event::Viewer(tgx_viewer::Reply::Loaded {
         path: b.path.clone(),
         chat_id: 2,
         rows: Ok(loaded((1..=9).map(|id| message(id, false, 1)).collect())),
-    });
+    }));
     assert_eq!(s.viewer.selected, Some(8), "the clicked hit, once loaded");
     assert_eq!(s.viewer.scroll_to, Some(7));
     assert_eq!(
@@ -1166,7 +1166,7 @@ fn a_detail_for_a_message_no_longer_selected_is_dropped() {
     let d = db(7, "Dev");
     let mut s = viewing(&d, vec![message(1, false, 1), message(2, false, 1)]);
     s.viewer_select(2, false);
-    let detail = |id| tgx_tg::viewer::Detail {
+    let detail = |id| tgx_viewer::data::Detail {
         id,
         date: String::new(),
         from: String::new(),
@@ -1179,17 +1179,17 @@ fn a_detail_for_a_message_no_longer_selected_is_dropped() {
         versions: vec![],
         media: vec![],
     };
-    s.apply(Event::ViewerDetail {
+    s.apply(Event::Viewer(tgx_viewer::Reply::Detail {
         chat_id: 7,
         id: 1,
         detail: Ok(Some(Box::new(detail(1)))),
-    });
+    }));
     assert!(s.viewer.detail.is_none());
-    s.apply(Event::ViewerDetail {
+    s.apply(Event::Viewer(tgx_viewer::Reply::Detail {
         chat_id: 7,
         id: 2,
         detail: Ok(Some(Box::new(detail(2)))),
-    });
+    }));
     assert_eq!(s.viewer.detail.as_ref().map(|d| d.id), Some(2));
 }
 
@@ -1209,7 +1209,7 @@ fn update_databases_does_not_join_a_classic_run() {
     assert!(!s.settings.export_db, "the mode is left alone");
 }
 
-fn said_by(mut row: tgx_tg::viewer::Row, who: &str, day: &str) -> tgx_tg::viewer::Row {
+fn said_by(mut row: tgx_viewer::data::Row, who: &str, day: &str) -> tgx_viewer::data::Row {
     row.from = who.to_uppercase();
     row.from_id = who.into();
     row.day = day.into();
@@ -1273,10 +1273,10 @@ fn the_analysis_search_shows_results_and_no_chat_is_opened_over_them() {
     // The database list arriving first must not open a chat over the results
     // still on their way.
     let output_dir = s.settings.output_dir.clone();
-    s.apply(Event::ViewerDatabases {
-        output_dir,
+    s.apply(Event::Viewer(tgx_viewer::Reply::Databases {
+        dir: output_dir,
         found: Ok(vec![db(1, "A")]),
-    });
+    }));
     assert!(s.viewer.open.is_none());
 }
 
@@ -1426,10 +1426,10 @@ fn a_database_listing_for_a_folder_since_changed_asks_about_the_new_one() {
     s.settings.output_dir = old.display().to_string();
     s.viewer_list_databases();
     s.settings.output_dir = new.display().to_string();
-    s.apply(Event::ViewerDatabases {
-        output_dir: old.display().to_string(),
+    s.apply(Event::Viewer(tgx_viewer::Reply::Databases {
+        dir: old.display().to_string(),
         found: Ok(vec![db(1, "A")]),
-    });
+    }));
     assert!(
         s.viewer.databases.is_empty(),
         "the old folder's list is not this one's"
@@ -1439,10 +1439,10 @@ fn a_database_listing_for_a_folder_since_changed_asks_about_the_new_one() {
         Some(&*s.settings.output_dir)
     );
     assert!(s.viewer.listing, "asking about the new folder");
-    s.apply(Event::ViewerDatabases {
-        output_dir: new.display().to_string(),
+    s.apply(Event::Viewer(tgx_viewer::Reply::Databases {
+        dir: new.display().to_string(),
         found: Ok(vec![]),
-    });
+    }));
     assert!(!s.viewer.listing);
 }
 
@@ -1452,11 +1452,11 @@ fn a_database_that_cannot_be_read_says_so_rather_than_holding_no_messages() {
     let mut s = Shell::headless();
     s.show(View::Viewer);
     s.viewer_open(d.clone(), None);
-    s.apply(Event::ViewerLoaded {
+    s.apply(Event::Viewer(tgx_viewer::Reply::Loaded {
         path: d.path.clone(),
         chat_id: 7,
         rows: Err("database is locked".into()),
-    });
+    }));
     let empty = s.viewer_empty().expect("nothing to list");
     assert_eq!(empty.headline, "Could not read this database");
     assert!(empty
@@ -1467,11 +1467,11 @@ fn a_database_that_cannot_be_read_says_so_rather_than_holding_no_messages() {
     // Reload opens it again, and the error goes with the old attempt.
     s.viewer_open(d.clone(), None);
     assert!(s.viewer.load_error.is_none());
-    s.apply(Event::ViewerLoaded {
+    s.apply(Event::Viewer(tgx_viewer::Reply::Loaded {
         path: d.path.clone(),
         chat_id: 7,
         rows: Ok(loaded(vec![])),
-    });
+    }));
     let empty = s.viewer_empty().expect("still empty");
     assert_eq!(empty.headline, "This database holds no messages");
 }
@@ -1481,19 +1481,19 @@ fn a_message_that_cannot_be_read_says_so_and_clicking_it_asks_again() {
     let d = db(7, "Dev");
     let mut s = viewing(&d, vec![message(1, false, 1), message(2, false, 1)]);
     s.viewer_select(2, false);
-    s.apply(Event::ViewerDetail {
+    s.apply(Event::Viewer(tgx_viewer::Reply::Detail {
         chat_id: 7,
         id: 2,
         detail: Err("disk I/O error".into()),
-    });
+    }));
     assert_eq!(s.viewer.detail_error.as_deref(), Some("disk I/O error"));
     s.viewer_select(2, false);
     assert!(s.viewer.detail_error.is_none(), "asked again");
-    s.apply(Event::ViewerDetail {
+    s.apply(Event::Viewer(tgx_viewer::Reply::Detail {
         chat_id: 7,
         id: 2,
         detail: Ok(None),
-    });
+    }));
     assert!(s
         .viewer
         .detail_error
@@ -1566,7 +1566,7 @@ fn a_rows_read_and_a_citation_open_the_same_database() {
         chat_id: 7,
         title: "Dev".into(),
     };
-    let db = tgx_tg::viewer::Database::from(read.clone());
+    let db = tgx_viewer::data::Database::from(read.clone());
     assert_eq!(
         (db.path, db.chat_id, db.title),
         (read.path, read.chat_id, read.title)

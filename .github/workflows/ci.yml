@@ -68,9 +68,10 @@ jobs:
         if: ${{ hashFiles('reference/MANIFEST.txt') == '' }}
         run: echo "::warning::the parity legs did not run - no corpus on CI (reference/ is gitignored, so json/html/media were skipped)"
 
-      # The one binary: the window, the exporter's commands and `analyse`.
+      # The window, the exporter's commands and `analyse`; and the Viewer on
+      # its own, which ships beside it.
       - name: Release build
-        run: cargo build --locked --release -p tt-app
+        run: cargo build --locked --release -p tt-app -p tt-viewer
 
       # Record each size so a sudden jump is visible, the way the
       # Git-Bash-vs-PowerShell OpenSSL discovery was (+2.5 MB from the wrong
@@ -80,11 +81,15 @@ jobs:
       - name: Binary size
         shell: pwsh
         run: |
-          foreach ($name in @("TelegramTools.exe")) {
+          # TelegramViewer was 7.2 MB when it was split out (2026-10-29). Its
+          # ceiling is low on purpose: it links no Telegram client, and a jump
+          # past it most likely means one crept in.
+          $limits = @{ "TelegramTools.exe" = 30; "TelegramViewer.exe" = 12 }
+          foreach ($name in $limits.Keys) {
             $mb = [math]::Round((Get-Item "target/release/$name").Length / 1MB, 1)
             Write-Host "$name is $mb MB"
-            if ($mb -gt 30) {
-              Write-Error "$name grew past 30 MB — something large got linked in"
+            if ($mb -gt $limits[$name]) {
+              Write-Error "$name grew past $($limits[$name]) MB — something large got linked in"
               exit 1
             }
           }
@@ -92,4 +97,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: TelegramTools
-          path: target/release/TelegramTools.exe
+          path: |
+            target/release/TelegramTools.exe
+            target/release/TelegramViewer.exe

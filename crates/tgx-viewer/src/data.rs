@@ -1,4 +1,4 @@
-//! **What the window's Viewer reads out of a database**, already flattened.
+//! **What the Viewer reads out of a database**, already flattened.
 //!
 //! The viewer paints a list of every message in a chat — tens of thousands of
 //! rows — from inside a frame, sixty times a second. Parsing a JSON payload
@@ -7,8 +7,10 @@
 //! [`Row`]s: a date, a sender, a first line, the flags. Nothing a frame touches
 //! is JSON.
 //!
-//! The same goes for the layering: `tgx-app` may not depend on `tgx-archive`,
+//! The same goes for the layering: `tt-app` may not depend on `tgx-archive`,
 //! so everything it needs from a database is a plain struct defined here.
+//! This was `tgx_tg::viewer` until `TelegramViewer.exe`, which links no
+//! Telegram client and so cannot reach `tgx-tg`.
 //!
 //! **Read-only throughout** — [`tgx_archive::Store::open_read`]. Looking at a
 //! database must never be the second writer to one an export has open, and a
@@ -34,7 +36,7 @@ pub struct Database {
 
 /// The databases in `dir`, by title, and the files that could not be read.
 pub async fn databases(dir: &Path) -> std::io::Result<(Vec<Database>, Vec<(PathBuf, String)>)> {
-    let found = crate::engine::archived_chats(dir).await?;
+    let found = tgx_archive::archived_chats(dir).await?;
     let mut out: Vec<Database> = found
         .chats
         .into_iter()
@@ -596,14 +598,23 @@ async fn media_in(
 }
 
 /// Where Open media puts a file for the operating system to open:
-/// `%TEMP%\tgx-view`.
+/// `%TEMP%\tgx-view`, and a folder of its own for each program but
+/// TelegramTools — so TelegramViewer closing does not delete a file
+/// TelegramTools just opened, or the other way round.
 ///
 /// **Emptied when the window opens and again when it closes** — see
 /// [`clear_temp`]. These are other people's photos and documents, copied out
 /// of a database the user chose to keep somewhere in particular, into a folder
 /// every program on the machine can read.
 pub fn temp_dir() -> PathBuf {
-    std::env::temp_dir().join("tgx-view")
+    let base = std::env::temp_dir();
+    let program = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_lowercase()));
+    match program.as_deref() {
+        None | Some("telegramtools") => base.join("tgx-view"),
+        Some(other) => base.join(format!("tgx-view-{other}")),
+    }
 }
 
 /// Remove everything [`extract`] wrote. Quiet: a file still open in another
