@@ -210,6 +210,9 @@ pub struct State {
     /// Bumped whenever the folder changes, so a count from the last one is
     /// recognised and dropped.
     pub generation: u64,
+    /// The report over several chats of this folder, once there is one
+    /// (`refresh::together`). Looked for on every rescan.
+    pub combined: Option<PathBuf>,
     /// What this run wrote and what it could not.
     written: usize,
     failed: Vec<String>,
@@ -239,6 +242,7 @@ impl Default for State {
             done: 0,
             of: 0,
             generation: 0,
+            combined: None,
             written: 0,
             failed: Vec::new(),
             uncounted: Vec::new(),
@@ -281,6 +285,10 @@ impl State {
             self.uncounted.clear();
         }
         self.root = root.clone();
+        self.combined = root
+            .as_deref()
+            .map(crate::refresh::together_path)
+            .filter(|p| p.is_file());
 
         let Some(root) = root else {
             self.entries.clear();
@@ -471,25 +479,58 @@ impl State {
         if !self.ready() {
             return None;
         }
+        let order = self.picked();
+        let mut targets = Vec::with_capacity(order.len());
+        for i in order {
+            self.entries[i].outcome = Outcome::Queued;
+            targets.push(self.entries[i].target.clone());
+        }
+        self.begin(targets.len());
+        Some(targets)
+    }
+
+    /// The ticked rows, in the order the list shows them, hidden ones last.
+    fn picked(&self) -> Vec<usize> {
         let mut order = self.visible();
         let hidden: Vec<usize> = (0..self.entries.len())
             .filter(|i| !order.contains(i))
             .collect();
         order.extend(hidden);
         order.retain(|&i| self.selected.contains(self.entries[i].target.path()));
-        let mut targets = Vec::with_capacity(order.len());
-        for i in order {
-            self.entries[i].outcome = Outcome::Queued;
-            targets.push(self.entries[i].target.clone());
+        order
+    }
+
+    /// Whether "one report over the ticked" does anything: two or more ticked,
+    /// in a folder.
+    pub fn ready_together(&self) -> bool {
+        self.ready() && self.selected.len() > 1 && self.root.as_deref().is_some_and(Path::is_dir)
+    }
+
+    /// One report over every ticked row, written into the folder: the folder,
+    /// and the rows to read. The rows keep their own outcomes and ticks; the
+    /// run is one item, the combined report.
+    pub fn start_together(&mut self) -> Option<(PathBuf, Vec<Target>)> {
+        if !self.ready_together() {
+            return None;
         }
+        let root = self.root.clone()?;
+        let targets: Vec<Target> = self
+            .picked()
+            .into_iter()
+            .map(|i| self.entries[i].target.clone())
+            .collect();
+        self.begin(1);
+        Some((root, targets))
+    }
+
+    fn begin(&mut self, of: usize) {
         self.running = true;
         self.stopping = false;
         self.done = 0;
-        self.of = targets.len();
+        self.of = of;
         self.written = 0;
         self.failed.clear();
         self.status = "Starting".into();
-        Some(targets)
     }
 
     /// Report on one row, whatever is ticked: a row's own Report action.
@@ -516,13 +557,7 @@ impl State {
                 e.outcome = Outcome::Queued;
             }
         }
-        self.running = true;
-        self.stopping = false;
-        self.done = 0;
-        self.of = targets.len();
-        self.written = 0;
-        self.failed.clear();
-        self.status = "Starting".into();
+        self.begin(targets.len());
         Some(targets)
     }
 
@@ -573,7 +608,8 @@ impl State {
                         e.outcome = Outcome::Failed(error.clone());
                         e.title.clone()
                     })
-                    .unwrap_or_default();
+                    // Not a row: the combined report, or a chat elsewhere.
+                    .unwrap_or_else(|| path.display().to_string());
                 self.failed.push(format!("{name}: {error}"));
             }
             Progress::Finished { stopped } => {

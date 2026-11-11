@@ -136,6 +136,17 @@ impl Shell {
                 self.rebuild_rows();
             }
 
+            Event::PeopleProgress(line) => {
+                if self.counting {
+                    self.people.working = Some(line);
+                }
+            }
+            Event::People(list) => {
+                self.counting = false;
+                self.status = format!("{} people", tgx_ui::thousands(list.people.len() as i64));
+                self.people.set(*list);
+            }
+
             Event::ChatStarted { chat_id, title } => {
                 self.queue.began(chat_id);
                 self.status = format!("Exporting {title}");

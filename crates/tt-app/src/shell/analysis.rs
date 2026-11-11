@@ -23,7 +23,8 @@ use std::time::SystemTime;
 use eframe::egui::{self, Align, Layout, Sense, Ui};
 use tga_run::job::{self, Counted, Request, Wake};
 use tga_run::open;
-use tga_run::refresh::Source;
+use tga_run::people::Tally;
+use tga_run::refresh::{self, Source};
 use tga_run::state::{Mark, Pick, Show, Sort, State};
 use tgx_ui::components::{
     action, badge, button, field, figure, meta, row, rule, text, tick_mark, EmptyState, GUTTER,
@@ -34,6 +35,7 @@ use tgx_ui::tokens::{space, Palette};
 // value, so a title over a caption sits the same in both views and changing
 // one cannot leave the other behind.
 use super::chats::ROW_HEIGHT;
+use super::people::Asked;
 
 /// How wide the filter box is. **Fixed**, for the chat list's reason: a field
 /// stretched across the window advertises room for a sentence, and what goes
@@ -72,6 +74,11 @@ pub struct Analysis {
     pub(super) search_all: Option<(String, String)>,
     /// Ctrl+F was pressed: the filter box takes the focus when next drawn.
     pub(super) focus_filter: bool,
+    /// Everybody in the listed exports, counted once each. Shown in place of
+    /// the list while open.
+    people: super::people::People,
+    /// The count behind it, while one runs.
+    people_count: Option<Receiver<Tally>>,
 }
 
 /// What a click on one of a row's own actions asked for.
@@ -147,13 +154,67 @@ impl Analysis {
     /// Whether a worker still has something to say — for the screenshot,
     /// which must not photograph a list whose figures are still blank.
     pub(super) fn busy(&self) -> bool {
-        self.counts.is_some() || self.run.is_some()
+        self.counts.is_some() || self.run.is_some() || self.people_count.is_some()
+    }
+
+    /// Bring the saved list in this folder up to date with every listed
+    /// export, off the paint thread: only what changed is read.
+    fn count_people(&mut self, ctx: &egui::Context) {
+        let Some(dir) = self.people_dir() else {
+            return;
+        };
+        let targets: Vec<_> = self
+            .state
+            .entries
+            .iter()
+            .map(|e| e.target.clone())
+            .collect();
+        self.people.working = Some(format!("reading 0 of {} exports", targets.len()));
+        self.people_count = Some(tga_run::people::count(
+            dir,
+            targets,
+            self.state.handles_only,
+            wake(ctx),
+        ));
+    }
+
+    /// Where this folder's `people.json` is. A database pointed at directly
+    /// keeps its list in its own folder.
+    fn people_dir(&self) -> Option<PathBuf> {
+        self.state
+            .folder()
+            .map(|f| if f.is_file() { refresh::beside(&f) } else { f })
+    }
+
+    /// The folder changed: what was counted is somebody else's list.
+    fn forget_people(&mut self) {
+        self.people = Default::default();
+        self.people_count = None;
+    }
+
+    fn drain_people(&mut self) {
+        let Some(rx) = &self.people_count else {
+            return;
+        };
+        for tally in rx.try_iter().collect::<Vec<_>>() {
+            match tally {
+                Tally::Read { done, of } => {
+                    self.people.working = Some(format!("reading {done} of {of} exports"));
+                }
+                Tally::Done(list) => {
+                    self.people.set(list);
+                    self.people_count = None;
+                    return;
+                }
+            }
+        }
     }
 
     /// Re-read the folder in the field, and send whatever is new off to be
     /// counted.
     fn rescan(&mut self, ctx: &egui::Context) {
         let todo = self.state.rescan();
+        self.forget_people();
         self.count(todo, ctx);
     }
 
@@ -166,6 +227,7 @@ impl Analysis {
 
     fn set_path(&mut self, path: &Path, ctx: &egui::Context) {
         let todo = self.state.set_path(path);
+        self.forget_people();
         self.count(todo, ctx);
     }
 
@@ -230,11 +292,28 @@ impl Analysis {
         let Some(targets) = targets else {
             return;
         };
+        self.spawn_request(targets, None, ctx);
+    }
+
+    /// One report over every ticked row, into the folder.
+    fn start_together(&mut self, ctx: &egui::Context) {
+        if let Some((root, targets)) = self.state.start_together() {
+            self.spawn_request(targets, Some(root), ctx);
+        }
+    }
+
+    fn spawn_request(
+        &mut self,
+        targets: Vec<tga_run::refresh::Target>,
+        together: Option<PathBuf>,
+        ctx: &egui::Context,
+    ) {
         let request = Request {
             targets,
             write_digest: self.state.write_digest,
             embed_fonts: self.state.embed_fonts,
             handles_only: self.state.handles_only,
+            together,
         };
         self.run = Some(job::spawn(request, wake(ctx)));
     }
@@ -258,6 +337,7 @@ impl Analysis {
     pub(super) fn drain(&mut self, ctx: &egui::Context) {
         self.drain_counts();
         self.drain_run();
+        self.drain_people();
         // What the rescan ending a run found, once no count is running —
         // starting one drops the last (`State::take_uncounted`).
         if self.counts.is_none() {
@@ -348,6 +428,10 @@ impl Analysis {
         let running = self.state.running;
         let label = report_label(self.state.selected.len(), running);
         let root = self.state.root.clone().filter(|r| r.is_dir());
+        // People has its own head, with its own way back.
+        if self.people.open {
+            return;
+        }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             // **The one red.** Everything else on the bar leads to it.
@@ -357,7 +441,36 @@ impl Analysis {
             if running && button(ui, "Stop", !self.state.stopping, false, p).clicked() {
                 self.stop();
             }
+            if button(
+                ui,
+                "One report for all",
+                self.state.ready_together(),
+                false,
+                p,
+            )
+            .on_hover_text("A single report over every ticked chat, written into this folder")
+            .clicked()
+            {
+                self.start_together(ctx);
+            }
+            if let Some(combined) = self.state.combined.clone() {
+                if button(ui, "Open combined", !running, false, p).clicked() {
+                    self.open_report(&combined);
+                }
+            }
             ui.add_space(space::STEP);
+            if button(ui, "People", !self.state.entries.is_empty(), false, p)
+                .on_hover_text(
+                    "Everybody who wrote in these exports, and how much. Saved in \
+                     people.json here, and brought up to date each time.",
+                )
+                .clicked()
+            {
+                self.people.open = true;
+                if self.people_count.is_none() {
+                    self.count_people(ctx);
+                }
+            }
             if button(ui, "Open folder", root.is_some(), false, p).clicked() {
                 if let Some(dir) = &root {
                     if let Err(e) = open::reveal(dir) {
@@ -390,6 +503,25 @@ impl Analysis {
 
     /// The body: the list between its filter row and its foot.
     pub(super) fn panel(&mut self, ui: &mut Ui, p: &Palette) {
+        if self.people.open {
+            let idle = self.people_count.is_none();
+            let update = [(
+                "Update list",
+                idle,
+                "Read every export that changed since the last time, and save the list",
+            )];
+            let known = super::people::Known { telegram: None };
+            match self.people.panel(ui, &update, &known, p) {
+                Some(Asked::Action(_)) => self.count_people(&ui.ctx().clone()),
+                Some(Asked::Remove(id)) => {
+                    if let Some(dir) = self.people_dir() {
+                        remove_people(&mut self.people, &dir, &id, &mut self.state.status);
+                    }
+                }
+                None => {}
+            }
+            return;
+        }
         let bare = egui::Frame::NONE.fill(p.bg);
         if self.state.entries.is_empty() {
             let empty = if self.state.folder().is_none() {
@@ -725,6 +857,26 @@ impl Analysis {
     /// The run's fill, for the bar's rule. `None` between runs.
     pub(super) fn fill(&self) -> Option<f32> {
         self.state.fill()
+    }
+}
+
+/// Take a chat out of the saved list in `dir` and show what is left; a
+/// failure goes to `status`. Both People screens' Remove.
+///
+/// shortcut: on the paint thread — one read and one write of `people.json`, a
+/// blink for a few thousand people; move it to a worker if lists grow large.
+pub(super) fn remove_people(
+    people: &mut super::people::People,
+    dir: &Path,
+    id: &str,
+    status: &mut String,
+) {
+    match tga_run::people::remove(dir, id) {
+        Ok(list) => {
+            people.set(list);
+            *status = "Removed from the saved list".into();
+        }
+        Err(e) => *status = format!("Could not remove it: {e:#}"),
     }
 }
 

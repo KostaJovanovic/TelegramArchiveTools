@@ -61,13 +61,7 @@ impl Target {
     /// `.sqlite`, which the exporter makes from the chat's title, or the
     /// folder's own name.
     pub fn name(&self) -> String {
-        let path = self.path();
-        let stem = match &self.source {
-            Source::Database(_) => path.file_stem(),
-            Source::Folder(_) => path.file_name(),
-        };
-        stem.map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string())
+        name_of(&self.source)
     }
 
     /// The database file or the export folder: the row's identity.
@@ -162,7 +156,13 @@ fn target(source: Source) -> Target {
         Source::Database(db) => beside(db),
         Source::Folder(dir) => dir.clone(),
     };
-    let out = home.join("report.html");
+    let out = report_path(&source);
+    // Reports were all called `report.html` until v0.156: carried over to the
+    // chat's name, so an existing one is still found and still dated.
+    let old = home.join(OLD_REPORT);
+    if !out.exists() && old.is_file() {
+        let _ = std::fs::rename(&old, &out);
+    }
     let reported = modified(&out);
     let stale = is_stale(changed, reported, &home);
     Target {
@@ -173,6 +173,33 @@ fn target(source: Source) -> Target {
         reported,
         bytes,
     }
+}
+
+const OLD_REPORT: &str = "report.html";
+
+/// The database's name without `.sqlite`, which the exporter makes from the
+/// chat's title, or the export folder's own name.
+fn name_of(source: &Source) -> String {
+    let (Source::Database(path) | Source::Folder(path)) = source;
+    // `.` has no file name; its absolute form does.
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.clone());
+    let stem = match source {
+        Source::Database(_) => path.file_stem(),
+        Source::Folder(_) => path.file_name(),
+    };
+    stem.map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Where a source's report goes: beside it, named after the chat —
+/// `<chat> report.html`. Not `<chat>.html`: a Classic folder already holds
+/// Desktop's `messages.html`, and a chat may be called that.
+pub fn report_path(source: &Source) -> PathBuf {
+    let home = match source {
+        Source::Database(db) => beside(db),
+        Source::Folder(dir) => dir.clone(),
+    };
+    home.join(format!("{} report.html", name_of(source)))
 }
 
 /// The folder a database sits in, which is where its report and notes live.
@@ -256,15 +283,7 @@ pub fn one(
         &notes,
         options,
     );
-    // **Written beside, then renamed over.** A report is judged up to date by
-    // its modification time, so one cut short — the window closed mid-write,
-    // which does not wait for this thread — would otherwise read as current
-    // forever. A rename is all or nothing; a half-written `.part` is not a
-    // report and is never listed as one.
-    let part = target.out.with_extension("html.part");
-    std::fs::write(&part, html)
-        .and_then(|()| std::fs::rename(&part, &target.out))
-        .map_err(|e| anyhow::anyhow!("{}: {e}", target.out.display()))?;
+    write_report(&target.out, &html)?;
 
     let mut warning = None;
     if digest {
@@ -288,6 +307,78 @@ pub fn one(
         people: stats.people.speakers,
         events: notes.events.len(),
         warning,
+    })
+}
+
+/// **Written beside, then renamed over.** A report is judged up to date by
+/// its modification time, so one cut short — the window closed mid-write,
+/// which does not wait for this thread — would otherwise read as current
+/// forever. A rename is all or nothing; a half-written `.part` is not a
+/// report and is never listed as one.
+fn write_report(out: &Path, html: &str) -> Result<()> {
+    let part = out.with_extension("html.part");
+    std::fs::write(&part, html)
+        .and_then(|()| std::fs::rename(&part, out))
+        .map_err(|e| anyhow::anyhow!("{}: {e}", out.display()))
+}
+
+/// Where the report over several chats in `root` goes: in `root`, named after
+/// it, as each chat's is named after the chat.
+pub fn together_path(root: &Path) -> PathBuf {
+    report_path(&Source::Folder(root.to_path_buf()))
+}
+
+/// One report over every target at once, written to [`together_path`].
+///
+/// Read through the same steps as [`one`], then joined by
+/// [`tga_read::combine`]: each chat is a topic, a person in several chats is
+/// one person. The notes are the ones in `root`. No digest: a digest is one
+/// chat's, and each chat's own run writes it.
+pub fn together(
+    root: &Path,
+    targets: &[Target],
+    handles: bool,
+    options: &tga_report::Options,
+    progress: &mut dyn FnMut(usize, usize, &str),
+) -> Result<Written> {
+    let mut exports = Vec::with_capacity(targets.len());
+    for target in targets {
+        let each: tga_read::Progress<'_> = &mut *progress;
+        let mut export = match &target.source {
+            Source::Database(db) => tga_db::load(db, None, Some(each))?,
+            Source::Folder(dir) => tga_read::load(dir, Some(each))?,
+        };
+        // The title inside the file where there is one; it names the topic.
+        if export.name.is_empty() {
+            export.name = target.name();
+        }
+        exports.push(export);
+    }
+    let out = together_path(root);
+    let name = name_of(&Source::Folder(root.to_path_buf()));
+    let mut export = tga_read::combine(name, root.to_path_buf(), exports);
+    if export.msgs.is_empty() {
+        bail!("no messages in them");
+    }
+    if handles {
+        export.handles_only();
+    }
+    let (stats, _) = tga_metrics::analyse(&export);
+    let notes = tga_notes::load(root);
+    let html = tga_report::render(
+        &stats,
+        &tga_report::names_from_stats(&stats),
+        &notes,
+        options,
+    );
+    write_report(&out, &html)?;
+    Ok(Written {
+        out,
+        messages: export.msgs.len(),
+        topics: export.topics.len(),
+        people: stats.people.speakers,
+        events: notes.events.len(),
+        warning: None,
     })
 }
 
@@ -331,7 +422,7 @@ mod tests {
         )
         .expect("analysed");
         assert!(done.messages > 0);
-        assert!(base.join("report.html").is_file());
+        assert!(base.join("tga-app-refresh-folder report.html").is_file());
         assert!(!library(&base)[0].stale, "a fresh report is up to date");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -455,6 +546,30 @@ mod tests {
     }
 
     #[test]
+    fn one_report_over_several_chats_reads_them_all_into_the_folder() {
+        let base = std::env::temp_dir().join("tga-run-refresh-together");
+        let _ = std::fs::remove_dir_all(&base);
+        let synthetic =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tga-report/tests/synthetic/result.json");
+        for name in ["A", "B"] {
+            std::fs::create_dir_all(base.join(name)).unwrap();
+            std::fs::copy(&synthetic, base.join(name).join("result.json")).unwrap();
+        }
+        let options = tga_report::Options {
+            embed_fonts: false,
+            ..Default::default()
+        };
+        let rows = library(&base);
+        let single = one(&rows[0], false, false, &options, None).expect("one");
+        let all = together(&base, &rows, false, &options, &mut |_, _, _| {}).expect("together");
+        assert_eq!(all.messages, single.messages * 2);
+        assert_eq!(all.out, base.join("tga-run-refresh-together report.html"));
+        assert!(all.out.is_file());
+        assert_eq!(library(&base).len(), 2, "the combined report is not a row");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn a_finished_export_is_found_by_its_own_path() {
         let base = std::env::temp_dir().join("tga-run-refresh-target-for");
         let _ = std::fs::remove_dir_all(&base);
@@ -464,7 +579,7 @@ mod tests {
         std::fs::copy(&synthetic, base.join("Plain").join("result.json")).unwrap();
         let folder = target_for(&base.join("Plain")).expect("a folder export");
         assert_eq!(folder.source, Source::Folder(base.join("Plain")));
-        assert_eq!(folder.out, base.join("Plain").join("report.html"));
+        assert_eq!(folder.out, base.join("Plain").join("Plain report.html"));
         assert!(target_for(&base.join("Nowhere")).is_none());
         std::fs::create_dir_all(base.join("Empty")).unwrap();
         assert!(target_for(&base.join("Empty")).is_none());
@@ -482,18 +597,21 @@ mod tests {
         touch(&base.join("A").join("A.sqlite"), then);
         // Reported on after its last sync.
         touch(&base.join("B").join("B.sqlite"), then);
-        touch(&base.join("B").join("report.html"), then + hour);
+        touch(&base.join("B").join("B report.html"), then + hour);
         // Synced again since: the case the whole module is for.
         touch(&base.join("C").join("C.sqlite"), then + hour * 2);
-        touch(&base.join("C").join("report.html"), then + hour);
+        touch(&base.join("C").join("C report.html"), then + hour);
         // Synced in WAL mode: the main file is old, the side file is not.
         touch(&base.join("D").join("D.sqlite"), then);
         touch(&base.join("D").join("D.sqlite-wal"), then + hour * 2);
-        touch(&base.join("D").join("report.html"), then + hour);
+        touch(&base.join("D").join("D report.html"), then + hour);
         // Its notes were edited after the report.
         touch(&base.join("E").join("E.sqlite"), then);
-        touch(&base.join("E").join("report.html"), then + hour);
+        touch(&base.join("E").join("E report.html"), then + hour);
         touch(&base.join("E").join("events.json"), then + hour * 2);
+        // Reported on under the old name: renamed, and still up to date.
+        touch(&base.join("F").join("F.sqlite"), then);
+        touch(&base.join("F").join("report.html"), then + hour);
 
         let plan = plan(&base);
         let stale: Vec<(String, bool)> = plan.iter().map(|t| (t.name(), t.stale)).collect();
@@ -505,9 +623,12 @@ mod tests {
                 ("C".into(), true),
                 ("D".into(), true),
                 ("E".into(), true),
+                ("F".into(), false),
             ]
         );
-        assert_eq!(plan[1].out, base.join("B").join("report.html"));
+        assert_eq!(plan[1].out, base.join("B").join("B report.html"));
+        assert!(base.join("F").join("F report.html").is_file());
+        assert!(!base.join("F").join("report.html").exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 }

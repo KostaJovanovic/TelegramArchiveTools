@@ -175,6 +175,13 @@ pub enum Event {
         counted: usize,
         failed: usize,
     },
+    /// What the people count is doing: the chat it is on, messages read. A
+    /// title or a number, never a message.
+    PeopleProgress(String),
+    /// The people count ended, however it ended: the whole saved list, each
+    /// person once, and a line per chat it could not read whole. Boxed: it is
+    /// large, and every event is the size of the largest.
+    People(Box<tga_run::people::List>),
 
     // -- exporting --------------------------------------------------------
     ChatStarted {

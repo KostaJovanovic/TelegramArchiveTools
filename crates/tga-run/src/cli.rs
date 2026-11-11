@@ -36,8 +36,11 @@ Options
                       whose report is missing or older than the database or
                       its notes. Each report goes beside its database.
     --force           with --refresh, redo every report, changed or not
-    --out PATH        where to write the report (default: report.html beside
-                      the export)
+    --together        one report over every export in the folder, each chat
+                      as a topic, written into it as <folder> report.html.
+                      Notes come from that folder.
+    --out PATH        where to write the report (default: <chat> report.html
+                      beside the export)
     --chat ID|TITLE   which chat to read out of a database that holds more
                       than one. Default: the largest, with the others named.
     --digest          also write analysis/digest.jsonl and analysis/EVENTS.md,
@@ -92,6 +95,7 @@ pub fn run(args: Vec<String>) -> Result<()> {
     let mut refresh = false;
     let mut force = false;
     let mut handles = false;
+    let mut together = false;
 
     let mut rest = args[flags_from..].iter();
     while let Some(flag) = rest.next() {
@@ -126,6 +130,7 @@ pub fn run(args: Vec<String>) -> Result<()> {
             "--refresh" => refresh = true,
             "--force" => force = true,
             "--handles" => handles = true,
+            "--together" => together = true,
             other => bail!("Unknown option: {other}\n\n{USAGE}"),
         }
     }
@@ -140,6 +145,40 @@ pub fn run(args: Vec<String>) -> Result<()> {
 
     if force && !refresh {
         bail!("--force only means something with --refresh");
+    }
+    if together {
+        if refresh || digest || from_stats.is_some() || out.is_some() || chat.is_some() {
+            bail!("--together writes one report into the folder; it takes --handles, --no-fonts, --stamp and --quiet only");
+        }
+        let Some(folder) = folder else {
+            bail!("--together needs the folder the exports are in");
+        };
+        let targets = crate::refresh::library(&folder);
+        if targets.len() < 2 {
+            bail!(
+                "--together needs two or more exports in {}",
+                folder.display()
+            );
+        }
+        let written = crate::refresh::together(
+            &folder,
+            &targets,
+            handles,
+            &options,
+            &mut |done, total, name| {
+                if !quiet {
+                    println!("  read {done}/{total}  {name}");
+                }
+            },
+        )?;
+        println!(
+            "{} chats, {} messages, {} people",
+            targets.len(),
+            thousands(written.messages),
+            written.people
+        );
+        println!("{}", written.out.display());
+        return Ok(());
     }
     if refresh {
         // Every one of these names a single file or a single chat, and a
@@ -254,13 +293,15 @@ pub fn run(args: Vec<String>) -> Result<()> {
             );
         }
     }
-    // Beside the database, not inside it. A report written next to the file is
-    // where somebody handed the folder would look for it either way.
-    let beside = match &database {
-        Some(db) => db.parent().unwrap_or(&folder).to_path_buf(),
-        None => folder.clone(),
-    };
-    let out = out.unwrap_or_else(|| beside.join("report.html"));
+    // Beside the database, not inside it, named after the chat. A report
+    // written next to the file is where somebody handed the folder would look
+    // for it either way.
+    let out = out.unwrap_or_else(|| {
+        crate::refresh::report_path(&match &database {
+            Some(db) => crate::refresh::Source::Database(db.clone()),
+            None => crate::refresh::Source::Folder(folder.clone()),
+        })
+    });
 
     let mut progress = |done: usize, total: usize, name: &str| {
         if !quiet {
@@ -713,7 +754,7 @@ mod tests {
         run(args).expect("analysed");
 
         assert!(home.join("analysis").join("digest.jsonl").is_file());
-        let report = std::fs::read_to_string(home.join("report.html")).unwrap();
+        let report = std::fs::read_to_string(home.join("Dev report.html")).unwrap();
         assert!(report.contains("Sastanak odbora"), "the notes beside it");
         let _ = std::fs::remove_dir_all(&base);
     }

@@ -619,6 +619,88 @@ pub async fn count_chats(settings: Settings, chat_ids: Vec<i64>, cancel: Cancel,
     let _ = tx.send(Event::CountFinished { counted, failed });
 }
 
+/// Count the people in `chats` from Telegram — their member lists, or with
+/// `messages` every message counted by sender — and fold each chat read whole
+/// into the saved list in the destination (`tga_run::people::Book`). Then the
+/// whole saved list goes back to the window. With no chats it only reads the
+/// list. A count, so it runs under the count's flag and Stop.
+pub async fn count_people(
+    settings: Settings,
+    chats: Vec<(i64, String)>,
+    messages: bool,
+    cancel: Cancel,
+    tx: Events,
+) {
+    on_panic(|why| Activity::Count.ending(why));
+    let dir = std::path::PathBuf::from(&settings.output_dir);
+    let mut notes = Vec::new();
+    let mut counted = Vec::new();
+    if !chats.is_empty() {
+        match census(&settings, &chats, messages, &cancel, &tx).await {
+            Ok(c) => {
+                if c.stopped {
+                    notes.push("Stopped; chats not finished were left as they were".into());
+                }
+                notes.extend(c.short);
+                counted = c.chats;
+            }
+            Err(Some(why)) => notes.push(why),
+            // Said already, by `ready`.
+            Err(None) => {}
+        }
+    }
+    let list = match tga_run::people::Book::load(&dir) {
+        Ok(mut book) => {
+            for chat in &counted {
+                if messages {
+                    book.put_messages(chat.id, &chat.title, chat.people.clone());
+                } else {
+                    let names = chat.people.iter().map(|(k, (n, _))| (k.clone(), n.clone()));
+                    book.put_members(chat.id, &chat.title, names.collect());
+                }
+            }
+            if !counted.is_empty() {
+                if let Err(e) = book.save(&dir) {
+                    notes.push(format!("The list could not be saved: {e:#}"));
+                }
+            }
+            book.list(&dir, notes)
+        }
+        Err(e) => {
+            notes.push(format!("{e:#}; nothing was saved"));
+            tga_run::people::List {
+                notes,
+                ..Default::default()
+            }
+        }
+    };
+    let _ = tx.send(Event::People(Box::new(list)));
+}
+
+/// [`count_people`]'s Telegram half. `Err(None)` when `ready` has already
+/// said why.
+async fn census(
+    settings: &Settings,
+    chats: &[(i64, String)],
+    messages: bool,
+    cancel: &Cancel,
+    tx: &Events,
+) -> Result<tgx_tg::people::Census, Option<String>> {
+    let session = Session::connect(settings)
+        .await
+        .map_err(|e| Some(e.to_string()))?;
+    if !ready(&session, tx, Activity::Count).await {
+        return Err(None);
+    }
+    let tx_say = tx.clone();
+    let mut say = move |line: String| {
+        let _ = tx_say.send(Event::PeopleProgress(line));
+    };
+    tgx_tg::people::census(&session.client, chats, settings, messages, cancel, &mut say)
+        .await
+        .map_err(|e| Some(format!("Could not read the chat list: {e}")))
+}
+
 mod export;
 pub mod viewer;
 

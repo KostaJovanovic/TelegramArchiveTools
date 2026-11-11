@@ -13,6 +13,7 @@ pub mod import;
 pub mod logging;
 pub mod merge;
 pub mod output;
+pub mod people;
 pub mod plan;
 pub mod split;
 pub mod unpack;

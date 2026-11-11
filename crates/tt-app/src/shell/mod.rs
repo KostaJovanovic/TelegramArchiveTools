@@ -22,6 +22,7 @@ mod chrome;
 mod commands;
 mod events;
 mod keys;
+mod people;
 mod queue;
 mod settings;
 mod signin;
@@ -190,6 +191,9 @@ pub struct Shell {
     loaded: bool,
     exporting: bool,
     counting: bool,
+    /// The ticked chats' people, from Telegram. Shown in place of the chat
+    /// list while open; its counting runs under `counting`.
+    people: people::People,
     /// Update databases is reading the destination. Short, but long enough on
     /// a network drive for a second press to start a second scan.
     scanning: bool,
@@ -404,6 +408,7 @@ impl Shell {
             loaded: false,
             exporting: false,
             counting: false,
+            people: Default::default(),
             scanning: false,
             checking: false,
             deduping: false,

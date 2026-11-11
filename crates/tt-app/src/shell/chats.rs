@@ -6,6 +6,7 @@
 //! that callback would be work done sixty times a second for an answer that
 //! changed once.
 
+use super::people::Asked;
 use super::*;
 use crate::list::{Presence, SortMode};
 use chrono::{DateTime, Local};
@@ -47,6 +48,10 @@ impl Shell {
     /// and any type size rather than at the one it was measured on.
     pub(super) fn chat_panel(&mut self, ui: &mut Ui) {
         let p = self.palette;
+        if self.people.open {
+            self.people_panel(ui);
+            return;
+        }
         let bare = egui::Frame::NONE.fill(p.bg);
 
         egui::TopBottomPanel::top("chats-head")
@@ -207,6 +212,19 @@ impl Shell {
                 {
                     self.start_count();
                 }
+                // Nothing ticked opens the saved list, which needs no sign-in.
+                let people =
+                    !busy && !self.scanning && (self.signed_in || self.selected.is_empty());
+                if button(ui, "People", people, false, &p)
+                    .on_hover_text(
+                        "Everybody counted so far, each person once however many chats \
+                         they are in. The ticked chats' member lists are read and added \
+                         first. Saved in people.json in the export folder.",
+                    )
+                    .clicked()
+                {
+                    self.start_people(false);
+                }
                 if button(ui, "Reload", self.signed_in && !busy, false, &p)
                     .on_hover_text("Reload chats from Telegram")
                     .clicked()
@@ -228,6 +246,60 @@ impl Shell {
                 self.status = "No message counts yet — press Count".into();
             }
             self.commit_settings();
+        }
+    }
+
+    /// The ticked chats' people, in place of the list.
+    fn people_panel(&mut self, ui: &mut Ui) {
+        let p = self.palette;
+        // A count that ended without saying so (a panic's ending) leaves
+        // nothing working.
+        if !self.counting {
+            self.people.working = None;
+        }
+        let idle = self.signed_in && !self.counting && !self.exporting && !self.selected.is_empty();
+        let actions: &[(&'static str, bool, &str)] = if self.counting {
+            &[(
+                "Stop",
+                true,
+                "Stop; chats finished so far are saved, the rest left as they were",
+            )]
+        } else {
+            &[
+                (
+                    "Members",
+                    idle,
+                    "Read the ticked chats' member lists and update them in the saved \
+                     list. Seconds; no message counts.",
+                ),
+                (
+                    "Count messages",
+                    idle,
+                    "Read every message of the ticked chats, count them by person and \
+                     update them in the saved list. Exact, people who left included, but \
+                     as slow as an export without media: minutes for a large group.",
+                ),
+            ]
+        };
+        // Gone from Telegram is only known once the chat list has loaded.
+        let ids: Option<std::collections::HashSet<i64>> = self
+            .loaded
+            .then(|| self.chats.iter().map(|c| c.id).collect());
+        let known = super::people::Known {
+            telegram: ids.as_ref(),
+        };
+        match self.people.panel(ui, actions, &known, &p) {
+            Some(Asked::Action("Stop")) => {
+                self.cancel.cancel();
+                self.people.working = Some("stopping…".into());
+            }
+            Some(Asked::Action("Members")) => self.start_people(false),
+            Some(Asked::Action("Count messages")) => self.start_people(true),
+            Some(Asked::Remove(id)) if !self.counting => {
+                let dir = std::path::PathBuf::from(&self.settings.output_dir);
+                super::analysis::remove_people(&mut self.people, &dir, &id, &mut self.status);
+            }
+            _ => {}
         }
     }
 

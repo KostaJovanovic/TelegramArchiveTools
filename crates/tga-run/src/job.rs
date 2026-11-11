@@ -69,6 +69,9 @@ pub struct Request {
     pub write_digest: bool,
     pub embed_fonts: bool,
     pub handles_only: bool,
+    /// One report over all of `targets`, written into this folder
+    /// (`refresh::together`), instead of one each.
+    pub together: Option<PathBuf>,
 }
 
 /// What the notes section says wrote the file.
@@ -193,6 +196,33 @@ fn run(request: Request, stop: &AtomicBool, tx: Waking<Progress>) {
     };
     let total = request.targets.len();
     let tx = &tx;
+    if let Some(root) = &request.together {
+        // One item, so Stop has nothing to stop between.
+        let path = root.clone();
+        tx.send(Progress::Started(path.clone()));
+        let mut report = |_done: usize, _total: usize, topic: &str| {
+            tx.send(Progress::Step {
+                path: path.clone(),
+                label: format!("All {total} together: reading {topic}"),
+            });
+        };
+        let outcome = crate::refresh::together(
+            root,
+            &request.targets,
+            request.handles_only,
+            &options,
+            &mut report,
+        );
+        tx.send(match outcome {
+            Ok(written) => Progress::Wrote { path, written },
+            Err(e) => Progress::Failed {
+                path,
+                error: format!("{e:#}"),
+            },
+        });
+        tx.send(Progress::Finished { stopped: false });
+        return;
+    }
     let stopped = in_parallel(&request.targets, workers(total), stop, |index, target| {
         let name = target.name();
         let head = format!("{}/{total}  {name}", index + 1);
@@ -304,7 +334,7 @@ mod tests {
             .next()
             .unwrap_or_else(|| Target {
                 source: Source::Folder(dir.to_path_buf()),
-                out: dir.join("report.html"),
+                out: crate::refresh::report_path(&Source::Folder(dir.to_path_buf())),
                 stale: true,
                 changed: None,
                 reported: None,
@@ -319,7 +349,7 @@ mod tests {
         // describing nothing.
         let dir = std::env::temp_dir().join("tga-app-empty-folder");
         std::fs::create_dir_all(&dir).expect("mkdir");
-        let out = dir.join("report.html");
+        let out = crate::refresh::report_path(&Source::Folder(dir.clone()));
         let _ = std::fs::remove_file(&out);
 
         let (tx, rx) = channel();
@@ -330,6 +360,7 @@ mod tests {
                 write_digest: false,
                 embed_fonts: false,
                 handles_only: false,
+                together: None,
             },
             &AtomicBool::new(false),
             Waking { tx, wake },
@@ -391,6 +422,7 @@ mod tests {
                 write_digest: false,
                 embed_fonts: false,
                 handles_only: false,
+                together: None,
             },
             &AtomicBool::new(true),
             Waking {

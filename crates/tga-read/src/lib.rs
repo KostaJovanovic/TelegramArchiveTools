@@ -1122,10 +1122,135 @@ pub fn load(root: &Path, mut progress: Option<Progress<'_>>) -> Result<Export> {
     Ok(export)
 }
 
+/// Several chats as one export, for a report over all of them.
+///
+/// **Each chat's topics become topics here**, named `chat` — or `chat / topic`
+/// for a forum's — so the per-topic figures are the per-chat ones.
+///
+/// **Message ids are moved apart, chat by chat.** They are unique only inside
+/// a chat (see [`load`]), so the `n`th chat's ids, replies and pins are offset
+/// by `n << 32`; Telegram's ids fit in 31 bits. A sender is a peer key, which
+/// is the same account in every chat, so a person in three groups is one
+/// person here.
+///
+/// **The roster is the union by user id**, so someone in three groups is one
+/// member, and the member count is that union's size: the chats' own counts
+/// summed would count them three times. The id is the key without its `user`
+/// prefix, since a hand-written `participants.json` may give a bare number.
+/// A chat with no member list leaves the count unknown, as it would alone.
+pub fn combine(name: String, root: PathBuf, exports: Vec<Export>) -> Export {
+    let mut out = Export {
+        name,
+        root,
+        ..Default::default()
+    };
+    let mut seen = HashSet::new();
+    let mut complete = Some(true);
+    let mut capped = Some(false);
+    let mut every_listed = !exports.is_empty();
+    for (n, export) in exports.into_iter().enumerate() {
+        every_listed &= !export.roster.is_empty();
+        let shift = (n as i64) << 32;
+        let base = out.topics.len();
+        let forum = export.topics.len() > 1;
+        for mut topic in export.topics {
+            topic.index += base;
+            topic.root = topic.root.map(|r| r + shift);
+            if forum {
+                topic.name = format!("{} / {}", export.name, topic.name);
+            } else {
+                topic.name.clone_from(&export.name);
+            }
+            out.topics.push(topic);
+        }
+        for mut msg in export.msgs {
+            msg.id += shift;
+            msg.topic += base;
+            msg.reply_to = msg.reply_to.map(|r| r + shift);
+            msg.pinned = msg.pinned.map(|p| p + shift);
+            out.msgs.push(msg);
+        }
+        for member in export.roster {
+            let id = member.key.strip_prefix("user").unwrap_or(&member.key);
+            if seen.insert(id.to_string()) {
+                out.roster.push(member);
+            }
+        }
+        complete = complete.zip(export.roster_complete).map(|(a, b)| a && b);
+        capped = capped.zip(export.roster_capped).map(|(a, b)| a || b);
+    }
+    out.roster_complete = complete;
+    out.roster_capped = capped;
+    out.members_count = every_listed.then_some(out.roster.len() as i64);
+    out.msgs
+        .sort_by(|a, b| a.unix.cmp(&b.unix).then_with(|| a.id.cmp(&b.id)));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn combined_chats_keep_their_replies_apart() {
+        let chat = |name: &str, text: &str, ids: &[Value]| {
+            let topic = Topic {
+                index: 0,
+                name: "whatever".into(),
+                folder: PathBuf::new(),
+                chat_id: None,
+                chat_type: String::new(),
+                created: None,
+                messages: 2,
+                root: None,
+            };
+            let first = one(&msg(json!({"id": 1, "text": text})), 0, None).unwrap();
+            let reply = one(&msg(json!({"id": 2, "reply_to_message_id": 1})), 0, None).unwrap();
+            Export {
+                name: name.into(),
+                topics: vec![topic],
+                msgs: vec![first, reply],
+                roster: ids
+                    .iter()
+                    .filter_map(|id| member(&json!({"id": id, "name": "x"})))
+                    .collect(),
+                roster_complete: Some(true),
+                members_count: Some(99),
+                ..Default::default()
+            }
+        };
+        // user1 is in both; once as a bare number, as a hand-written list
+        // might give it.
+        let all = combine(
+            "All".into(),
+            PathBuf::new(),
+            vec![
+                chat("A", "a", &[json!("user1"), json!("user2")]),
+                chat("B", "b", &[json!(1), json!("user3")]),
+            ],
+        );
+        assert_eq!(all.roster.len(), 3, "a member of both is one member");
+        assert_eq!(all.members_count, Some(3), "not 99 + 99");
+        let unlisted = combine(
+            "All".into(),
+            PathBuf::new(),
+            vec![chat("A", "a", &[json!("user1")]), chat("B", "b", &[])],
+        );
+        assert_eq!(unlisted.members_count, None, "B's members are unknown");
+        let names: Vec<&str> = all.topics.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["A", "B"]);
+        assert_eq!(all.by_id().len(), 4, "no id is shared");
+        let index = all.by_id();
+        for reply in all.msgs.iter().filter(|m| m.reply_to.is_some()) {
+            let parent = &all.msgs[index[&reply.reply_to.unwrap()]];
+            assert_eq!(
+                parent.topic, reply.topic,
+                "a reply finds its own chat's message"
+            );
+        }
+        assert_eq!(all.roster_complete, Some(true));
+    }
 
     fn msg(extra: Value) -> Value {
         let mut base = json!({

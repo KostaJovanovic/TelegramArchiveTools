@@ -205,6 +205,35 @@ impl Shell {
             .spawn(async move { crate::actions::count_chats(settings, ids, cancel, tx).await });
     }
 
+    /// Count the people in the ticked chats — member lists, or with `messages`
+    /// every message — into the saved list in the destination, and show it.
+    /// Nothing ticked shows the saved list as it is. Stop is the count's own.
+    pub(super) fn start_people(&mut self, messages: bool) {
+        if self.counting || self.exporting || self.scanning {
+            return;
+        }
+        let chats: Vec<(i64, String)> = self
+            .chats
+            .iter()
+            .filter(|c| self.selected.contains(&c.id))
+            .map(|c| (c.id, c.title.clone()))
+            .collect();
+        self.cancel.reset();
+        self.counting = true;
+        self.people.open = true;
+        self.people.working = Some(match (chats.is_empty(), messages) {
+            (true, _) => "reading the saved list…".into(),
+            (false, true) => "reading every message…".into(),
+            (false, false) => "reading member lists…".into(),
+        });
+        let tx = self.bridge.sender();
+        let settings = self.settings.clone();
+        let cancel = self.cancel.clone();
+        self.bridge.spawn(async move {
+            crate::actions::count_people(settings, chats, messages, cancel, tx).await
+        });
+    }
+
     /// The per-run state a new export resets.
     ///
     /// Split out of [`Self::start_export`] because that needs a `Window` and

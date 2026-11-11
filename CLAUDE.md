@@ -344,12 +344,32 @@ connection: one round trip per process, not per action.
 setter, `Shell::set_count`. The queue owns what a run did, so no worker composes
 its own summary. The second writer always wins a race you did not know you had.
 
+**People** is one screen (`tt-app/src/shell/people.rs`) over one saved list,
+`people.json` in the export folder (`tga_run::people::Book`): per chat, by
+chat id, its member list and its message counts. Every count replaces the
+chats it read whole and leaves the rest, so the list grows, and a chat read
+from Telegram and from its export is one entry, never counted twice. Chats ›
+People asks Telegram about the ticked chats (`tgx_tg::people`): member lists,
+or with Count messages every message counted by sender, no media; it runs
+under the count's `counting` flag and Stop. Analysis › People re-reads only
+the exports whose size or time changed. A person is a peer key (`user123`),
+never a name. **Organisations** are ReVision's `organisations.csv`, same
+columns, beside `people.json`; a tag in a person's name names one.
+**A `people.json` that will not parse is an error, never an empty list**, so
+it is never overwritten. The Chats tab removes a chat (pressed twice) and marks
+one **gone** on evidence only: its export file missing, or — once the Telegram
+chat list has loaded — a Telegram-counted chat no longer in it.
+
 ## The analyser
 
 Point it at a finished export, folder or database, and it writes one
-self-contained `report.html` beside it. In the window it is the **Analysis**
-view (`tt-app/src/shell/analysis.rs`): every export under a folder is a row,
-with what needs a report already ticked. The folder it opens on is the
+self-contained `<chat> report.html` beside it (`refresh::report_path`; an
+older `report.html` is renamed to it on the next scan). In the window it is the
+**Analysis** view (`tt-app/src/shell/analysis.rs`): every export under a folder
+is a row, with what needs a report already ticked. **One report for all**
+(`--together`) writes `<folder> report.html` over the ticked rows:
+`tga_read::combine` makes each chat a topic and moves message ids apart by
+`n << 32`, since an id is unique only inside its chat. The folder it opens on is the
 exporter's destination, and it lists the Classic folders there one per chat
 beside the databases. A row's **Read** is the way into the Viewer, which is
 not on the rail; a summary's citation is the other, and its way back returns

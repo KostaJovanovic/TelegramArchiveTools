@@ -5,7 +5,7 @@ Keep your own copy of your Telegram conversations, and read them back.
 - **Export** a chat as web pages you can open in any browser and as JSON,
   exactly as Telegram Desktop would write them — or as one database per chat
   that each run adds to, keeping what was later edited or deleted.
-- **Report** on any export: one self-contained `report.html` beside it, with
+- **Report** on any export: one self-contained `<chat> report.html` beside it, with
   who talks, when, how fast people answer, and what changed. It never touches
   the network.
 
@@ -80,7 +80,7 @@ Dev Team/
   0001 - General/
     messages.html        ← start here
     result.json
-    report.html          ← once you make one
+    Dev Team report.html ← once you make one
     photos/  video_files/  voice_messages/  files/  stickers/ …
   0042 - Backend/
   0043 - Design 🎨/
@@ -90,7 +90,7 @@ Open `messages.html` and you have the conversation as it looked: text,
 replies, media, reactions, polls, joins and leaves, oldest message first. Media
 lives in the folder next to the pages, so you can move the whole thing to a
 drive, zip it, hand it to someone — it reads offline, forever, with nothing
-installed. `report.html` is the same: one file, fonts and charts inside it.
+installed. The report is the same: one file, fonts and charts inside it.
 
 Topic folders are prefixed with the topic's id. Two topics sharing a name, or
 one renamed halfway through its life, can't collide.
@@ -231,8 +231,9 @@ TelegramTools export --db --full "Dev Team"   # walk the whole history
 TelegramTools sync                            # update every database in Exports
 TelegramTools sync --json                     # the same, with a JSON summary
 
-TelegramTools analyse "Exports\Dev Team"      # write report.html beside it
+TelegramTools analyse "Exports\Dev Team"      # write "Dev Team report.html" beside it
 TelegramTools analyse Exports --refresh       # every export whose report is behind
+TelegramTools analyse Exports --together      # one report over every chat in Exports
 
 TelegramTools summarise "Exports\Dev Team\Dev Team.sqlite" --from 2026-01-05 --to 2026-01-11 --detailed
 ```
